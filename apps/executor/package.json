@@ -1,0 +1,21 @@
+{
+  "name": "@capitaldesk/executor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The only component permitted to hold the VENUE_TRADE credential and sign venue orders.",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@capitaldesk/config": "workspace:*",
+    "@capitaldesk/contracts": "workspace:*",
+    "@capitaldesk/observability": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

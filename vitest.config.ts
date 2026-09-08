@@ -35,7 +35,10 @@ export default defineConfig({
           // Real PostgreSQL, real processes. Skips itself with a clear message when
           // CAPITALDESK_TEST_DATABASE_URL is absent, and is never silently counted as
           // passing coverage it did not exercise.
-          include: ['packages/*/src/**/*.integration.test.ts'],
+          include: [
+            'packages/*/src/**/*.integration.test.ts',
+            'apps/*/src/**/*.integration.test.ts',
+          ],
           environment: 'node',
           testTimeout: 30_000,
         },
