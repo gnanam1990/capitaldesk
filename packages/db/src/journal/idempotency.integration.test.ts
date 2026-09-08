@@ -28,11 +28,12 @@ describeIfDatabase('idempotency records', () => {
     await harness.cleanup();
   });
 
-  const now = new Date('2026-09-08T12:00:00Z');
+  const RETENTION_MS = 400;
   const scope = { scopeKind: 'pool' as const, scopeId: `${WORKSPACE}/${POOL}`, key: 'key-1' };
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-  async function perform(digest: string, at = now) {
-    const begun = await idempotency.begin({ ...scope, requestDigest: digest, now: at });
+  async function perform(digest: string) {
+    const begun = await idempotency.begin({ ...scope, requestDigest: digest });
     if (begun.kind !== 'fresh') return begun;
     await serializable(harness.pool, async (client) => {
       await client.query(`UPDATE pools SET state = 'HALTED'`);
@@ -43,8 +44,7 @@ describeIfDatabase('idempotency records', () => {
         economicRef: 'halt-1',
         status: 200,
         body: { state: 'HALTED' },
-        retentionMs: 60_000,
-        now: at,
+        retentionMs: RETENTION_MS,
       });
     });
     return begun;
@@ -52,7 +52,7 @@ describeIfDatabase('idempotency records', () => {
 
   it('replays the stored response for the same body', async () => {
     expect(await perform('digest-a')).toEqual({ kind: 'fresh' });
-    expect(await perform('digest-a', new Date(now.getTime() + 1000))).toEqual({
+    expect(await perform('digest-a')).toEqual({
       kind: 'replay',
       status: 200,
       body: { state: 'HALTED' },
@@ -66,9 +66,11 @@ describeIfDatabase('idempotency records', () => {
 
   it('keeps the tombstone after the response expires, so the action cannot run again', async () => {
     await perform('digest-a');
-    const discarded = await idempotency.discardExpiredResponses({
-      now: new Date(now.getTime() + 61_000),
-    });
+    // Real time, because the retention deadline is the database's. A caller-supplied clock
+    // could otherwise declare a retained response lapsed, and the table's own guard now
+    // refuses an early clear anyway.
+    await sleep(RETENTION_MS + 150);
+    const discarded = await idempotency.discardExpiredResponses();
     expect(discarded).toBe(1);
     const row = await harness.admin.query<{ response_body: unknown; economic_ref: string }>(
       'SELECT response_body, economic_ref FROM idempotency_results',
@@ -76,13 +78,13 @@ describeIfDatabase('idempotency records', () => {
     expect(row.rows[0]).toEqual({ response_body: null, economic_ref: 'halt-1' });
 
     // The same request again: not fresh. The body is gone, the decision is not.
-    expect(await perform('digest-a', new Date(now.getTime() + 62_000))).toEqual({
+    expect(await perform('digest-a')).toEqual({
       kind: 'replay-expired',
       action: 'POOL_HALT',
       economicRef: 'halt-1',
     });
     // And a changed body is still a conflict.
-    expect(await perform('digest-b', new Date(now.getTime() + 62_000))).toEqual({
+    expect(await perform('digest-b')).toEqual({
       kind: 'conflict',
       action: 'POOL_HALT',
     });
@@ -107,7 +109,7 @@ describeIfDatabase('idempotency records', () => {
   });
 
   it('records the response in the same transaction as the action', async () => {
-    const begun = await idempotency.begin({ ...scope, requestDigest: 'digest-a', now });
+    const begun = await idempotency.begin({ ...scope, requestDigest: 'digest-a' });
     expect(begun).toEqual({ kind: 'fresh' });
     await expect(
       serializable(harness.pool, async (client) => {
@@ -120,7 +122,6 @@ describeIfDatabase('idempotency records', () => {
           status: 200,
           body: {},
           retentionMs: 1000,
-          now,
         });
         throw new Error('injected failure');
       }),
@@ -129,7 +130,7 @@ describeIfDatabase('idempotency records', () => {
     expect((await harness.admin.query(`SELECT 1 FROM pools WHERE state = 'HALTED'`)).rowCount).toBe(
       0,
     );
-    expect(await idempotency.begin({ ...scope, requestDigest: 'digest-a', now })).toEqual({
+    expect(await idempotency.begin({ ...scope, requestDigest: 'digest-a' })).toEqual({
       kind: 'fresh',
     });
   });

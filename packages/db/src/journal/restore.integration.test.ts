@@ -142,7 +142,7 @@ describeIfDatabase('restart and restore posture', () => {
       attemptId: 'attempt-unknown',
       outboxId: 'ob-send',
       signedRequest: {},
-      host: { bootId: 'b', pid: 1 },
+      host: { bootId: 'b', pid: 1, processStartedAt: new Date('2026-09-08T00:00:00Z') },
     });
     await dispatch.recordSendAttempted({
       workspaceId: WORKSPACE,

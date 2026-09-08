@@ -186,7 +186,7 @@ describeIfDatabase('governance lease', () => {
       attemptId: 'attempt-1',
       outboxId: 'outbox-1',
       signedRequest: { signed: true },
-      host: { bootId: 'boot-1', pid: 1 },
+      host: { bootId: 'boot-1', pid: 1, processStartedAt: new Date('2026-09-08T00:00:00Z') },
     });
     await dispatch.resolve({
       workspaceId: WORKSPACE,
@@ -285,7 +285,7 @@ describeIfDatabase('governance lease', () => {
       attemptId: 'attempt-1',
       outboxId: 'ob-1',
       signedRequest: {},
-      host: { bootId: 'b', pid: 1 },
+      host: { bootId: 'b', pid: 1, processStartedAt: new Date('2026-09-08T00:00:00Z') },
     });
     await dispatch.resolve({
       workspaceId: WORKSPACE,
@@ -308,6 +308,26 @@ describeIfDatabase('governance lease', () => {
       poolId: POOL,
       attemptId: 'attempt-1',
       to: 'IRRECOVERABLE_UNCERTAINTY',
+    });
+
+    // And so does the plan itself, even with no attempt outstanding: a sealed plan that has
+    // not reached a terminal outcome still carries authority against the old baseline.
+    expect(
+      await governance.rotateEpoch({ workspaceId: WORKSPACE, poolId: POOL, reason: 'reset' }),
+    ).toMatchObject({ ok: false, reason: 'PLAN_IN_FLIGHT', planIds: ['plan-1'] });
+    await dispatch.transitionPlan({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      planId: 'plan-1',
+      to: 'MANUAL_REVIEW',
+      expectedVersion: 1,
+    });
+    await dispatch.transitionPlan({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      planId: 'plan-1',
+      to: 'UNFILLED',
+      expectedVersion: 2,
     });
 
     const rotated = await governance.rotateEpoch({

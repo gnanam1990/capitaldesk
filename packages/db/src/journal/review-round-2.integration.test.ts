@@ -285,7 +285,7 @@ describeIfDatabase('2. restore and marking are mutually safe', () => {
       attemptId: 'attempt-1',
       outboxId: 'ob-1',
       signedRequest: {},
-      host: { bootId: 'b', pid: 1 },
+      host: { bootId: 'b', pid: 1, processStartedAt: new Date('2026-09-08T00:00:00Z') },
     });
 
   it('cannot mark a prepared attempt whose plan was invalidated by restore', async () => {
@@ -362,7 +362,7 @@ describeIfDatabase('2. restore and marking are mutually safe', () => {
         attemptId: 'attempt-1',
         outboxId: 'ob-1',
         signedRequest: {},
-        host: { bootId: 'b', pid: 1 },
+        host: { bootId: 'b', pid: 1, processStartedAt: new Date('2026-09-08T00:00:00Z') },
       }),
       enterRestorePostureOn(restorer.client, { reason: 'restored', now: new Date() }),
     ]);

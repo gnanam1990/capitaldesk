@@ -95,7 +95,7 @@ describeIfDatabase('dispatch attempts', () => {
         attemptId: 'attempt-1',
         outboxId: 'outbox-1',
         signedRequest: { timestamp: 1, recvWindow: 5000 },
-        host: { bootId: 'boot-1', pid: 42 },
+        host: { bootId: 'boot-1', pid: 42, processStartedAt: new Date('2026-09-08T00:00:00Z') },
       },
       hooks,
     );

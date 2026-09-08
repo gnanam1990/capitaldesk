@@ -74,6 +74,20 @@ describeIfDatabase('identity scope constraints', () => {
       `INSERT INTO workspaces (workspace_id, display_name) VALUES ($1,'Desk'), ($2,'Other')`,
       [WORKSPACE, OTHER_WORKSPACE],
     );
+    // Real pools for those strategies to belong to: a strategy now references its pool by
+    // key, so the fixture has to build the world the constraints describe.
+    await db.query(
+      `INSERT INTO venue_accounts (venue, environment, stable_account_id)
+       VALUES ('binance-spot','local','acct-a'), ('binance-spot','local','acct-b')`,
+    );
+    await db.query(
+      `INSERT INTO pools (workspace_id, pool_id, venue, environment, stable_account_id, state) VALUES
+        ($1,$2,'binance-spot','local','acct-a','READY'),
+        ($1,$3,'binance-spot','local','acct-a','READY'),
+        ($4,$2,'binance-spot','local','acct-b','READY'),
+        ($4,$3,'binance-spot','local','acct-b','READY')`,
+      [WORKSPACE, POOL_A, POOL_B, OTHER_WORKSPACE],
+    );
     // Two strategies in two different pools of the same workspace: every identifier below is
     // real, and only the combination is wrong.
     await db.query(
