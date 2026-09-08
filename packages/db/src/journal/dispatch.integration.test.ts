@@ -131,6 +131,68 @@ describeIfDatabase('dispatch attempts', () => {
     expect((await harness.admin.query('SELECT 1 FROM outbox')).rowCount).toBe(0);
   });
 
+  it('commits nothing when marker-time authorization is refused', async () => {
+    const outcome = await dispatch.markAuthorized(
+      {
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        attemptId: 'attempt-1',
+        outboxId: 'outbox-1',
+        host: {
+          bootId: 'boot-1',
+          pid: 42,
+          processStartedAt: new Date('2026-09-08T00:00:00Z'),
+        },
+      },
+      () => Promise.resolve({ ok: false, detail: 'APPROVAL_REVOKED' }),
+    );
+    expect(outcome).toEqual({
+      ok: false,
+      reason: 'AUTHORIZATION_REFUSED',
+      detail: 'APPROVAL_REVOKED',
+    });
+    expect(
+      (await dispatch.attempt({ workspaceId: WORKSPACE, poolId: POOL, attemptId: 'attempt-1' }))
+        ?.state,
+    ).toBe('PREPARED');
+    expect((await harness.admin.query('SELECT 1 FROM outbox')).rowCount).toBe(0);
+  });
+
+  it('persists only the bytes returned by marker-time authorization', async () => {
+    const outcome = await dispatch.markAuthorized(
+      {
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        attemptId: 'attempt-1',
+        outboxId: 'outbox-1',
+        host: {
+          bootId: 'boot-1',
+          pid: 42,
+          processStartedAt: new Date('2026-09-08T00:00:00Z'),
+        },
+      },
+      (context) => {
+        expect(context).toMatchObject({
+          planId: 'plan-1',
+          clientOrderId: 'cd-attempt-1',
+          planPayload: { child: 'BUY' },
+          planDigest: 'digest-1',
+        });
+        return Promise.resolve({
+          ok: true,
+          signedRequest: { method: 'POST', body: 'exact=frozen&signature=value' },
+        });
+      },
+    );
+    expect(outcome).toEqual({ ok: true });
+    expect(
+      await dispatch.attempt({ workspaceId: WORKSPACE, poolId: POOL, attemptId: 'attempt-1' }),
+    ).toMatchObject({
+      state: 'DISPATCH_MARKED',
+      signedRequest: { method: 'POST', body: 'exact=frozen&signature=value' },
+    });
+  });
+
   it('records the send as a second durable write, and only after the marker', async () => {
     // SEND_ATTEMPTED is the write immediately before the first network byte (ADR-0001). It
     // cannot precede the marker.

@@ -7,10 +7,10 @@ import { runUntilShutdown } from './lifetime.js';
  * Executor process entry point.
  *
  * The executor holds the only trade credential reference in the deployment. At this
- * milestone it has no dispatch path at all: there is no write adapter, no dispatch marker
- * table and no signing code. It starts, reports that write capability is unavailable and
- * idles. It will not acquire a dispatch path until prompts 12 and 13, and not a real one
- * until the integration gate passes.
+ * Signing and one-shot transmission are available only through the approval-bound journal
+ * path. This process does not autonomously scan pools: a scoped dispatch job must supply the
+ * approved plan and verified venue metadata. With write capability disabled it remains an
+ * inert deployment probe.
  */
 const config = loadExecutorConfig();
 
@@ -28,12 +28,13 @@ log.info(
   {
     writeCapability: config.writeCapability,
     tradeCredentialConfigured: config.tradeCredentialRef !== null,
-    dispatchPath: 'not_implemented',
+    dispatchPath: 'approval_bound_one_shot',
+    autonomousPoolScanning: false,
     authorizationDurability: config.authorizationDurability,
     signedRequestValidityMs: config.signedRequestValidityMs,
     clockSkewBudgetMs: config.clockSkewBudgetMs,
   },
-  'executor started; no dispatch path is implemented at this milestone',
+  'executor started; approval-bound dispatch boundary loaded',
 );
 
 // Blocks on a real referenced handle until SIGINT or SIGTERM. A pending promise alone does

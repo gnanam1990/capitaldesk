@@ -1,5 +1,9 @@
 import type { DispatchAttemptState } from '@capitaldesk/contracts';
-import { parseSignedOrderRequest, OneShotTradeTransmitter, type TradeResult } from './binance-write.js';
+import {
+  parseSignedOrderRequest,
+  OneShotTradeTransmitter,
+  type TradeResult,
+} from './binance-write.js';
 
 interface DispatchJournal {
   attempt(input: {
@@ -11,7 +15,7 @@ interface DispatchJournal {
     readonly clientOrderId: string;
     readonly markedAt: Date | null;
     readonly sendAttemptedAt: Date | null;
-    readonly signedRequest: unknown | null;
+    readonly signedRequest: unknown;
   } | null>;
   recordSendAttempted(input: {
     readonly workspaceId: string;
@@ -82,7 +86,11 @@ export class DispatchConsumer {
     readonly workspaceId: string;
     readonly poolId: string;
   }): Promise<DispatchCycleResult> {
-    const message = await this.outbox.claim({ ...scope, consumerId: this.consumerId, leaseMs: this.leaseMs });
+    const message = await this.outbox.claim({
+      ...scope,
+      consumerId: this.consumerId,
+      leaseMs: this.leaseMs,
+    });
     if (message === null) return { kind: 'IDLE' };
 
     const attemptId = message.kind === 'dispatch.send' ? attemptIdOf(message.payload) : null;

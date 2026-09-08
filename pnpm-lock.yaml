@@ -183,6 +183,9 @@ importers:
       '@capitaldesk/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@capitaldesk/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@capitaldesk/observability':
         specifier: workspace:*
         version: link:../../packages/observability

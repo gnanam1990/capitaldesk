@@ -364,7 +364,12 @@ export class DispatchRepository {
    */
   mark(input: MarkInput, hooks: MarkHooks = {}): Promise<MarkOutcome> {
     return serializable(this.pool, (client) =>
-      markBody(client, input, () => Promise.resolve({ ok: true, signedRequest: input.signedRequest }), hooks),
+      markBody(
+        client,
+        input,
+        () => Promise.resolve({ ok: true, signedRequest: input.signedRequest }),
+        hooks,
+      ),
     );
   }
 
@@ -384,7 +389,12 @@ export class DispatchRepository {
   /** The same marking pinned to one connection, for a race proven on independent backends. */
   static markOn(client: Queryable, input: MarkInput, hooks: MarkHooks = {}): Promise<MarkOutcome> {
     return serializableOn(client, (c) =>
-      markBody(c, input, () => Promise.resolve({ ok: true, signedRequest: input.signedRequest }), hooks),
+      markBody(
+        c,
+        input,
+        () => Promise.resolve({ ok: true, signedRequest: input.signedRequest }),
+        hooks,
+      ),
     );
   }
 
@@ -451,14 +461,14 @@ export class DispatchRepository {
     clientOrderId: string;
     markedAt: Date | null;
     sendAttemptedAt: Date | null;
-    signedRequest: unknown | null;
+    signedRequest: unknown;
   } | null> {
     const result = await this.pool.query<{
       state: DispatchAttemptState;
       client_order_id: string;
       marked_at: Date | null;
       send_attempted_at: Date | null;
-      signed_request: unknown | null;
+      signed_request: unknown;
     }>(
       'SELECT state, client_order_id, marked_at, send_attempted_at, signed_request FROM dispatch_attempts WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3',
       [scope.workspaceId, scope.poolId, scope.attemptId],

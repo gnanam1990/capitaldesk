@@ -59,7 +59,7 @@ export function parseSignedOrderRequest(value: unknown): SignedOrderRequest {
       violate('IDENTITY_MALFORMED', 'signed request headers must contain string values');
     }
   }
-  assertEnvelopeWellFormed(candidate.envelope as SignedRequestEnvelope);
+  assertEnvelopeWellFormed(candidate.envelope);
   return candidate as SignedOrderRequest;
 }
 

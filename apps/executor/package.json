@@ -13,6 +13,7 @@
   "dependencies": {
     "@capitaldesk/config": "workspace:*",
     "@capitaldesk/contracts": "workspace:*",
+    "@capitaldesk/db": "workspace:*",
     "@capitaldesk/observability": "workspace:*"
   },
   "devDependencies": {
