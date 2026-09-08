@@ -6,7 +6,7 @@ import {
   type PlanState,
 } from '@capitaldesk/contracts';
 import { OutboxRepository } from './outbox.js';
-import { serializable, type Queryable } from './transaction.js';
+import { serializable, serializableOn, type Queryable } from './transaction.js';
 
 /**
  * Sealed plans and dispatch attempts.
@@ -42,7 +42,24 @@ export type PrepareOutcome =
   | { readonly ok: false; readonly reason: 'DISPATCH_TOKEN_REUSED' };
 
 export type MarkOutcome =
-  { readonly ok: true } | { readonly ok: false; readonly reason: 'NOT_PREPARED' };
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: 'NOT_PREPARED' }
+  | { readonly ok: false; readonly reason: 'ATTEMPT_VOIDED'; readonly voidedReason: string }
+  | { readonly ok: false; readonly reason: 'POOL_NOT_DISPATCHABLE'; readonly state: string }
+  | { readonly ok: false; readonly reason: 'PLAN_NOT_DISPATCHABLE'; readonly state: PlanState }
+  | { readonly ok: false; readonly reason: 'NO_ACTIVE_LEASE' };
+
+export interface MarkInput {
+  readonly workspaceId: string;
+  readonly poolId: string;
+  readonly attemptId: string;
+  readonly outboxId: string;
+  readonly signedRequest: unknown;
+  readonly host: { readonly bootId: string; readonly pid: number };
+}
+
+/** The only pool states from which a dispatch may be marked. */
+const DISPATCHABLE_POOL_STATES: readonly string[] = ['READY', 'AWAITING_APPROVAL', 'IN_FLIGHT'];
 
 export type SendAttemptedOutcome =
   { readonly ok: true } | { readonly ok: false; readonly reason: 'NOT_MARKED' };
@@ -187,61 +204,27 @@ export class DispatchRepository {
   /**
    * Commit the marker.
    *
-   * One transaction: the attempt becomes DISPATCH_MARKED with its signed request and host
-   * fence evidence, and the single-attempt outbox message that will carry the send is written
-   * beside it. Nothing here touches the network; the executor consumes the message.
+   * One transaction, and it validates the whole authority chain before writing anything: the
+   * pool row is locked and must be dispatchable, the plan must still be DISPATCH_PENDING, the
+   * attempt must be PREPARED and not voided, and the account's governance lease must be
+   * active. Only then does the attempt become DISPATCH_MARKED with its signed request and
+   * host fence evidence, beside the single-attempt outbox message that will carry the send.
+   *
+   * Checking only the attempt's own state was not enough. A restore could halt the pool,
+   * invalidate the plan and release its reservation, and a `mark` arriving afterwards still
+   * succeeded — producing a marker, and a send message, for a plan whose authority had been
+   * withdrawn and whose funds had been returned. Locking the pool first is also what makes
+   * this and `enterRestorePosture` mutually exclusive rather than interleaved.
+   *
+   * Nothing here touches the network; the executor consumes the message.
    */
-  mark(
-    input: {
-      readonly workspaceId: string;
-      readonly poolId: string;
-      readonly attemptId: string;
-      readonly outboxId: string;
-      readonly signedRequest: unknown;
-      readonly host: { readonly bootId: string; readonly pid: number };
-    },
-    hooks: MarkHooks = {},
-  ): Promise<MarkOutcome> {
-    return serializable(this.pool, async (client): Promise<MarkOutcome> => {
-      const marked = await client.query<{
-        client_order_id: string;
-        dispatch_token: string;
-        plan_id: string;
-        epoch: number;
-      }>(
-        `UPDATE dispatch_attempts
-            SET state = 'DISPATCH_MARKED', marked_at = now(), signed_request = $4::jsonb,
-                marker_host_boot_id = $5, marker_pid = $6
-          WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 AND state = 'PREPARED'
-          RETURNING client_order_id, dispatch_token, plan_id, epoch`,
-        [
-          input.workspaceId,
-          input.poolId,
-          input.attemptId,
-          JSON.stringify(input.signedRequest),
-          input.host.bootId,
-          input.host.pid,
-        ],
-      );
-      const row = marked.rows[0];
-      if (row === undefined) return { ok: false, reason: 'NOT_PREPARED' };
-      await hooks.afterMarkerWrite?.();
-      await OutboxRepository.enqueueOn(client, {
-        workspaceId: input.workspaceId,
-        poolId: input.poolId,
-        outboxId: input.outboxId,
-        kind: 'dispatch.send',
-        payload: {
-          attemptId: input.attemptId,
-          clientOrderId: row.client_order_id,
-          dispatchToken: row.dispatch_token,
-          planId: row.plan_id,
-          epoch: row.epoch,
-        },
-        maxAttempts: 1,
-      });
-      return { ok: true };
-    });
+  mark(input: MarkInput, hooks: MarkHooks = {}): Promise<MarkOutcome> {
+    return serializable(this.pool, (client) => markBody(client, input, hooks));
+  }
+
+  /** The same marking pinned to one connection, for a race proven on independent backends. */
+  static markOn(client: Queryable, input: MarkInput, hooks: MarkHooks = {}): Promise<MarkOutcome> {
+    return serializableOn(client, (c) => markBody(c, input, hooks));
   }
 
   /** The second durable write, immediately before the first network byte (ADR-0001). */
@@ -320,6 +303,105 @@ export class DispatchRepository {
       sendAttemptedAt: row.send_attempted_at,
     };
   }
+}
+
+async function markBody(
+  client: Queryable,
+  input: MarkInput,
+  hooks: MarkHooks,
+): Promise<MarkOutcome> {
+  // The pool row first, and in the same order every other economic writer takes it.
+  const pool = await client.query<{
+    state: string;
+    venue: string;
+    environment: string;
+    stable_account_id: string;
+  }>(
+    `SELECT state, venue, environment, stable_account_id FROM pools
+      WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE`,
+    [input.workspaceId, input.poolId],
+  );
+  const poolRow = pool.rows[0];
+  if (poolRow === undefined) return { ok: false, reason: 'NOT_PREPARED' };
+  if (!DISPATCHABLE_POOL_STATES.includes(poolRow.state)) {
+    return { ok: false, reason: 'POOL_NOT_DISPATCHABLE', state: poolRow.state };
+  }
+
+  const lease = await client.query(
+    `SELECT 1 FROM governance_leases
+      WHERE venue = $1 AND environment = $2 AND stable_account_id = $3
+        AND workspace_id = $4 AND pool_id = $5 AND released_at IS NULL`,
+    [
+      poolRow.venue,
+      poolRow.environment,
+      poolRow.stable_account_id,
+      input.workspaceId,
+      input.poolId,
+    ],
+  );
+  if (lease.rowCount !== 1) return { ok: false, reason: 'NO_ACTIVE_LEASE' };
+
+  const attempt = await client.query<{
+    state: DispatchAttemptState;
+    plan_id: string;
+    epoch: number;
+    voided_reason: string | null;
+  }>(
+    `SELECT state, plan_id, epoch, voided_reason FROM dispatch_attempts
+      WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 FOR UPDATE`,
+    [input.workspaceId, input.poolId, input.attemptId],
+  );
+  const attemptRow = attempt.rows[0];
+  if (attemptRow === undefined || attemptRow.state !== 'PREPARED')
+    return { ok: false, reason: 'NOT_PREPARED' };
+  if (attemptRow.voided_reason !== null) {
+    return { ok: false, reason: 'ATTEMPT_VOIDED', voidedReason: attemptRow.voided_reason };
+  }
+
+  const plan = await client.query<{ state: PlanState }>(
+    `SELECT state FROM plans WHERE workspace_id = $1 AND pool_id = $2 AND plan_id = $3 FOR UPDATE`,
+    [input.workspaceId, input.poolId, attemptRow.plan_id],
+  );
+  const planRow = plan.rows[0];
+  if (planRow === undefined) return { ok: false, reason: 'NOT_PREPARED' };
+  if (planRow.state !== 'DISPATCH_PENDING') {
+    return { ok: false, reason: 'PLAN_NOT_DISPATCHABLE', state: planRow.state };
+  }
+
+  const marked = await client.query<{ client_order_id: string; dispatch_token: string }>(
+    `UPDATE dispatch_attempts
+        SET state = 'DISPATCH_MARKED', marked_at = now(), signed_request = $4::jsonb,
+            marker_host_boot_id = $5, marker_pid = $6
+      WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 AND state = 'PREPARED'
+      RETURNING client_order_id, dispatch_token`,
+    [
+      input.workspaceId,
+      input.poolId,
+      input.attemptId,
+      JSON.stringify(input.signedRequest),
+      input.host.bootId,
+      input.host.pid,
+    ],
+  );
+  const row = marked.rows[0];
+  /* c8 ignore next -- the row was locked and checked above. */
+  if (row === undefined) return { ok: false, reason: 'NOT_PREPARED' };
+  await hooks.afterMarkerWrite?.();
+  await OutboxRepository.enqueueOn(client, {
+    workspaceId: input.workspaceId,
+    poolId: input.poolId,
+    outboxId: input.outboxId,
+    kind: 'dispatch.send',
+    payload: {
+      attemptId: input.attemptId,
+      clientOrderId: row.client_order_id,
+      dispatchToken: row.dispatch_token,
+      planId: attemptRow.plan_id,
+      epoch: attemptRow.epoch,
+    },
+    maxAttempts: 1,
+  });
+  return { ok: true };
 }
 
 export { IN_FLIGHT_STATES as PLAN_IN_FLIGHT_STATES, type Queryable as JournalQueryable };

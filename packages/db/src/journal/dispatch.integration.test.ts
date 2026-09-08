@@ -61,6 +61,8 @@ describeIfDatabase('dispatch attempts', () => {
   beforeEach(async () => {
     await harness.reset();
     await harness.seedPool();
+    // Marking validates the whole authority chain, so the fixture provides it.
+    await harness.seedGovernanceLease();
     dispatch = new DispatchRepository(harness.pool);
     await dispatch.sealPlan({
       workspaceId: WORKSPACE,

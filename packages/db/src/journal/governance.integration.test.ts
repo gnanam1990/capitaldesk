@@ -159,6 +159,9 @@ describeIfDatabase('governance lease', () => {
       account: ACCOUNT,
       credentialAlias: 'key-1',
     });
+    // Acquiring leaves the pool BOOTSTRAPPING, which is deliberately not dispatchable: a
+    // marker needs a pool that has a baseline. Move it on, as module 06 will.
+    await harness.admin.query(`UPDATE pools SET state = 'READY'`);
     await dispatch.sealPlan({
       workspaceId: WORKSPACE,
       poolId: POOL,
@@ -166,7 +169,7 @@ describeIfDatabase('governance lease', () => {
       planId: 'plan-1',
       payload: { note: 'fixture' },
       payloadDigest: 'digest-1',
-      state: 'APPROVED',
+      state: 'DISPATCH_PENDING',
     });
     await dispatch.prepare({
       workspaceId: WORKSPACE,
@@ -257,6 +260,7 @@ describeIfDatabase('governance lease', () => {
       account: ACCOUNT,
       credentialAlias: 'key-1',
     });
+    await harness.admin.query(`UPDATE pools SET state = 'READY'`);
     await dispatch.sealPlan({
       workspaceId: WORKSPACE,
       poolId: POOL,
@@ -264,7 +268,7 @@ describeIfDatabase('governance lease', () => {
       planId: 'plan-1',
       payload: {},
       payloadDigest: 'd1',
-      state: 'APPROVED',
+      state: 'DISPATCH_PENDING',
     });
     await dispatch.prepare({
       workspaceId: WORKSPACE,

@@ -30,7 +30,14 @@ export interface RecordObservationInput {
 }
 
 export type RecordObservationOutcome =
-  { readonly kind: 'recorded' } | { readonly kind: 'duplicate'; readonly observationId: string };
+  | { readonly kind: 'recorded' }
+  /** Byte-for-byte the same fact already recorded. Nothing is written. */
+  | { readonly kind: 'duplicate'; readonly observationId: string }
+  /**
+   * The same source reference carrying different evidence. The stored row is kept and a
+   * conflict is recorded for the incident path; this is never reported as a duplicate.
+   */
+  | { readonly kind: 'conflict'; readonly observationId: string; readonly conflictId: string };
 
 export interface ApplyObservationInput {
   readonly workspaceId: string;
@@ -95,6 +102,52 @@ export interface RecordFillInput {
 export type RecordOutcome = { readonly kind: 'recorded' } | { readonly kind: 'already-recorded' };
 export type RecordFillOutcome = RecordOutcome | { readonly kind: 'unknown-order' };
 
+export type RecordOrderOutcome =
+  | { readonly kind: 'recorded' }
+  /** The same status again. */
+  | { readonly kind: 'duplicate' }
+  /** The order advanced; the row now carries the newer status. */
+  | {
+      readonly kind: 'progressed';
+      readonly from: VenueOrderStatus;
+      readonly to: VenueOrderStatus;
+      readonly version: number;
+    }
+  /** An older status arriving late. Out of order, not a contradiction; nothing is rewritten. */
+  | { readonly kind: 'stale'; readonly current: VenueOrderStatus }
+  /**
+   * Two different terminal statuses for one order, or an unsupported status where a known one
+   * is stored. Recorded as conflict evidence; the stored status is kept.
+   */
+  | {
+      readonly kind: 'conflict';
+      readonly current: VenueOrderStatus;
+      readonly incoming: VenueOrderStatus;
+      readonly conflictId: string;
+    };
+
+/**
+ * How far through its life a status places an order.
+ *
+ * Ranks, not a transition table: the venue is the authority on its own order, and we are
+ * observing it through two sources that can deliver out of order. What we can say is that an
+ * order does not go backwards, and that it does not reach two different ends.
+ */
+const STATUS_RANK: Readonly<Record<VenueOrderStatus, number>> = {
+  NEW: 0,
+  PARTIALLY_FILLED: 1,
+  PENDING_CANCEL: 2,
+  FILLED: 3,
+  CANCELED: 3,
+  EXPIRED: 3,
+  EXPIRED_IN_MATCH: 3,
+  REJECTED: 3,
+  // Never overwrites a known status: an unrecognised one is preserved as evidence with a
+  // fail-closed disposition rather than mapped onto the nearest familiar thing (ADR-0004).
+  UNSUPPORTED_OBSERVATION: -1,
+};
+const TERMINAL_RANK = 3;
+
 /**
  * Digest of the evidence as stored.
  *
@@ -113,17 +166,59 @@ function digestOf(payload: unknown, rawText: string | undefined): string {
 export class ObservationRepository {
   constructor(private readonly pool: Pool) {}
 
-  /** Persist a source fact. The same fact from the same source is recorded once. */
+  /**
+   * Persist a source fact.
+   *
+   * A repeat of the same fact is recorded once. A *different* payload under the same source
+   * reference is not a repeat: the source has said two contradictory things about one fact,
+   * and treating that as an ordinary duplicate silently discarded the second statement. The
+   * stored evidence is still never overwritten, but the contradiction is recorded durably as
+   * conflict evidence for the incident path to resolve.
+   */
   record(input: RecordObservationInput): Promise<RecordObservationOutcome> {
     return serializable(this.pool, async (client): Promise<RecordObservationOutcome> => {
-      const existing = await client.query<{ observation_id: string }>(
-        `SELECT observation_id FROM raw_observations
-          WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND source = $4 AND kind = $5 AND source_ref = $6`,
+      const digest = digestOf(input.payload, input.rawText);
+      const existing = await client.query<{
+        observation_id: string;
+        payload_digest: string;
+        payload: unknown;
+      }>(
+        `SELECT observation_id, payload_digest, payload FROM raw_observations
+          WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND source = $4 AND kind = $5 AND source_ref = $6
+          FOR UPDATE`,
         [input.workspaceId, input.poolId, input.epoch, input.source, input.kind, input.sourceRef],
       );
-      const duplicate = existing.rows[0];
-      if (duplicate !== undefined)
-        return { kind: 'duplicate', observationId: duplicate.observation_id };
+      const stored = existing.rows[0];
+      if (stored !== undefined) {
+        if (stored.payload_digest === digest) {
+          return { kind: 'duplicate', observationId: stored.observation_id };
+        }
+        const conflict = await client.query<{ conflict_id: string }>(
+          `INSERT INTO evidence_conflicts
+             (workspace_id, pool_id, epoch, subject_kind, subject_ref, stored, incoming)
+           VALUES ($1, $2, $3, 'observation', $4, $5::jsonb, $6::jsonb)
+           RETURNING conflict_id::text`,
+          [
+            input.workspaceId,
+            input.poolId,
+            input.epoch,
+            stored.observation_id,
+            JSON.stringify({ payload: stored.payload, digest: stored.payload_digest }),
+            JSON.stringify({
+              payload: input.payload,
+              digest,
+              source: input.source,
+              kind: input.kind,
+              sourceRef: input.sourceRef,
+            }),
+          ],
+        );
+        return {
+          kind: 'conflict',
+          observationId: stored.observation_id,
+          conflictId: conflict.rows[0]?.conflict_id ?? '',
+        };
+      }
       await client.query(
         `INSERT INTO raw_observations
            (workspace_id, pool_id, epoch, observation_id, source, kind, source_ref, source_event_time, payload, payload_digest)
@@ -138,7 +233,7 @@ export class ObservationRepository {
           input.sourceRef,
           input.sourceEventTime,
           JSON.stringify(input.payload),
-          digestOf(input.payload, input.rawText),
+          digest,
         ],
       );
       return { kind: 'recorded' };
@@ -200,22 +295,95 @@ export class ObservationRepository {
     });
   }
 
-  async recordOrder(input: RecordOrderInput): Promise<RecordOutcome> {
-    const inserted = await this.pool.query(
-      `INSERT INTO venue_orders (workspace_id, pool_id, epoch, symbol, venue_order_id, client_order_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (workspace_id, pool_id, epoch, symbol, venue_order_id) DO NOTHING`,
-      [
-        input.workspaceId,
-        input.poolId,
-        input.epoch,
-        input.symbol,
-        input.venueOrderId,
-        input.clientOrderId ?? null,
-        input.status,
-      ],
-    );
-    return inserted.rowCount === 1 ? { kind: 'recorded' } : { kind: 'already-recorded' };
+  /**
+   * Record what the venue says about an order.
+   *
+   * `ON CONFLICT DO NOTHING` made every observation after the first a no-op, so an order
+   * observed as NEW stayed NEW through PARTIALLY_FILLED and FILLED: the status, the last
+   * observation time and the version never moved. The policy is explicit instead - advance,
+   * repeat, arrive late, or contradict - and only the first of those writes.
+   */
+  recordOrder(input: RecordOrderInput): Promise<RecordOrderOutcome> {
+    return serializable(this.pool, async (client): Promise<RecordOrderOutcome> => {
+      const existing = await client.query<{ status: VenueOrderStatus; version: number }>(
+        `SELECT status, version FROM venue_orders
+          WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4 AND venue_order_id = $5
+          FOR UPDATE`,
+        [input.workspaceId, input.poolId, input.epoch, input.symbol, input.venueOrderId],
+      );
+      const stored = existing.rows[0];
+      if (stored === undefined) {
+        await client.query(
+          `INSERT INTO venue_orders (workspace_id, pool_id, epoch, symbol, venue_order_id, client_order_id, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            input.workspaceId,
+            input.poolId,
+            input.epoch,
+            input.symbol,
+            input.venueOrderId,
+            input.clientOrderId ?? null,
+            input.status,
+          ],
+        );
+        return { kind: 'recorded' };
+      }
+      if (stored.status === input.status) {
+        await client.query(
+          `UPDATE venue_orders SET last_observed_at = now()
+            WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4 AND venue_order_id = $5`,
+          [input.workspaceId, input.poolId, input.epoch, input.symbol, input.venueOrderId],
+        );
+        return { kind: 'duplicate' };
+      }
+
+      const current = STATUS_RANK[stored.status];
+      const incoming = STATUS_RANK[input.status];
+      const contradicts =
+        (current === TERMINAL_RANK && incoming === TERMINAL_RANK) || incoming < 0 || current < 0;
+      if (contradicts) {
+        const conflict = await client.query<{ conflict_id: string }>(
+          `INSERT INTO evidence_conflicts
+             (workspace_id, pool_id, epoch, subject_kind, subject_ref, stored, incoming)
+           VALUES ($1, $2, $3, 'order-status', $4, $5::jsonb, $6::jsonb)
+           RETURNING conflict_id::text`,
+          [
+            input.workspaceId,
+            input.poolId,
+            input.epoch,
+            `${input.symbol}/${input.venueOrderId}`,
+            JSON.stringify({ status: stored.status }),
+            JSON.stringify({ status: input.status }),
+          ],
+        );
+        return {
+          kind: 'conflict',
+          current: stored.status,
+          incoming: input.status,
+          conflictId: conflict.rows[0]?.conflict_id ?? '',
+        };
+      }
+      if (incoming < current) return { kind: 'stale', current: stored.status };
+
+      const version = stored.version + 1;
+      await client.query(
+        `UPDATE venue_orders
+            SET status = $6, version = $7, last_observed_at = now(),
+                client_order_id = coalesce(client_order_id, $8)
+          WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4 AND venue_order_id = $5`,
+        [
+          input.workspaceId,
+          input.poolId,
+          input.epoch,
+          input.symbol,
+          input.venueOrderId,
+          input.status,
+          version,
+          input.clientOrderId ?? null,
+        ],
+      );
+      return { kind: 'progressed', from: stored.status, to: input.status, version };
+    });
   }
 
   recordFill(input: RecordFillInput): Promise<RecordFillOutcome> {

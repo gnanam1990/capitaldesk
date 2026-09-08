@@ -97,6 +97,22 @@ export class JournalHarness {
     );
   }
 
+  /** The active governance lease a dispatch marker requires. */
+  async seedGovernanceLease(workspaceId = WORKSPACE, poolId = POOL): Promise<void> {
+    await this.admin.query(
+      `INSERT INTO governance_leases (lease_id, venue, environment, stable_account_id, workspace_id, pool_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        `lease-${poolId}`,
+        ACCOUNT.venue,
+        ACCOUNT.environment,
+        ACCOUNT.stableAccountId,
+        workspaceId,
+        poolId,
+      ],
+    );
+  }
+
   /** An independent backend bound to the schema. Cancelled and closed by cleanup(). */
   async connect(): Promise<Backend> {
     const client = new Client({ connectionString: DATABASE_URL });

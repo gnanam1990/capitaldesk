@@ -156,16 +156,13 @@ describeIfDatabase('raw observations and venue identity', () => {
     ).toBe(1);
   });
 
-  it('deduplicates the same source fact arriving twice, and keeps the first verbatim', async () => {
+  it('deduplicates an exact repeat and keeps the first verbatim', async () => {
     expect(await observations.record(fillObservation)).toEqual({ kind: 'recorded' });
     // A duplicate boundary row from the next page, or the same trade over the stream.
-    expect(
-      await observations.record({
-        ...fillObservation,
-        observationId: 'obs-1-dup',
-        payload: { tradeId: 77, qty: '10', later: true },
-      }),
-    ).toEqual({ kind: 'duplicate', observationId: 'obs-1' });
+    expect(await observations.record({ ...fillObservation, observationId: 'obs-1-dup' })).toEqual({
+      kind: 'duplicate',
+      observationId: 'obs-1',
+    });
     const stored = await harness.admin.query<{ payload: Record<string, unknown> }>(
       'SELECT payload FROM raw_observations',
     );
@@ -222,9 +219,12 @@ describeIfDatabase('raw observations and venue identity', () => {
       [WORKSPACE, POOL],
     );
     expect(await observations.recordOrder({ ...order, epoch: 2 })).toEqual({ kind: 'recorded' });
-    // But within its own scope, once.
-    expect(await observations.recordOrder({ ...order, status: 'CANCELED' })).toEqual({
-      kind: 'already-recorded',
+    // But within its own scope it is the same order, and a second terminal status is a
+    // contradiction, not a new row.
+    expect(await observations.recordOrder({ ...order, status: 'CANCELED' })).toMatchObject({
+      kind: 'conflict',
+      current: 'FILLED',
+      incoming: 'CANCELED',
     });
 
     const fill = {

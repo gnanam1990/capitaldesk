@@ -57,6 +57,7 @@ describeIfDatabase('restart and restore posture', () => {
   beforeEach(async () => {
     await harness.reset();
     await harness.seedPool();
+    await harness.seedGovernanceLease();
     await rehearsalFixture();
   });
   afterEach(async () => {
@@ -269,6 +270,7 @@ describeIfDatabase('restart and restore posture', () => {
       outboxQuarantined: 2,
       plansInvalidated: 0,
       reservationsReleased: 0,
+      attemptsVoided: 0,
       liabilitiesRetained: 1,
     });
 
@@ -287,7 +289,6 @@ describeIfDatabase('restart and restore posture', () => {
         poolId: POOL,
         consumerId: 'w',
         leaseMs: 1000,
-        now: new Date(),
       }),
     ).toBeNull();
     // The UNKNOWN attempt and its reservation are exactly as they were.
