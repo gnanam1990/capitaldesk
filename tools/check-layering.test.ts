@@ -122,6 +122,126 @@ describe('dependency layering checker', () => {
       expect(result.output).toContain('without declaring it as a dependency');
     });
 
+    // --- regression: PR 1 review, one pattern swallowing another statement -------------
+    // The combined specifier pattern let an `import|export ... from` branch span up to 400
+    // characters, so a bare side-effect import immediately followed by another import was
+    // consumed whole and its specifier never seen.
+    it('catches a bare side-effect import followed by another import', async () => {
+      const result = await fixture({
+        'apps/api/package.json': API_MANIFEST,
+        'apps/api/src/a.ts': "import '@capitaldesk/executor';\nimport { x } from './y.js';\n",
+        'apps/api/src/y.ts': 'export const x = 1;\n',
+        'apps/executor/package.json': EXECUTOR_MANIFEST,
+        'apps/executor/src/main.ts': 'export const ok = true;\n',
+        'packages/contracts/package.json': CONTRACTS_MANIFEST,
+        'packages/contracts/src/index.ts': 'export const ok = true;\n',
+      });
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('is forbidden');
+    });
+
+    it('catches a bare side-effect import by relative path', async () => {
+      const result = await fixture({
+        'apps/api/package.json': API_MANIFEST,
+        'apps/api/src/a.ts':
+          "import '../../executor/src/private.js';\nimport { x } from './y.js';\n",
+        'apps/api/src/y.ts': 'export const x = 1;\n',
+        'apps/executor/package.json': EXECUTOR_MANIFEST,
+        'apps/executor/src/private.ts': 'export const tradeBoundary = true;\n',
+        'packages/contracts/package.json': CONTRACTS_MANIFEST,
+        'packages/contracts/src/index.ts': 'export const ok = true;\n',
+      });
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('is forbidden');
+    });
+
+    it('does not let a multiline import clause swallow the next statement', async () => {
+      const result = await fixture({
+        'apps/api/package.json': API_MANIFEST,
+        'apps/api/src/a.ts': "import {\n  x,\n} from './y.js';\nimport '@capitaldesk/executor';\n",
+        'apps/api/src/y.ts': 'export const x = 1;\n',
+        'apps/executor/package.json': EXECUTOR_MANIFEST,
+        'apps/executor/src/main.ts': 'export const ok = true;\n',
+        'packages/contracts/package.json': CONTRACTS_MANIFEST,
+        'packages/contracts/src/index.ts': 'export const ok = true;\n',
+      });
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('is forbidden');
+    });
+
+    // --- regression: PR 1 review, JavaScript sources were never scanned ------------------
+    it('catches a crossing from a JavaScript source, which allowJs permits', async () => {
+      const result = await fixture({
+        'apps/web/package.json': JSON.stringify({ name: '@capitaldesk/web', dependencies: {} }),
+        'apps/web/src/leak.js': "export * from '../../executor/src/private.js';\n",
+        'apps/executor/package.json': EXECUTOR_MANIFEST,
+        'apps/executor/src/private.ts': 'export const tradeBoundary = true;\n',
+        'packages/contracts/package.json': CONTRACTS_MANIFEST,
+        'packages/contracts/src/index.ts': 'export const ok = true;\n',
+      });
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('is forbidden');
+    });
+
+    // --- regression: PR 1 review, regex parsing kept losing --------------------------
+    // Three forms defeated the narrowed regex, and it began rejecting a commented-out
+    // import. Parsing settles the class rather than moving the boundary again.
+    const crossing = (source: string): Record<string, string> => ({
+      'apps/api/package.json': API_MANIFEST,
+      'apps/api/src/a.ts': source,
+      'apps/executor/package.json': EXECUTOR_MANIFEST,
+      'apps/executor/src/private.ts': 'export const tradeBoundary = true;\n',
+      'packages/contracts/package.json': CONTRACTS_MANIFEST,
+      'packages/contracts/src/index.ts': 'export const ok = true;\n',
+    });
+
+    const detected: ReadonlyArray<readonly [string, string]> = [
+      ['comment inside a bare import', "import /* c */ '../../executor/src/private.js';\n"],
+      ['comment inside export-from', "export * from /* c */ '../../executor/src/private.js';\n"],
+      [
+        'comment inside a dynamic import',
+        "export const f = () => import(/* c */ '../../executor/src/private.js');\n",
+      ],
+      ['import-equals', "import e = require('@capitaldesk/executor');\nexport default e;\n"],
+      ['require', "const e = require('@capitaldesk/executor');\nexport default e;\n"],
+    ];
+
+    for (const [name, source] of detected) {
+      it(`detects a crossing through ${name}`, async () => {
+        const result = await fixture(crossing(source));
+        expect(result.code).toBe(1);
+        expect(result.output).toMatch(/is forbidden|non-literal/);
+      });
+    }
+
+    it('reports a non-literal dynamic specifier rather than skipping it', async () => {
+      const result = await fixture(
+        crossing("const p = '@capitaldesk/executor';\nexport const f = () => import(p);\n"),
+      );
+      expect(result.code).toBe(1);
+      expect(result.output).toContain('non-literal');
+    });
+
+    const clean: ReadonlyArray<readonly [string, string]> = [
+      ['a commented-out import', "// import '@capitaldesk/executor';\nexport const ok = 1;\n"],
+      [
+        'a specifier inside a plain string',
+        'export const s = "import \'@capitaldesk/executor\';";\n',
+      ],
+      [
+        'a specifier inside a block comment',
+        "/* import '@capitaldesk/executor'; */\nexport const ok = 1;\n",
+      ],
+    ];
+
+    for (const [name, source] of clean) {
+      it(`does not flag ${name}`, async () => {
+        const result = await fixture(crossing(source));
+        expect(result.output).toContain('dependency layering OK');
+        expect(result.code).toBe(0);
+      });
+    }
+
     it('still permits a relative import inside the same package', async () => {
       const result = await fixture({
         'apps/api/package.json': API_MANIFEST,

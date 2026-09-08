@@ -1,5 +1,9 @@
+import { execFile } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
+
+const run = promisify(execFile);
 
 /**
  * Static credential-boundary check (ADR-0007).
@@ -35,7 +39,13 @@ const TRADE_ALLOWED_PREFIXES = ['apps/executor', 'packages/config', 'tools', 'do
 const READ_ALLOWED_PREFIXES = ['apps/worker', 'packages/config', 'tools', 'docs', 'specs'];
 
 function mayName(relative: string, prefixes: readonly string[]): boolean {
-  return ENV_EXAMPLE.test(relative) || prefixes.some((prefix) => relative.startsWith(prefix));
+  // Component-bounded: `apps/executor` must not also permit `apps/executor-evil`. Separators
+  // are normalised so the same rule holds on Windows checkouts.
+  const normalised = relative.split(path.sep).join('/');
+  return (
+    ENV_EXAMPLE.test(normalised) ||
+    prefixes.some((prefix) => normalised === prefix || normalised.startsWith(`${prefix}/`))
+  );
 }
 
 /** Shapes that must never appear in a committed file. */
@@ -73,18 +83,82 @@ async function walk(dir: string, out: string[] = []): Promise<string[]> {
   return out;
 }
 
-const TEXT_FILE = /\.(ts|tsx|js|mjs|cjs|json|yaml|yml|sql|md|env|example|sh)$/;
+/**
+ * Binary extensions worth skipping. Everything else is read, including extensionless files
+ * such as `Dockerfile` and credential-bearing formats such as `.pem` and `.key`, which an
+ * extension allowlist silently excluded from the scan entirely.
+ */
+const BINARY_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.avif',
+  '.ico',
+  '.icns',
+  '.pdf',
+  '.zip',
+  '.gz',
+  '.tgz',
+  '.br',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.otf',
+  '.eot',
+  '.mp4',
+  '.webm',
+  '.mp3',
+  '.wav',
+  '.node',
+  '.wasm',
+  '.so',
+  '.dylib',
+  '.dll',
+]);
+
+function isScannable(file: string): boolean {
+  return !BINARY_EXTENSIONS.has(path.extname(file).toLowerCase());
+}
+
+/**
+ * The set of files that matters is the set git would publish.
+ *
+ * Scanning the whole working tree instead pulls in generated build artifacts — a
+ * `.tsbuildinfo` carries content hashes that look exactly like a 64-character key — and that
+ * noise invites a broad exemption. Broad exemptions are how the documentation carve-out came
+ * to hide real matches in the first place, so the fix is a precise file set, not a filter.
+ *
+ * Falls back to walking the tree when git is unavailable, so the check still runs.
+ */
+async function filesToScan(): Promise<readonly string[]> {
+  try {
+    const { stdout } = await run(
+      'git',
+      ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+      { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 },
+    );
+    const tracked = stdout
+      .split('\u0000')
+      .filter((entry) => entry.length > 0)
+      .map((entry) => path.join(ROOT, entry));
+    if (tracked.length > 0) return tracked.filter(isScannable);
+  } catch {
+    // git unavailable; fall through to the filesystem walk.
+  }
+  return (await walk(ROOT)).filter(isScannable);
+}
 
 async function main(): Promise<void> {
   const violations: string[] = [];
-  const files = (await walk(ROOT)).filter(
-    (file) => TEXT_FILE.test(file) || path.basename(file).startsWith('.env'),
-  );
+  const files = await filesToScan();
 
   for (const file of files) {
     const relative = path.relative(ROOT, file);
-    // This checker names the variables it looks for, and the spec pack discusses them.
-    if (relative === 'tools/check-secret-boundary.ts') continue;
+    // No self-exclusion: this file is covered by the `tools` allowlist for credential *names*,
+    // and its value-shape scan must still apply to it. Excluding the scanner from its own
+    // scan would let a committed key hide in the one file nobody checks.
     if (SKIP_FILES.has(path.basename(file))) continue;
 
     const text = await readFile(file, 'utf8');
@@ -105,9 +179,12 @@ async function main(): Promise<void> {
         );
       }
     }
+    // Shape matches apply to every file, with no documentation exemption. Prose is exactly
+    // where a real key gets pasted "as an example", and the previous carve-out for `docs/`
+    // and `specs/` meant a credential-shaped value there was silently accepted.
     for (const { pattern, why } of SECRET_SHAPES) {
       const match = pattern.exec(text);
-      if (match !== null && !relative.startsWith('specs/') && !relative.startsWith('docs/')) {
+      if (match !== null) {
         // Report the location, never the matched material itself.
         const line = text.slice(0, match.index).split('\n').length;
         violations.push(`${relative}:${line}: ${why}`);

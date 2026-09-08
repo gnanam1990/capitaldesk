@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import ts from 'typescript';
 
 /**
  * Mechanical dependency-layer check (TDD section 2).
@@ -103,15 +104,21 @@ async function sourceFiles(dir: string): Promise<readonly string[]> {
     let entries;
     try {
       entries = await readdir(current, { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      // An absent src/ directory is legitimate. Anything else — a permission error, an I/O
+      // failure — must not be swallowed, because silently skipping a subtree lets the checker
+      // report success while enforcing nothing.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
     }
     for (const entry of entries) {
       if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.next')
         continue;
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) await walk(full);
-      else if (/\.(ts|tsx|mts|cts)$/.test(entry.name)) out.push(full);
+      // JavaScript is included: the web package enables allowJs, so a .js module can cross a
+      // trust boundary exactly like a .ts one and was previously unchecked.
+      else if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(entry.name)) out.push(full);
     }
   }
   await walk(dir);
@@ -119,20 +126,91 @@ async function sourceFiles(dir: string): Promise<readonly string[]> {
 }
 
 /**
- * Every module specifier in a file: static imports, re-exports and dynamic import calls.
- * `export ... from` is a crossing exactly like `import ... from`, and the probe that
- * defeated the previous checker used precisely that form.
+ * Every module specifier in a file, read from the TypeScript AST.
+ *
+ * This was regex-based and kept losing. A combined pattern let one statement swallow the
+ * next; narrowing it then missed `import /* c *\/ 'x'`, `export * from /* c *\/ 'x'` and
+ * `import(/* c *\/ 'x')`, and started rejecting a *commented-out* import — a false positive
+ * on top of the false negatives. Each fix moved the boundary rather than closing the class.
+ *
+ * A parser settles it. Comments and strings are handled by definition, and the forms below
+ * are the complete set of ways a module specifier can appear:
+ *
+ *  - `import ... from 'x'` and bare `import 'x'`   (ImportDeclaration)
+ *  - `export ... from 'x'` and `export * from 'x'` (ExportDeclaration)
+ *  - `import('x')`                                 (dynamic import call)
+ *  - `require('x')`                                (CommonJS)
+ *  - `import x = require('x')`                     (TypeScript import-equals)
+ *
+ * A non-literal specifier — `import(someVariable)` — cannot be resolved statically. It is
+ * reported rather than ignored, because silently skipping it is how a boundary check starts
+ * lying about its coverage.
  */
-const SPECIFIER_PATTERN =
-  /(?:\bimport\b|\bexport\b)[\s\S]{0,400}?\bfrom\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)|\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)|\bimport\s+['"]([^'"]+)['"]/g;
-
-function specifiersIn(text: string): readonly string[] {
-  const found: string[] = [];
-  for (const match of text.matchAll(SPECIFIER_PATTERN)) {
-    const specifier = match[1] ?? match[2] ?? match[3] ?? match[4];
-    if (specifier !== undefined) found.push(specifier);
+function scriptKindOf(file: string): ts.ScriptKind {
+  switch (path.extname(file)) {
+    case '.tsx':
+      return ts.ScriptKind.TSX;
+    case '.jsx':
+      return ts.ScriptKind.JSX;
+    case '.js':
+    case '.mjs':
+    case '.cjs':
+      return ts.ScriptKind.JS;
+    default:
+      return ts.ScriptKind.TS;
   }
-  return found;
+}
+
+export interface FileSpecifiers {
+  readonly specifiers: readonly string[];
+  /** Specifiers the parser found but could not resolve to a literal string. */
+  readonly dynamic: readonly string[];
+}
+
+function specifiersIn(file: string, text: string): FileSpecifiers {
+  const source = ts.createSourceFile(
+    file,
+    text,
+    { languageVersion: ts.ScriptTarget.Latest },
+    /* setParentNodes */ false,
+    scriptKindOf(file),
+  );
+
+  const specifiers = new Set<string>();
+  const dynamic: string[] = [];
+
+  const record = (node: ts.Node | undefined, description: string): void => {
+    if (node === undefined) return;
+    if (ts.isStringLiteralLike(node)) specifiers.add(node.text);
+    else
+      dynamic.push(
+        `${description} at line ${source.getLineAndCharacterOfPosition(node.pos).line + 1}`,
+      );
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node)) {
+      // Covers `import x from 'a'`, `import 'a'` and `import type ... from 'a'`.
+      record(node.moduleSpecifier, 'import');
+    } else if (ts.isExportDeclaration(node)) {
+      // `export * from 'a'`, `export { x } from 'a'`. Absent for a local export.
+      if (node.moduleSpecifier !== undefined) record(node.moduleSpecifier, 'export-from');
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      if (ts.isExternalModuleReference(node.moduleReference)) {
+        record(node.moduleReference.expression, 'import-equals');
+      }
+    } else if (ts.isCallExpression(node)) {
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
+      if (isDynamicImport || isRequire) {
+        record(node.arguments[0], isDynamicImport ? 'dynamic import' : 'require');
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  ts.forEachChild(source, visit);
+  return { specifiers: [...specifiers], dynamic };
 }
 
 async function main(): Promise<void> {
@@ -179,7 +257,13 @@ async function main(): Promise<void> {
     const declared = new Set(manifest.dependencies);
     for (const file of await sourceFiles(path.join(manifest.dir, 'src'))) {
       const origin = path.relative(ROOT, file);
-      for (const specifier of specifiersIn(await readFile(file, 'utf8'))) {
+      const parsed = specifiersIn(file, await readFile(file, 'utf8'));
+      for (const unresolved of parsed.dynamic) {
+        violations.push(
+          `${origin}: ${unresolved} has a non-literal specifier that cannot be checked`,
+        );
+      }
+      for (const specifier of parsed.specifiers) {
         if (specifier.startsWith('@capitaldesk/')) {
           // Normalise a subpath export such as "@capitaldesk/contracts/fixtures/x.json".
           const target = specifier.split('/').slice(0, 2).join('/');
