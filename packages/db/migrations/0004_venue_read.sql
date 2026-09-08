@@ -1,0 +1,162 @@
+-- Module 05: persisted read cursors, account snapshots and observation cuts.
+--
+-- A forward migration. Nothing here alters a table created by 0003, which is already merged;
+-- the two new foreign keys point *into* the existing scope tuples rather than changing them.
+--
+-- The reader is stateless by design. What must survive a restart is the position it had
+-- reached: ADR-0002 condition C3 establishes backfill completeness by contiguous cursor
+-- pagination, and a cursor that is lost is a window that can no longer be proven. Losing it
+-- does not corrupt anything, but it makes the affected window UNSUPPORTED, which stops
+-- dispatch — so the cursor is durable state, not a cache.
+
+-- Per-symbol trade cursors.
+--
+-- Per symbol because `myTrades` requires a symbol and its ids are per-symbol: there is no
+-- account-wide trade cursor to keep, and pretending otherwise is the mistake ADR-0002 exists
+-- to prevent. Scoped by epoch so a reset cannot resume from a cursor belonging to the account
+-- that existed before it.
+CREATE TABLE venue_trade_cursors (
+  workspace_id        TEXT        NOT NULL,
+  pool_id             TEXT        NOT NULL,
+  epoch               INTEGER     NOT NULL,
+  symbol              TEXT        NOT NULL,
+  -- The next `fromId` to request. A digit string, not a bigint column: venue ids can exceed
+  -- what a caller's JSON number can hold, and every layer above keeps them as text so that a
+  -- cursor is never rounded into a different one.
+  next_from_id        TEXT        NOT NULL,
+  -- The highest trade id actually observed, for evidence. Not the same as the cursor, which
+  -- is one past it because `fromId` is inclusive.
+  highest_trade_id    TEXT        NOT NULL,
+  -- The digest of the response that advanced the cursor to here, so a later reader can say
+  -- which exact evidence moved it.
+  advanced_by_digest  TEXT        NOT NULL,
+  advanced_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  version             INTEGER     NOT NULL DEFAULT 1,
+  PRIMARY KEY (workspace_id, pool_id, epoch, symbol),
+  FOREIGN KEY (workspace_id, pool_id, epoch)
+    REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
+  CONSTRAINT venue_trade_cursors_symbol_shape CHECK (symbol ~ '^[A-Z0-9]{2,20}$'),
+  -- Canonical digits. '007' and '7' are one number and two strings, and a cursor compared as
+  -- text must have exactly one spelling.
+  CONSTRAINT venue_trade_cursors_from_shape CHECK (next_from_id ~ '^(0|[1-9][0-9]*)$'),
+  CONSTRAINT venue_trade_cursors_highest_shape CHECK (highest_trade_id ~ '^(0|[1-9][0-9]*)$'),
+  CONSTRAINT venue_trade_cursors_version_positive CHECK (version >= 1)
+);
+
+-- A cursor only ever moves forward.
+--
+-- A rollback would re-fetch history already booked, and — worse — a caller that believed the
+-- lower value would report a window as backfilled when the evidence for its tail had been
+-- discarded. Compared numerically, because '9' sorts after '10' as text.
+CREATE OR REPLACE FUNCTION refuse_cursor_rollback() RETURNS trigger AS $$
+BEGIN
+  IF NEW.next_from_id::NUMERIC < OLD.next_from_id::NUMERIC THEN
+    RAISE EXCEPTION 'trade cursor for % cannot move backwards from % to %',
+      OLD.symbol, OLD.next_from_id, NEW.next_from_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER venue_trade_cursors_move_forward_only
+  BEFORE UPDATE ON venue_trade_cursors
+  FOR EACH ROW EXECUTE FUNCTION refuse_cursor_rollback();
+
+CREATE TRIGGER venue_trade_cursors_are_never_deleted
+  BEFORE DELETE ON venue_trade_cursors
+  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+-- Account snapshots: the brackets of a cut.
+--
+-- ADR-0002 condition C4 requires bracketing snapshots that differ by exactly the booked
+-- effects, and states plainly that this is necessary and never sufficient. The provenance
+-- columns are what make a snapshot checkable at all: without the request interval and the
+-- response digest, two equal balances are indistinguishable from one balance read twice.
+CREATE TABLE venue_account_snapshots (
+  workspace_id        TEXT        NOT NULL,
+  pool_id             TEXT        NOT NULL,
+  epoch               INTEGER     NOT NULL,
+  snapshot_id         TEXT        NOT NULL,
+  -- The venue's authenticated account id as proven by this very response, not a configured
+  -- alias. A snapshot that cannot name its own account cannot be attributed to a pool.
+  stable_account_id   TEXT        NOT NULL,
+  requested_at        TIMESTAMPTZ NOT NULL,
+  responded_at        TIMESTAMPTZ NOT NULL,
+  -- The venue's own updateTime, which is not the same as when we asked.
+  source_time         TIMESTAMPTZ,
+  response_digest     TEXT        NOT NULL,
+  -- Balances as observed: asset, free atoms, locked atoms. Stored whole so a later reader
+  -- recomputes rather than trusting a projection.
+  balances            JSONB       NOT NULL,
+  recorded_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, pool_id, snapshot_id),
+  FOREIGN KEY (workspace_id, pool_id, epoch)
+    REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
+  CONSTRAINT venue_account_snapshots_id_shape
+    CHECK (snapshot_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+  CONSTRAINT venue_account_snapshots_scope_tuple
+    UNIQUE (workspace_id, pool_id, epoch, snapshot_id),
+  CONSTRAINT venue_account_snapshots_digest_shape CHECK (response_digest ~ '^sha256:[0-9a-f]{64}$'),
+  CONSTRAINT venue_account_snapshots_balances_is_array CHECK (jsonb_typeof(balances) = 'array'),
+  -- An interval that runs backwards is not a measurement, it is a fault.
+  CONSTRAINT venue_account_snapshots_interval_ordered CHECK (responded_at >= requested_at)
+);
+
+CREATE TRIGGER venue_account_snapshots_are_append_only
+  BEFORE UPDATE OR DELETE ON venue_account_snapshots
+  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+-- An observation cut: one assessed window and its coverage verdict.
+--
+-- The verdict is stored with the reasons, not just the state, because the console, the
+-- evidence exports and an owner adjudicating an UNSUPPORTED window all need to say which
+-- condition was unmet. A state with no reasons is an assertion.
+CREATE TABLE venue_observation_cuts (
+  workspace_id        TEXT        NOT NULL,
+  pool_id             TEXT        NOT NULL,
+  epoch               INTEGER     NOT NULL,
+  cut_id              TEXT        NOT NULL,
+  window_from         TIMESTAMPTZ NOT NULL,
+  window_to           TIMESTAMPTZ NOT NULL,
+  -- The bracketing snapshots, in this pool and epoch.
+  opening_snapshot_id TEXT        NOT NULL,
+  closing_snapshot_id TEXT        NOT NULL,
+  coverage_state      TEXT        NOT NULL,
+  detection_scope     TEXT        NOT NULL,
+  -- Every unmet condition, in the predicate's stable order.
+  unmet               JSONB       NOT NULL,
+  -- The symbols this cut claims to have enumerated. ADR-0002 condition U: one *tradable*
+  -- symbol must not silently become one *observed* symbol, so the set is recorded rather
+  -- than assumed from configuration at read time.
+  observed_symbols    JSONB       NOT NULL,
+  assessed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, pool_id, cut_id),
+  FOREIGN KEY (workspace_id, pool_id, epoch)
+    REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
+  FOREIGN KEY (workspace_id, pool_id, epoch, opening_snapshot_id)
+    REFERENCES venue_account_snapshots (workspace_id, pool_id, epoch, snapshot_id),
+  FOREIGN KEY (workspace_id, pool_id, epoch, closing_snapshot_id)
+    REFERENCES venue_account_snapshots (workspace_id, pool_id, epoch, snapshot_id),
+  CONSTRAINT venue_observation_cuts_id_shape
+    CHECK (cut_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+  CONSTRAINT venue_observation_cuts_window_ordered CHECK (window_to >= window_from),
+  CONSTRAINT venue_observation_cuts_state_known CHECK (coverage_state IN
+    ('COMPLETE', 'INCOMPLETE', 'GAP_OPEN', 'UNSUPPORTED')),
+  CONSTRAINT venue_observation_cuts_scope_known CHECK (detection_scope IN
+    ('FULL_WITHIN_PROVEN_UNIVERSE', 'NET_BALANCE_CHANGES_ONLY')),
+  CONSTRAINT venue_observation_cuts_unmet_is_array CHECK (jsonb_typeof(unmet) = 'array'),
+  CONSTRAINT venue_observation_cuts_symbols_is_array
+    CHECK (jsonb_typeof(observed_symbols) = 'array'),
+  -- A COMPLETE cut with unmet conditions is a contradiction, and it is the contradiction that
+  -- would let a pool dispatch against a window nothing had proven.
+  CONSTRAINT venue_observation_cuts_complete_has_no_unmet
+    CHECK (coverage_state <> 'COMPLETE' OR jsonb_array_length(unmet) = 0),
+  -- Only a fully proven universe may be recorded as COMPLETE.
+  CONSTRAINT venue_observation_cuts_complete_is_fully_scoped
+    CHECK (coverage_state <> 'COMPLETE' OR detection_scope = 'FULL_WITHIN_PROVEN_UNIVERSE')
+);
+
+CREATE TRIGGER venue_observation_cuts_are_append_only
+  BEFORE UPDATE OR DELETE ON venue_observation_cuts
+  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
