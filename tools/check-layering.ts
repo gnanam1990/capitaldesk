@@ -26,6 +26,7 @@ const LAYERS: ReadonlyArray<readonly string[]> = [
     '@capitaldesk/observability',
     '@capitaldesk/domain',
     '@capitaldesk/binance',
+    '@capitaldesk/ledger',
   ],
   ['@capitaldesk/db'],
   ['@capitaldesk/api', '@capitaldesk/worker', '@capitaldesk/executor', '@capitaldesk/web'],
