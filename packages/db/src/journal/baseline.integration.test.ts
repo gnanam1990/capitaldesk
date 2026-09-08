@@ -123,8 +123,13 @@ describeIfDatabase('account baseline and owner allocation', () => {
       unmet?: string;
       /** The closing snapshot's holdings. The opening is derived from exactly these. */
       balances?: readonly { asset: string; freeAtoms: string; lockedAtoms: string }[];
+      /** The scope the cut belongs to. Defaults to the pool the other fixtures use. */
+      workspaceId?: string;
+      poolId?: string;
     } = {},
   ): Promise<void> {
+    const workspaceId = overrides.workspaceId ?? WORKSPACE;
+    const poolId = overrides.poolId ?? POOL;
     for (const [id, requestedAt, respondedAt] of [
       [`${cutId}-open`, '2026-09-08T11:00:00.000Z', '2026-09-08T11:00:00.100Z'],
       [`${cutId}-close`, '2026-09-08T12:00:00.000Z', '2026-09-08T12:00:00.100Z'],
@@ -135,8 +140,8 @@ describeIfDatabase('account baseline and owner allocation', () => {
             responded_at, source_time, response_digest, balances)
          VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9::jsonb)`,
         [
-          WORKSPACE,
-          POOL,
+          workspaceId,
+          poolId,
           epoch,
           id,
           overrides.stableAccountId ?? ACCOUNT.stableAccountId,
@@ -158,8 +163,8 @@ describeIfDatabase('account baseline and owner allocation', () => {
        VALUES ($1,$2,$3,$4,'2026-09-08T11:00:00.000Z','2026-09-08T12:00:00.100Z',
                $5,$6,$7,$8,$9::jsonb,'["BTCUSDT"]'::jsonb)`,
       [
-        WORKSPACE,
-        POOL,
+        workspaceId,
+        poolId,
         epoch,
         cutId,
         `${cutId}-open`,
@@ -759,6 +764,188 @@ describeIfDatabase('account baseline and owner allocation', () => {
         }
         expect(refusal).toBe('23001');
       });
+    });
+  });
+
+  /**
+   * T-056, the part that matters: the same venue account reached from two workspaces.
+   *
+   * The idempotency cases above prove one workspace cannot open twice. They say nothing about
+   * two workspaces racing for the same funds on independent connections, which is the failure
+   * that would create the same 1000 USDT twice under two sets of claims. What decides is the
+   * registry's single-active-lease index, so these tests contend for it for real.
+   */
+  describe('one venue account bootstraps once across workspaces (T-056)', () => {
+    const RIVAL_POOL = 'pool-rival';
+
+    /**
+     * A second workspace's pool bound to the SAME stable account, with no lease of its own.
+     *
+     * The harness's seedPool would take a lease, which is the thing under test here, so the
+     * rows are seeded directly and the race decides who gets one.
+     */
+    async function seedRivalPool(): Promise<void> {
+      await harness.admin.query(
+        `INSERT INTO pools (workspace_id, pool_id, venue, environment, stable_account_id, state)
+         VALUES ($1,$2,$3,$4,$5,'READY')`,
+        [OTHER_WORKSPACE, RIVAL_POOL, ACCOUNT.venue, ACCOUNT.environment, ACCOUNT.stableAccountId],
+      );
+      await harness.admin.query(
+        `INSERT INTO baseline_epochs (workspace_id, pool_id, epoch) VALUES ($1,$2,1)`,
+        [OTHER_WORKSPACE, RIVAL_POOL],
+      );
+      await seedCompleteCut('cut-rival', 1, {
+        workspaceId: OTHER_WORKSPACE,
+        poolId: RIVAL_POOL,
+      });
+    }
+
+    /** Release the lease the default fixture holds, so both pools start ungoverned. */
+    async function releaseDefaultLease(): Promise<void> {
+      await harness.admin.query(
+        `UPDATE governance_leases SET released_at = now(), released_reason = 'race setup'
+          WHERE workspace_id = $1 AND pool_id = $2 AND released_at IS NULL`,
+        [WORKSPACE, POOL],
+      );
+    }
+
+    function rivalBootstrap(): ReturnType<BaselineRepository['bootstrap']> {
+      return baselines.bootstrap({
+        workspaceId: OTHER_WORKSPACE,
+        poolId: RIVAL_POOL,
+        epoch: 1,
+        baselineId: 'baseline-rival',
+        cutId: 'cut-rival',
+        supported: SUPPORTED,
+        excludedAssets: [],
+      });
+    }
+
+    it('serializes two workspaces racing for the lease on independent backends', async () => {
+      await releaseDefaultLease();
+      await seedRivalPool();
+
+      const [a, b] = [await harness.connect(), await harness.connect()];
+      await a.client.query('BEGIN');
+      await b.client.query('BEGIN');
+
+      // The first claim takes the index entry and holds it uncommitted.
+      await a.client.query(
+        `INSERT INTO governance_leases
+           (lease_id, venue, environment, stable_account_id, workspace_id, pool_id)
+         VALUES ('lease-race-a',$1,$2,$3,$4,$5)`,
+        [ACCOUNT.venue, ACCOUNT.environment, ACCOUNT.stableAccountId, WORKSPACE, POOL],
+      );
+
+      // The second does not get a duplicate and does not get an immediate error: it blocks on
+      // the uncommitted entry, which is what makes this a race rather than two serial writes.
+      const contended = b.client
+        .query(
+          `INSERT INTO governance_leases
+             (lease_id, venue, environment, stable_account_id, workspace_id, pool_id)
+           VALUES ('lease-race-b',$1,$2,$3,$4,$5)`,
+          [
+            ACCOUNT.venue,
+            ACCOUNT.environment,
+            ACCOUNT.stableAccountId,
+            OTHER_WORKSPACE,
+            RIVAL_POOL,
+          ],
+        )
+        .then(() => 'accepted')
+        .catch((error: unknown) => sqlRefusal(error).constraint);
+
+      await harness.waitUntilBlockedBy(a.pid, [b.pid]);
+      await a.client.query('COMMIT');
+
+      expect(await contended).toBe('governance_leases_single_active');
+      await b.client.query('ROLLBACK');
+
+      const held = await harness.admin.query<{ workspace_id: string }>(
+        `SELECT workspace_id FROM governance_leases
+          WHERE stable_account_id = $1 AND released_at IS NULL`,
+        [ACCOUNT.stableAccountId],
+      );
+      expect(held.rows.map((row) => row.workspace_id)).toEqual([WORKSPACE]);
+    });
+
+    it('gives the opening to the lease holder and leaves the loser with nothing', async () => {
+      await releaseDefaultLease();
+      await seedRivalPool();
+      // The rival wins this one, to prove the outcome follows the lease and not the fixture's
+      // default workspace.
+      await harness.seedGovernanceLease(OTHER_WORKSPACE, RIVAL_POOL);
+
+      const loser = await bootstrap();
+      expect(refusedAssessment(loser).unmet).toContain('governanceLeaseHeld');
+
+      const winner = await rivalBootstrap();
+      expect(winner).toMatchObject({ ok: true });
+
+      // The loser wrote no baseline and no entries. Its absence is asserted by scope, so a
+      // row written under the wrong workspace would still fail this.
+      const baselineRows = await harness.admin.query<{ workspace_id: string }>(
+        'SELECT workspace_id FROM account_baselines',
+      );
+      expect(baselineRows.rows.map((row) => row.workspace_id)).toEqual([OTHER_WORKSPACE]);
+      const entryScopes = await harness.admin.query<{ workspace_id: string }>(
+        'SELECT DISTINCT workspace_id FROM ledger_entries',
+      );
+      expect(entryScopes.rows.map((row) => row.workspace_id)).toEqual([OTHER_WORKSPACE]);
+
+      // And the funds were opened once, not twice: one HOUSE claim of 1000 USDT exists in the
+      // whole registry for this account.
+      const house = await harness.admin.query<{ atoms: string }>(
+        `SELECT coalesce(sum(delta_atoms), 0)::text AS atoms FROM ledger_entries
+          WHERE account_owner = 'HOUSE' AND asset_code = 'USDT'`,
+      );
+      expect(house.rows[0]?.atoms).toBe('1000');
+    });
+
+    it('treats a rotated credential alias as the same account, not a new one', async () => {
+      // Identity is the stable account id. A second workspace holding freshly rotated API keys
+      // sees the same funds, so recording a new alias must not create a second governable
+      // account — otherwise key rotation alone would defeat the single-lease rule.
+      // The default pool keeps the lease it was seeded with; only the rival is new here.
+      await seedRivalPool();
+      for (const alias of ['key-original', 'key-rotated']) {
+        await harness.admin.query(
+          `INSERT INTO venue_account_credentials
+             (venue, environment, stable_account_id, credential_alias)
+           VALUES ($1,$2,$3,$4)`,
+          [ACCOUNT.venue, ACCOUNT.environment, ACCOUNT.stableAccountId, alias],
+        );
+      }
+
+      // The rotated-key workspace cannot take a lease of its own...
+      let refusal = 'accepted';
+      try {
+        await harness.admin.query(
+          `INSERT INTO governance_leases
+             (lease_id, venue, environment, stable_account_id, workspace_id, pool_id)
+           VALUES ('lease-rotated',$1,$2,$3,$4,$5)`,
+          [
+            ACCOUNT.venue,
+            ACCOUNT.environment,
+            ACCOUNT.stableAccountId,
+            OTHER_WORKSPACE,
+            RIVAL_POOL,
+          ],
+        );
+      } catch (error) {
+        refusal = sqlRefusal(error).constraint;
+      }
+      expect(refusal).toBe('governance_leases_single_active');
+
+      // ...and so cannot open the account, however many aliases have seen it.
+      expect(refusedAssessment(await rivalBootstrap()).unmet).toContain('governanceLeaseHeld');
+      const aliases = await harness.admin.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM venue_account_credentials
+          WHERE stable_account_id = $1`,
+        [ACCOUNT.stableAccountId],
+      );
+      expect(aliases.rows[0]?.count).toBe('2');
+      expect((await harness.admin.query('SELECT 1 FROM account_baselines')).rowCount).toBe(0);
     });
   });
 
