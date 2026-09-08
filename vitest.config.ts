@@ -23,6 +23,8 @@ const workspaceAliases = {
   '@capitaldesk/observability': packageSource('observability'),
   '@capitaldesk/db': packageSource('db'),
   '@capitaldesk/reconciler': packageSource('reconciler'),
+  '@capitaldesk/sdk': packageSource('sdk'),
+  '@capitaldesk/agent-tools': packageSource('agent-tools'),
 };
 
 /**

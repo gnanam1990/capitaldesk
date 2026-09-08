@@ -143,6 +143,9 @@ importers:
       '@capitaldesk/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@capitaldesk/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@fastify/cookie':
         specifier: 'catalog:'
         version: 11.1.2
@@ -255,6 +258,16 @@ importers:
       '@types/pg':
         specifier: 'catalog:'
         version: 8.15.6
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/agent-tools:
+    dependencies:
+      '@capitaldesk/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+    devDependencies:
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -374,6 +387,15 @@ importers:
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/sdk:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.2
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

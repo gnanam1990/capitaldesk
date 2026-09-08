@@ -7,11 +7,18 @@ import authPlugin from './auth/plugin.js';
 import { registerAuthRoutes } from './auth/routes.js';
 import { IdentityRepository } from './auth/repository.js';
 import { resolveOwnerSessionSecret } from './auth/session-secret.js';
-import { ApprovalRepository, IntentRepository, PolicyRepository } from '@capitaldesk/db';
+import {
+  ApprovalRepository,
+  EventRepository,
+  IntentRepository,
+  PolicyRepository,
+  PublicReadRepository,
+} from '@capitaldesk/db';
 import { registerIntentRoutes } from './intents/routes.js';
 import { registerPolicyRoutes } from './policies/routes.js';
 import { registerApprovalRoutes } from './approvals/routes.js';
 import { API_BODY_LIMIT_BYTES, applySecurityHeaders } from './security-headers.js';
+import { registerOperationalRoutes } from './operations/routes.js';
 
 /**
  * Probe PostgreSQL with every step bounded.
@@ -159,6 +166,10 @@ export function buildServer(config: ApiConfig, dependencies: ServerDependencies 
         registerIntentRoutes(app, { repository: new IntentRepository(identityPool) });
         registerPolicyRoutes(app, { repository: new PolicyRepository(identityPool) });
         registerApprovalRoutes(app, { repository: new ApprovalRepository(identityPool) });
+        registerOperationalRoutes(app, {
+          reads: new PublicReadRepository(identityPool),
+          events: new EventRepository(identityPool),
+        });
       });
   }
 

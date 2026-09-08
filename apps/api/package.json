@@ -10,7 +10,8 @@
     "typecheck": "tsc -b --pretty",
     "start": "node dist/main.js",
     "dev": "tsx watch src/main.ts",
-    "enroll": "node dist/cli/enroll-cli.js"
+    "enroll": "node dist/cli/enroll-cli.js",
+    "operator": "node dist/cli/operator-cli.js"
   },
   "dependencies": {
     "@capitaldesk/config": "workspace:*",
@@ -18,6 +19,7 @@
     "@capitaldesk/domain": "workspace:*",
     "@capitaldesk/db": "workspace:*",
     "@capitaldesk/observability": "workspace:*",
+    "@capitaldesk/sdk": "workspace:*",
     "@fastify/cookie": "catalog:",
     "@fastify/csrf-protection": "catalog:",
     "@fastify/rate-limit": "catalog:",

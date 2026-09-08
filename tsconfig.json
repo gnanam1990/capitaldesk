@@ -32,6 +32,12 @@
       "path": "./packages/fault-lab"
     },
     {
+      "path": "./packages/sdk"
+    },
+    {
+      "path": "./packages/agent-tools"
+    },
+    {
       "path": "./apps/api"
     },
     {
