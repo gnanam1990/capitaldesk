@@ -228,6 +228,9 @@ CREATE TABLE reservations (
   PRIMARY KEY (workspace_id, pool_id, reservation_id),
   FOREIGN KEY (workspace_id, pool_id, epoch, plan_id)
     REFERENCES plans (workspace_id, pool_id, epoch, plan_id),
+  -- Economic ownership references a real strategy in this pool, not an unchecked text owner.
+  FOREIGN KEY (workspace_id, pool_id, strategy_id)
+    REFERENCES strategies (workspace_id, pool_id, strategy_id),
   CONSTRAINT reservations_id_shape CHECK (reservation_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
   CONSTRAINT reservations_atoms_integral CHECK (reserved_atoms = trunc(reserved_atoms)),
   CONSTRAINT reservations_atoms_nonnegative CHECK (reserved_atoms >= 0),
@@ -268,11 +271,20 @@ CREATE TABLE dispatch_attempts (
   -- Host fence evidence (ADR-0001): what held the marker, so a resumed sender is detectable.
   marker_host_boot_id TEXT,
   marker_pid         INTEGER,
+  -- Set when an attempt that never marked is made permanently undispatchable - by a restore,
+  -- or by the invalidation of its plan. An honest terminal posture for a PREPARED attempt
+  -- whose authority is gone: it was never sent, and it can never be sent.
+  voided_at          TIMESTAMPTZ,
+  voided_reason      TEXT,
   PRIMARY KEY (workspace_id, pool_id, attempt_id),
   FOREIGN KEY (workspace_id, pool_id, epoch, plan_id)
     REFERENCES plans (workspace_id, pool_id, epoch, plan_id),
   CONSTRAINT dispatch_attempts_id_shape CHECK (attempt_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
   CONSTRAINT dispatch_attempts_client_id_unique UNIQUE (client_order_id),
+  -- Referenced by venue_orders through the complete tuple. A bare client_order_id reference
+  -- let an order in one workspace and pool correlate to an attempt marked in another.
+  CONSTRAINT dispatch_attempts_correlation_tuple
+    UNIQUE (workspace_id, pool_id, epoch, client_order_id),
   CONSTRAINT dispatch_attempts_token_unique UNIQUE (dispatch_token),
   CONSTRAINT dispatch_attempts_state_known CHECK (state IN
     ('PREPARED', 'DISPATCH_MARKED', 'SEND_ATTEMPTED', 'ACKNOWLEDGED', 'REJECTED', 'UNKNOWN',
@@ -280,7 +292,13 @@ CREATE TABLE dispatch_attempts (
   CONSTRAINT dispatch_attempts_marked_has_time
     CHECK (state = 'PREPARED' OR marked_at IS NOT NULL),
   CONSTRAINT dispatch_attempts_send_has_time
-    CHECK (state NOT IN ('SEND_ATTEMPTED', 'ACKNOWLEDGED', 'REJECTED') OR send_attempted_at IS NOT NULL)
+    CHECK (state NOT IN ('SEND_ATTEMPTED', 'ACKNOWLEDGED', 'REJECTED') OR send_attempted_at IS NOT NULL),
+  CONSTRAINT dispatch_attempts_voided_together
+    CHECK ((voided_at IS NULL) = (voided_reason IS NULL)),
+  -- Voiding says the attempt never marked. An attempt past PREPARED cannot be voided, and a
+  -- voided attempt cannot later be marked; the trigger enforces the second direction.
+  CONSTRAINT dispatch_attempts_voided_only_when_prepared
+    CHECK (voided_at IS NULL OR state = 'PREPARED')
 );
 
 -- The transition table from packages/contracts/src/states.ts (DISPATCH_ATTEMPT_TRANSITIONS).
@@ -302,6 +320,16 @@ BEGIN
      OR (OLD.send_attempted_at IS NOT NULL AND NEW.send_attempted_at IS DISTINCT FROM OLD.send_attempted_at)
      OR (OLD.signed_request IS NOT NULL AND NEW.signed_request IS DISTINCT FROM OLD.signed_request) THEN
     RAISE EXCEPTION 'dispatch attempt % identity is immutable', OLD.attempt_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- A voided attempt is permanently undispatchable, whichever writer tries.
+  IF OLD.voided_at IS NOT NULL AND NEW.state IS DISTINCT FROM OLD.state THEN
+    RAISE EXCEPTION 'dispatch attempt % was voided (%): it can never be marked',
+      OLD.attempt_id, OLD.voided_reason
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF OLD.voided_at IS NOT NULL AND NEW.voided_at IS NULL THEN
+    RAISE EXCEPTION 'dispatch attempt % cannot be un-voided', OLD.attempt_id
       USING ERRCODE = 'restrict_violation';
   END IF;
   IF NEW.state = OLD.state THEN
@@ -365,6 +393,226 @@ CREATE TRIGGER governance_leases_are_never_deleted
   FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
 
 -- --------------------------------------------------------------------------------------
+-- Evidence conflicts
+-- --------------------------------------------------------------------------------------
+--
+-- What a source said that contradicts what it said before: a second payload under one source
+-- reference, or a terminal order status replaced by a different terminal status. Neither is a
+-- duplicate, and neither may overwrite the stored evidence. The row is the durable record the
+-- incident path in module 15 consumes; recording it is not resolving it.
+
+CREATE TABLE evidence_conflicts (
+  conflict_id        BIGSERIAL   NOT NULL PRIMARY KEY,
+  workspace_id       TEXT        NOT NULL,
+  pool_id            TEXT        NOT NULL,
+  epoch              INTEGER     NOT NULL,
+  subject_kind       TEXT        NOT NULL,
+  -- What the conflicting statements are about: an observation id, or symbol/venue order id.
+  subject_ref        TEXT        NOT NULL,
+  stored             JSONB       NOT NULL,
+  incoming           JSONB       NOT NULL,
+  detected_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (workspace_id, pool_id, epoch)
+    REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
+  CONSTRAINT evidence_conflicts_subject_known
+    CHECK (subject_kind IN ('observation', 'order-status'))
+);
+
+CREATE INDEX evidence_conflicts_by_subject
+  ON evidence_conflicts (workspace_id, pool_id, subject_kind, subject_ref);
+
+CREATE TRIGGER evidence_conflicts_are_append_only
+  BEFORE UPDATE OR DELETE ON evidence_conflicts
+  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+-- --------------------------------------------------------------------------------------
+-- Ledger
+-- --------------------------------------------------------------------------------------
+--
+-- Append-only double entry per asset. A transaction is the unit of economic change; its
+-- entries must sum to zero per asset, checked at commit by a deferred constraint trigger, so
+-- an unbalanced posting - a crash between two entries, a bug that wrote one side - cannot
+-- become a committed fact (INV-02, T-030).
+--
+-- Every transaction names its source operation, unique within the pool: a fill, a bootstrap
+-- allocation, a reservation. Posting the same fill twice is a unique violation, which is what
+-- makes reapplying an observation after a crash idempotent rather than double-counted.
+
+CREATE TABLE ledger_transactions (
+  workspace_id       TEXT        NOT NULL,
+  pool_id            TEXT        NOT NULL,
+  epoch              INTEGER     NOT NULL,
+  ledger_txn_id      TEXT        NOT NULL,
+  -- The transaction that created this row. Entries may only be added by that same database
+  -- transaction, which is what makes the committed entry set final: see
+  -- refuse_entry_after_commit() below.
+  created_xid        XID8        NOT NULL DEFAULT pg_current_xact_id(),
+  -- The pool's ledger revision this transaction produced. Strictly increasing per pool.
+  revision           BIGINT      NOT NULL,
+  source_kind        TEXT        NOT NULL,
+  source_ref         TEXT        NOT NULL,
+  description        TEXT        NOT NULL,
+  posted_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, pool_id, ledger_txn_id),
+  FOREIGN KEY (workspace_id, pool_id, epoch)
+    REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
+  CONSTRAINT ledger_transactions_id_shape
+    CHECK (ledger_txn_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+  CONSTRAINT ledger_transactions_revision_positive CHECK (revision >= 1),
+  CONSTRAINT ledger_transactions_revision_unique UNIQUE (workspace_id, pool_id, revision),
+  CONSTRAINT ledger_transactions_source_unique
+    UNIQUE (workspace_id, pool_id, epoch, source_kind, source_ref),
+  -- Referenced by raw_observations.applied_ledger_txn_id through the complete tuple.
+  CONSTRAINT ledger_transactions_scope_tuple UNIQUE (workspace_id, pool_id, epoch, ledger_txn_id)
+);
+
+-- Account kinds. ASSET_CONTROL mirrors what the venue holds; the claims partition it among
+-- strategies and HOUSE (INV-04). The sign convention is a delta per entry; each account's
+-- running balance is what the projection checks for nonnegativity.
+CREATE TABLE ledger_entries (
+  workspace_id       TEXT        NOT NULL,
+  pool_id            TEXT        NOT NULL,
+  ledger_txn_id      TEXT        NOT NULL,
+  entry_seq          INTEGER     NOT NULL,
+  account_kind       TEXT        NOT NULL,
+  -- 'HOUSE', 'ASSET_CONTROL' or a strategy id, depending on account_kind.
+  account_owner      TEXT        NOT NULL,
+  claim_state        TEXT        NOT NULL,
+  asset_code         TEXT        NOT NULL,
+  asset_scale        TEXT        NOT NULL,
+  delta_atoms        NUMERIC(78, 0) NOT NULL,
+  PRIMARY KEY (workspace_id, pool_id, ledger_txn_id, entry_seq),
+  FOREIGN KEY (workspace_id, pool_id, ledger_txn_id)
+    REFERENCES ledger_transactions (workspace_id, pool_id, ledger_txn_id),
+  CONSTRAINT ledger_entries_kind_known
+    CHECK (account_kind IN ('ASSET_CONTROL', 'HOUSE', 'STRATEGY')),
+  CONSTRAINT ledger_entries_owner_matches_kind CHECK (
+    (account_kind = 'ASSET_CONTROL' AND account_owner = 'ASSET_CONTROL')
+    OR (account_kind = 'HOUSE' AND account_owner = 'HOUSE')
+    OR (account_kind = 'STRATEGY' AND account_owner NOT IN ('HOUSE', 'ASSET_CONTROL'))),
+  -- ASSET_CONTROL has no claim state; claims are AVAILABLE, RESERVED or QUARANTINED.
+  CONSTRAINT ledger_entries_claim_state_known CHECK (
+    (account_kind = 'ASSET_CONTROL' AND claim_state = 'CONTROL')
+    OR (account_kind <> 'ASSET_CONTROL' AND claim_state IN ('AVAILABLE', 'RESERVED', 'QUARANTINED'))),
+  CONSTRAINT ledger_entries_delta_integral CHECK (delta_atoms = trunc(delta_atoms)),
+  CONSTRAINT ledger_entries_delta_nonzero CHECK (delta_atoms <> 0)
+);
+
+CREATE INDEX ledger_entries_by_account
+  ON ledger_entries (workspace_id, pool_id, account_owner, asset_code, asset_scale);
+
+-- A strategy-owned entry names a real strategy in this pool. The owner column also carries
+-- 'HOUSE' and 'ASSET_CONTROL', so this cannot be a foreign key; the check is a trigger over
+-- the same scope tuple, and it is the same guarantee reservations get from their key.
+CREATE OR REPLACE FUNCTION refuse_unknown_strategy_owner() RETURNS trigger AS $$
+BEGIN
+  IF NEW.account_kind = 'STRATEGY' AND NOT EXISTS (
+    SELECT 1 FROM strategies s
+     WHERE s.workspace_id = NEW.workspace_id
+       AND s.strategy_id = NEW.account_owner
+       AND s.pool_id = (SELECT pool_id FROM pools p
+                         WHERE p.workspace_id = NEW.workspace_id AND p.pool_id = NEW.pool_id)
+  ) THEN
+    RAISE EXCEPTION 'ledger entry names strategy % which does not exist in %/%',
+      NEW.account_owner, NEW.workspace_id, NEW.pool_id
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ledger_entries_owner_is_real
+  BEFORE INSERT ON ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION refuse_unknown_strategy_owner();
+
+-- Balanced per asset: for every transaction and asset, the control side equals the claims
+-- side. Control entries carry the venue-facing change; claim entries partition it. So the
+-- invariant is sum(control) = sum(claims) per asset, i.e. sum(control) - sum(claims) = 0.
+-- Internal claim transfers (AVAILABLE -> RESERVED) have no control entry and sum to zero on
+-- the claims side alone; the same predicate covers them.
+CREATE OR REPLACE FUNCTION assert_ledger_transaction_balanced() RETURNS trigger AS $$
+DECLARE
+  unbalanced RECORD;
+BEGIN
+  SELECT e.asset_code, e.asset_scale,
+         sum(CASE WHEN e.account_kind = 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END) AS control,
+         sum(CASE WHEN e.account_kind <> 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END) AS claims
+    INTO unbalanced
+    FROM ledger_entries e
+   WHERE e.workspace_id = NEW.workspace_id AND e.pool_id = NEW.pool_id
+     AND e.ledger_txn_id = NEW.ledger_txn_id
+   GROUP BY e.asset_code, e.asset_scale
+  HAVING sum(CASE WHEN e.account_kind = 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END)
+      <> sum(CASE WHEN e.account_kind <> 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END)
+   LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'ledger transaction % is unbalanced for %:% (control % vs claims %)',
+      NEW.ledger_txn_id, unbalanced.asset_code, unbalanced.asset_scale,
+      unbalanced.control, unbalanced.claims
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  -- A transaction with no entries is not a transaction.
+  IF NOT EXISTS (
+    SELECT 1 FROM ledger_entries e
+     WHERE e.workspace_id = NEW.workspace_id AND e.pool_id = NEW.pool_id
+       AND e.ledger_txn_id = NEW.ledger_txn_id) THEN
+    RAISE EXCEPTION 'ledger transaction % has no entries', NEW.ledger_txn_id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER ledger_transactions_balance_at_commit
+  AFTER INSERT ON ledger_transactions
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION assert_ledger_transaction_balanced();
+
+CREATE TRIGGER ledger_transactions_are_immutable
+  BEFORE UPDATE OR DELETE ON ledger_transactions
+  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+-- A committed transaction's entry set is final.
+--
+-- Making the existing rows UPDATE- and DELETE-proof is not enough: the balance check is a
+-- deferred trigger on ledger_transactions, so it fires once, at the commit that inserted the
+-- parent row. A later transaction could INSERT another entry against that same
+-- ledger_txn_id and no balance check would fire at all - a probe appended a +999 claim to a
+-- committed transaction and left control at 10 against claims of 1009.
+--
+-- So entries may only be inserted by the same database transaction that created their parent.
+-- Atomic creation of a posting and all its entries is unaffected; every later append is
+-- refused, whether it would balance or not, because a balanced append is still a change to a
+-- record that was already final.
+CREATE OR REPLACE FUNCTION refuse_entry_after_commit() RETURNS trigger AS $$
+DECLARE
+  parent_xid XID8;
+BEGIN
+  SELECT created_xid INTO parent_xid FROM ledger_transactions
+   WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
+     AND ledger_txn_id = NEW.ledger_txn_id;
+  IF NOT FOUND THEN
+    -- The foreign key reports this; reaching here means the parent is not visible to us.
+    RAISE EXCEPTION 'ledger transaction % does not exist', NEW.ledger_txn_id
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  IF parent_xid IS DISTINCT FROM pg_current_xact_id() THEN
+    RAISE EXCEPTION 'ledger transaction % is committed; its entries are final', NEW.ledger_txn_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ledger_entries_belong_to_their_posting
+  BEFORE INSERT ON ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION refuse_entry_after_commit();
+
+CREATE TRIGGER ledger_entries_are_immutable
+  BEFORE UPDATE OR DELETE ON ledger_entries
+  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+-- --------------------------------------------------------------------------------------
 -- Raw observations
 -- --------------------------------------------------------------------------------------
 --
@@ -395,7 +643,14 @@ CREATE TABLE raw_observations (
     CHECK (observation_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
   CONSTRAINT raw_observations_source_known CHECK (source IN ('rest', 'stream', 'operator')),
   CONSTRAINT raw_observations_source_unique
-    UNIQUE (workspace_id, pool_id, epoch, source, kind, source_ref)
+    UNIQUE (workspace_id, pool_id, epoch, source, kind, source_ref),
+  -- Referenced by venue_fills through the complete tuple, so a fill in one epoch cannot cite
+  -- evidence recorded in another.
+  CONSTRAINT raw_observations_scope_tuple UNIQUE (workspace_id, pool_id, epoch, observation_id),
+  -- An applied observation names a real ledger transaction in its own scope. Without this the
+  -- column accepted any string, so a row could claim an effect that was never posted.
+  FOREIGN KEY (workspace_id, pool_id, epoch, applied_ledger_txn_id)
+    REFERENCES ledger_transactions (workspace_id, pool_id, epoch, ledger_txn_id)
 );
 
 CREATE OR REPLACE FUNCTION refuse_observation_change() RETURNS trigger AS $$
@@ -448,10 +703,11 @@ CREATE TABLE venue_orders (
   PRIMARY KEY (workspace_id, pool_id, epoch, symbol, venue_order_id),
   FOREIGN KEY (workspace_id, pool_id, epoch)
     REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
-  -- A venue order that correlates to one of our attempts names it through the marker's
-  -- unique client id; a client id observed on the venue that we never marked is external
-  -- activity, kept with a NULL reference rather than invented.
-  FOREIGN KEY (client_order_id) REFERENCES dispatch_attempts (client_order_id),
+  -- A venue order that correlates to one of our attempts names it through the complete scope
+  -- tuple; a client id observed on the venue that we never marked is external activity, kept
+  -- with a NULL reference rather than invented. NULL skips the check, as MATCH SIMPLE does.
+  FOREIGN KEY (workspace_id, pool_id, epoch, client_order_id)
+    REFERENCES dispatch_attempts (workspace_id, pool_id, epoch, client_order_id),
   CONSTRAINT venue_orders_symbol_shape CHECK (symbol ~ '^[A-Z0-9]{2,20}$'),
   CONSTRAINT venue_orders_status_known CHECK (status IN
     ('NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'PENDING_CANCEL', 'EXPIRED',
@@ -480,8 +736,10 @@ CREATE TABLE venue_fills (
   PRIMARY KEY (workspace_id, pool_id, epoch, symbol, venue_order_id, venue_trade_id),
   FOREIGN KEY (workspace_id, pool_id, epoch, symbol, venue_order_id)
     REFERENCES venue_orders (workspace_id, pool_id, epoch, symbol, venue_order_id),
-  FOREIGN KEY (workspace_id, pool_id, observation_id)
-    REFERENCES raw_observations (workspace_id, pool_id, observation_id),
+  -- Including the epoch: an epoch-2 fill citing epoch-1 evidence is a cross-epoch link, and
+  -- epochs exist precisely so that identities from before a reset cannot reach across.
+  FOREIGN KEY (workspace_id, pool_id, epoch, observation_id)
+    REFERENCES raw_observations (workspace_id, pool_id, epoch, observation_id),
   CONSTRAINT venue_fills_base_integral CHECK (base_atoms = trunc(base_atoms) AND base_atoms >= 0),
   CONSTRAINT venue_fills_quote_integral CHECK (quote_atoms = trunc(quote_atoms) AND quote_atoms >= 0),
   CONSTRAINT venue_fills_commission_integral
@@ -490,127 +748,6 @@ CREATE TABLE venue_fills (
 
 CREATE TRIGGER venue_fills_are_immutable
   BEFORE UPDATE OR DELETE ON venue_fills
-  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
-
--- --------------------------------------------------------------------------------------
--- Ledger
--- --------------------------------------------------------------------------------------
---
--- Append-only double entry per asset. A transaction is the unit of economic change; its
--- entries must sum to zero per asset, checked at commit by a deferred constraint trigger, so
--- an unbalanced posting - a crash between two entries, a bug that wrote one side - cannot
--- become a committed fact (INV-02, T-030).
---
--- Every transaction names its source operation, unique within the pool: a fill, a bootstrap
--- allocation, a reservation. Posting the same fill twice is a unique violation, which is what
--- makes reapplying an observation after a crash idempotent rather than double-counted.
-
-CREATE TABLE ledger_transactions (
-  workspace_id       TEXT        NOT NULL,
-  pool_id            TEXT        NOT NULL,
-  epoch              INTEGER     NOT NULL,
-  ledger_txn_id      TEXT        NOT NULL,
-  -- The pool's ledger revision this transaction produced. Strictly increasing per pool.
-  revision           BIGINT      NOT NULL,
-  source_kind        TEXT        NOT NULL,
-  source_ref         TEXT        NOT NULL,
-  description        TEXT        NOT NULL,
-  posted_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (workspace_id, pool_id, ledger_txn_id),
-  FOREIGN KEY (workspace_id, pool_id, epoch)
-    REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
-  CONSTRAINT ledger_transactions_id_shape
-    CHECK (ledger_txn_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-  CONSTRAINT ledger_transactions_revision_positive CHECK (revision >= 1),
-  CONSTRAINT ledger_transactions_revision_unique UNIQUE (workspace_id, pool_id, revision),
-  CONSTRAINT ledger_transactions_source_unique
-    UNIQUE (workspace_id, pool_id, epoch, source_kind, source_ref)
-);
-
--- Account kinds. ASSET_CONTROL mirrors what the venue holds; the claims partition it among
--- strategies and HOUSE (INV-04). The sign convention is a delta per entry; each account's
--- running balance is what the projection checks for nonnegativity.
-CREATE TABLE ledger_entries (
-  workspace_id       TEXT        NOT NULL,
-  pool_id            TEXT        NOT NULL,
-  ledger_txn_id      TEXT        NOT NULL,
-  entry_seq          INTEGER     NOT NULL,
-  account_kind       TEXT        NOT NULL,
-  -- 'HOUSE', 'ASSET_CONTROL' or a strategy id, depending on account_kind.
-  account_owner      TEXT        NOT NULL,
-  claim_state        TEXT        NOT NULL,
-  asset_code         TEXT        NOT NULL,
-  asset_scale        TEXT        NOT NULL,
-  delta_atoms        NUMERIC(78, 0) NOT NULL,
-  PRIMARY KEY (workspace_id, pool_id, ledger_txn_id, entry_seq),
-  FOREIGN KEY (workspace_id, pool_id, ledger_txn_id)
-    REFERENCES ledger_transactions (workspace_id, pool_id, ledger_txn_id),
-  CONSTRAINT ledger_entries_kind_known
-    CHECK (account_kind IN ('ASSET_CONTROL', 'HOUSE', 'STRATEGY')),
-  CONSTRAINT ledger_entries_owner_matches_kind CHECK (
-    (account_kind = 'ASSET_CONTROL' AND account_owner = 'ASSET_CONTROL')
-    OR (account_kind = 'HOUSE' AND account_owner = 'HOUSE')
-    OR (account_kind = 'STRATEGY' AND account_owner NOT IN ('HOUSE', 'ASSET_CONTROL'))),
-  -- ASSET_CONTROL has no claim state; claims are AVAILABLE, RESERVED or QUARANTINED.
-  CONSTRAINT ledger_entries_claim_state_known CHECK (
-    (account_kind = 'ASSET_CONTROL' AND claim_state = 'CONTROL')
-    OR (account_kind <> 'ASSET_CONTROL' AND claim_state IN ('AVAILABLE', 'RESERVED', 'QUARANTINED'))),
-  CONSTRAINT ledger_entries_delta_integral CHECK (delta_atoms = trunc(delta_atoms)),
-  CONSTRAINT ledger_entries_delta_nonzero CHECK (delta_atoms <> 0)
-);
-
-CREATE INDEX ledger_entries_by_account
-  ON ledger_entries (workspace_id, pool_id, account_owner, asset_code, asset_scale);
-
--- Balanced per asset: for every transaction and asset, the control side equals the claims
--- side. Control entries carry the venue-facing change; claim entries partition it. So the
--- invariant is sum(control) = sum(claims) per asset, i.e. sum(control) - sum(claims) = 0.
--- Internal claim transfers (AVAILABLE -> RESERVED) have no control entry and sum to zero on
--- the claims side alone; the same predicate covers them.
-CREATE OR REPLACE FUNCTION assert_ledger_transaction_balanced() RETURNS trigger AS $$
-DECLARE
-  unbalanced RECORD;
-BEGIN
-  SELECT e.asset_code, e.asset_scale,
-         sum(CASE WHEN e.account_kind = 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END) AS control,
-         sum(CASE WHEN e.account_kind <> 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END) AS claims
-    INTO unbalanced
-    FROM ledger_entries e
-   WHERE e.workspace_id = NEW.workspace_id AND e.pool_id = NEW.pool_id
-     AND e.ledger_txn_id = NEW.ledger_txn_id
-   GROUP BY e.asset_code, e.asset_scale
-  HAVING sum(CASE WHEN e.account_kind = 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END)
-      <> sum(CASE WHEN e.account_kind <> 'ASSET_CONTROL' THEN e.delta_atoms ELSE 0 END)
-   LIMIT 1;
-  IF FOUND THEN
-    RAISE EXCEPTION 'ledger transaction % is unbalanced for %:% (control % vs claims %)',
-      NEW.ledger_txn_id, unbalanced.asset_code, unbalanced.asset_scale,
-      unbalanced.control, unbalanced.claims
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  -- A transaction with no entries is not a transaction.
-  IF NOT EXISTS (
-    SELECT 1 FROM ledger_entries e
-     WHERE e.workspace_id = NEW.workspace_id AND e.pool_id = NEW.pool_id
-       AND e.ledger_txn_id = NEW.ledger_txn_id) THEN
-    RAISE EXCEPTION 'ledger transaction % has no entries', NEW.ledger_txn_id
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE CONSTRAINT TRIGGER ledger_transactions_balance_at_commit
-  AFTER INSERT ON ledger_transactions
-  DEFERRABLE INITIALLY DEFERRED
-  FOR EACH ROW EXECUTE FUNCTION assert_ledger_transaction_balanced();
-
-CREATE TRIGGER ledger_transactions_are_immutable
-  BEFORE UPDATE OR DELETE ON ledger_transactions
-  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
-
-CREATE TRIGGER ledger_entries_are_immutable
-  BEFORE UPDATE OR DELETE ON ledger_entries
   FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
 
 -- --------------------------------------------------------------------------------------
@@ -735,6 +872,10 @@ CREATE TABLE outbox (
 CREATE INDEX outbox_pending
   ON outbox (workspace_id, pool_id, created_at)
   WHERE published_at IS NULL AND dead_lettered_at IS NULL AND quarantined_at IS NULL;
+
+-- Attempts never exceed the bound, whichever writer counts them. The claim path checks this
+-- too; the constraint is what holds when something else does not.
+ALTER TABLE outbox ADD CONSTRAINT outbox_attempts_within_bound CHECK (attempts <= max_attempts);
 
 CREATE TRIGGER outbox_is_never_deleted
   BEFORE DELETE ON outbox
