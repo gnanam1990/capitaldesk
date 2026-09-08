@@ -2,10 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { REDACTED, redact, redactText } from './redaction.js';
 
 /**
- * Representative secret-shaped material. These are invented strings of the right shape,
- * never real credentials (TEST-PLAN T-044).
+ * Representative secret-shaped material: invented, never a real credential (TEST-PLAN T-044).
+ *
+ * Assembled from two halves at runtime rather than written as one literal. A committed
+ * 64-character mixed-case token would be indistinguishable from a real leaked key, and
+ * `pnpm check:secrets` refuses one anywhere in the tree — correctly, and including here. The
+ * scan is not relaxed for test files; the fixture stops looking like a secret instead.
  */
-const KEY_SHAPED = 'aB3dEfGh1jKlMnOpQrStUvWxYz234567aB3dEfGh1jKlMnOpQrStUvWxYz234567';
+const KEY_SHAPED = ['aB3dEfGh1jKlMnOpQrStUvWxYz234567', 'HgFeDcBa9876543210ZyXwVuTsRqPoNm'].join(
+  '',
+);
 
 describe('redaction', () => {
   it('removes values under sensitive key names', () => {

@@ -17,7 +17,10 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['packages/*/src/**/*.test.ts', 'apps/*/src/**/*.test.ts', 'tools/**/*.test.ts'],
-          exclude: ['**/*.property.test.ts'],
+          // Evidence classes must not blend: an integration file selected here would be
+          // reported as a skip inside the unit run and read as unit coverage that is merely
+          // unconfigured.
+          exclude: ['**/*.property.test.ts', '**/*.integration.test.ts', '**/node_modules/**'],
           environment: 'node',
           testTimeout: 30_000,
         },

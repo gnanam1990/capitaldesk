@@ -6,7 +6,13 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const run = promisify(execFile);
-const CHECKER = path.resolve(import.meta.dirname, 'check-layering.ts');
+const REPO_ROOT = path.resolve(import.meta.dirname, '..');
+const CHECKER = path.join(REPO_ROOT, 'tools', 'check-layering.ts');
+/**
+ * The pinned workspace tsx, resolved by path. `npx tsx` launched from a temporary directory
+ * resolves outside the workspace and can pick a different version, or none at all.
+ */
+const TSX = path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx');
 
 const created: string[] = [];
 
@@ -24,7 +30,7 @@ async function fixture(files: Record<string, string>): Promise<{ code: number; o
     await writeFile(full, contents, 'utf8');
   }
   try {
-    const { stdout } = await run('npx', ['tsx', CHECKER], { cwd: root });
+    const { stdout } = await run(TSX, [CHECKER], { cwd: root });
     return { code: 0, output: stdout };
   } catch (error) {
     const failure = error as { code?: number; stdout?: string; stderr?: string };

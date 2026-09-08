@@ -23,9 +23,20 @@ const TRADE_VARIABLES = [
 ];
 const READ_VARIABLES = ['CAPITALDESK_READ_CREDENTIAL_REF', 'BINANCE_READ_API_SECRET'];
 
-/** Directories permitted to mention each credential class, beyond config and tooling. */
+/**
+ * Paths permitted to mention each credential class, beyond the owning role.
+ *
+ * Example environment files must name the variables — that is what documents the contract —
+ * and they carry placeholders only. The value-shape scan below still applies to them, so a
+ * real secret pasted into one is still caught.
+ */
+const ENV_EXAMPLE = /(^|\/)\.?env(\..+)?\.example$/;
 const TRADE_ALLOWED_PREFIXES = ['apps/executor', 'packages/config', 'tools', 'docs', 'specs'];
 const READ_ALLOWED_PREFIXES = ['apps/worker', 'packages/config', 'tools', 'docs', 'specs'];
+
+function mayName(relative: string, prefixes: readonly string[]): boolean {
+  return ENV_EXAMPLE.test(relative) || prefixes.some((prefix) => relative.startsWith(prefix));
+}
 
 /** Shapes that must never appear in a committed file. */
 const SECRET_SHAPES: ReadonlyArray<{ pattern: RegExp; why: string }> = [
@@ -79,7 +90,7 @@ async function main(): Promise<void> {
     const text = await readFile(file, 'utf8');
 
     for (const variable of TRADE_VARIABLES) {
-      if (text.includes(variable) && !TRADE_ALLOWED_PREFIXES.some((p) => relative.startsWith(p))) {
+      if (text.includes(variable) && !mayName(relative, TRADE_ALLOWED_PREFIXES)) {
         violations.push(
           `${relative}: names the trade credential variable ${variable}; only the executor ` +
             'and the config package may reference it',
@@ -87,7 +98,7 @@ async function main(): Promise<void> {
       }
     }
     for (const variable of READ_VARIABLES) {
-      if (text.includes(variable) && !READ_ALLOWED_PREFIXES.some((p) => relative.startsWith(p))) {
+      if (text.includes(variable) && !mayName(relative, READ_ALLOWED_PREFIXES)) {
         violations.push(
           `${relative}: names the read credential variable ${variable}; only the worker and ` +
             'the config package may reference it',
