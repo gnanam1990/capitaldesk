@@ -73,21 +73,28 @@ export interface BaseConfig {
 }
 
 /**
- * Variables that carry, or reference, a venue trade secret. They are legal only in the
- * executor role; their presence anywhere else is a boundary failure, not a warning
- * (ADR-0007, TEST-PLAN T-036).
+ * Variables that carry a raw venue secret **value**.
+ *
+ * Refused in every role, including the ones entitled to the corresponding credential. The
+ * contract is that configuration carries a *reference* — a path or secret-manager URI — and
+ * never the secret itself (ADR-0007), so a raw value is a contract violation wherever it
+ * appears. Grouping these with the reference names previously made them legal in their
+ * owning role, which is exactly where a raw secret is most likely to be pasted.
  */
-export const TRADE_SECRET_VARIABLES = [
-  'CAPITALDESK_TRADE_CREDENTIAL_REF',
+export const RAW_SECRET_VARIABLES = [
   'BINANCE_API_SECRET',
   'BINANCE_SECRET_KEY',
-] as const;
-
-/** Variables that carry, or reference, a venue read secret. Legal only in the worker role. */
-export const READ_SECRET_VARIABLES = [
-  'CAPITALDESK_READ_CREDENTIAL_REF',
   'BINANCE_READ_API_SECRET',
 ] as const;
+
+/**
+ * The reference to a venue trade credential. Legal only in the executor role; its presence
+ * anywhere else is a boundary failure, not a warning (ADR-0007, TEST-PLAN T-036).
+ */
+export const TRADE_SECRET_VARIABLES = ['CAPITALDESK_TRADE_CREDENTIAL_REF'] as const;
+
+/** The reference to a venue read credential. Legal only in the worker role. */
+export const READ_SECRET_VARIABLES = ['CAPITALDESK_READ_CREDENTIAL_REF'] as const;
 
 function collect<T>(result: z.ZodSafeParseResult<T>): readonly string[] {
   return result.success
@@ -152,6 +159,23 @@ function forbidVariables(
     );
 }
 
+/**
+ * Raw secret values are refused in every role, with no owning exception.
+ *
+ * Applied to every loader, so there is no role in which pasting a key into the environment
+ * is accepted. The corresponding `CAPITALDESK_*_CREDENTIAL_REF` remains the only way to
+ * point a process at a credential.
+ */
+function forbidRawSecrets(env: NodeJS.ProcessEnv, role: ProcessRole): string[] {
+  return RAW_SECRET_VARIABLES.filter(
+    (name) => typeof env[name] === 'string' && env[name] !== '',
+  ).map(
+    (name) =>
+      `${name}: configuration carries a credential reference, never a secret value. ` +
+      `Set the matching CAPITALDESK_*_CREDENTIAL_REF in the ${role === 'executor' ? 'executor' : 'owning'} role instead.`,
+  );
+}
+
 const databaseSchema = z.object({ DATABASE_URL: z.string().url() });
 
 export interface ApiConfig extends BaseConfig {
@@ -163,6 +187,7 @@ export interface ApiConfig extends BaseConfig {
 
 export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const extra = [
+    ...forbidRawSecrets(env, 'api'),
     ...forbidVariables(env, TRADE_SECRET_VARIABLES, 'api'),
     ...forbidVariables(env, READ_SECRET_VARIABLES, 'api'),
   ];
@@ -193,7 +218,10 @@ export interface WorkerConfig extends BaseConfig {
 }
 
 export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
-  const extra = forbidVariables(env, TRADE_SECRET_VARIABLES, 'worker');
+  const extra = [
+    ...forbidRawSecrets(env, 'worker'),
+    ...forbidVariables(env, TRADE_SECRET_VARIABLES, 'worker'),
+  ];
   const schema = databaseSchema.extend({
     CAPITALDESK_READ_CREDENTIAL_REF: z.string().min(1).optional(),
   });
@@ -234,7 +262,10 @@ export interface ExecutorConfig extends BaseConfig {
 }
 
 export function loadExecutorConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig {
-  const extra = forbidVariables(env, READ_SECRET_VARIABLES, 'executor');
+  const extra = [
+    ...forbidRawSecrets(env, 'executor'),
+    ...forbidVariables(env, READ_SECRET_VARIABLES, 'executor'),
+  ];
   const schema = databaseSchema.extend({
     CAPITALDESK_WRITE_CAPABILITY: z.enum(['disabled', 'enabled']),
     CAPITALDESK_TRADE_CREDENTIAL_REF: z.string().min(1).optional(),
@@ -249,10 +280,17 @@ export function loadExecutorConfig(env: NodeJS.ProcessEnv = process.env): Execut
   if (parsed.success) {
     const capability = parsed.data.CAPITALDESK_WRITE_CAPABILITY;
     const deployment = env['CAPITALDESK_ENV'];
-    if (capability === 'enabled' && deployment === 'production-read-only') {
+    // Stated as an allowlist rather than as one forbidden case. The previous form refused
+    // production-read-only and therefore happened to permit only local and testnet, but an
+    // environment added later would have been permitted by default — the wrong direction to
+    // fail for a setting that grants trading authority.
+    const WRITE_CAPABLE_ENVIRONMENTS: readonly string[] = ['local', 'testnet'];
+    if (capability === 'enabled' && !WRITE_CAPABLE_ENVIRONMENTS.includes(deployment ?? '')) {
       extra.push(
-        'CAPITALDESK_WRITE_CAPABILITY: write capability can never be enabled in a ' +
-          'production-read-only deployment',
+        `CAPITALDESK_WRITE_CAPABILITY: write capability may only be enabled in ` +
+          `${WRITE_CAPABLE_ENVIRONMENTS.join(' or ')}; ${String(deployment)} can never hold it. ` +
+          'local is permitted only because its venue host allowlist confines it to a local ' +
+          'simulator, which the fault lab needs in order to exercise the write path at all.',
       );
     }
     if (capability === 'enabled' && parsed.data.CAPITALDESK_TRADE_CREDENTIAL_REF === undefined) {
@@ -306,6 +344,7 @@ export function loadWebPublicConfig(env: NodeJS.ProcessEnv = process.env): WebPu
     NEXT_PUBLIC_CAPITALDESK_API_BASE_URL: z.string().url(),
   });
   const issues = [
+    ...forbidRawSecrets(env, 'web'),
     ...forbidVariables(env, TRADE_SECRET_VARIABLES, 'web'),
     ...forbidVariables(env, READ_SECRET_VARIABLES, 'web'),
   ];
