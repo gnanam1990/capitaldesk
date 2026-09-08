@@ -81,6 +81,10 @@ CREATE TABLE pools (
   PRIMARY KEY (workspace_id, pool_id),
   FOREIGN KEY (venue, environment, stable_account_id)
     REFERENCES venue_accounts (venue, environment, stable_account_id),
+  -- Referenced by governance_leases through the complete tuple, so a lease cannot name one
+  -- account while the pool it governs is bound to another.
+  CONSTRAINT pools_account_tuple
+    UNIQUE (workspace_id, pool_id, venue, environment, stable_account_id),
   CONSTRAINT pools_id_shape CHECK (pool_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
   CONSTRAINT pools_state_known CHECK (state IN
     ('BOOTSTRAPPING', 'READY', 'AWAITING_APPROVAL', 'IN_FLIGHT', 'QUARANTINED', 'HALTED')),
@@ -102,9 +106,11 @@ CREATE TABLE governance_leases (
   acquired_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   released_at        TIMESTAMPTZ,
   released_reason    TEXT,
-  FOREIGN KEY (venue, environment, stable_account_id)
-    REFERENCES venue_accounts (venue, environment, stable_account_id),
-  FOREIGN KEY (workspace_id, pool_id) REFERENCES pools (workspace_id, pool_id),
+  -- One key, not two. Separate references to the account and to the pool each held, while
+  -- permitting a lease that governs an account its own pool is not bound to - so lease
+  -- provenance could be reassigned across accounts without any constraint noticing.
+  FOREIGN KEY (workspace_id, pool_id, venue, environment, stable_account_id)
+    REFERENCES pools (workspace_id, pool_id, venue, environment, stable_account_id),
   CONSTRAINT governance_leases_id_shape CHECK (lease_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
   CONSTRAINT governance_leases_released_together
     CHECK ((released_at IS NULL) = (released_reason IS NULL))
@@ -118,6 +124,13 @@ CREATE UNIQUE INDEX governance_leases_single_active
 CREATE UNIQUE INDEX governance_leases_single_per_pool
   ON governance_leases (workspace_id, pool_id)
   WHERE released_at IS NULL;
+
+-- Strategies were created in 0002, before pools existed, so their pool_id was a bare column:
+-- a strategy could name a pool that was never created, or one in another workspace. The key
+-- is added here, now that pools is available, rather than by editing an earlier migration.
+ALTER TABLE strategies
+  ADD CONSTRAINT strategies_belong_to_a_pool
+  FOREIGN KEY (workspace_id, pool_id) REFERENCES pools (workspace_id, pool_id);
 
 -- --------------------------------------------------------------------------------------
 -- Baseline epochs
@@ -235,6 +248,10 @@ CREATE TABLE dispatch_attempts (
   -- Host fence evidence (ADR-0001): what held the marker, so a resumed sender is detectable.
   marker_host_boot_id TEXT,
   marker_pid         INTEGER,
+  -- PIDs are reused without a reboot, so boot id and pid together do not identify a process.
+  -- The process's own start time distinguishes a live marker holder from a new process that
+  -- happens to have inherited its pid (ADR-0001 condition 2).
+  marker_process_started_at TIMESTAMPTZ,
   -- Set when an attempt that never marked is made permanently undispatchable - by a restore,
   -- or by the invalidation of its plan. An honest terminal posture for a PREPARED attempt
   -- whose authority is gone: it was never sent, and it can never be sent.
@@ -262,7 +279,17 @@ CREATE TABLE dispatch_attempts (
   -- Voiding says the attempt never marked. An attempt past PREPARED cannot be voided, and a
   -- voided attempt cannot later be marked; the trigger enforces the second direction.
   CONSTRAINT dispatch_attempts_voided_only_when_prepared
-    CHECK (voided_at IS NULL OR state = 'PREPARED')
+    CHECK (voided_at IS NULL OR state = 'PREPARED'),
+  -- A marked attempt carries the request it committed to send and the host that marked it.
+  -- Without this a marker could exist with no signed request at all, and the send path would
+  -- have nothing to prove what it was authorised to transmit (ADR-0003).
+  CONSTRAINT dispatch_attempts_marked_has_evidence
+    CHECK (state = 'PREPARED'
+           OR (signed_request IS NOT NULL
+               AND jsonb_typeof(signed_request) = 'object'
+               AND marker_host_boot_id IS NOT NULL
+               AND marker_pid IS NOT NULL
+               AND marker_process_started_at IS NOT NULL))
 );
 
 -- The transition table from packages/contracts/src/states.ts (DISPATCH_ATTEMPT_TRANSITIONS).
@@ -936,6 +963,42 @@ CREATE TRIGGER outbox_is_never_deleted
   BEFORE DELETE ON outbox
   FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
 
+-- What a message is, and what it will deliver, never changes.
+--
+-- Only the lifecycle columns are writable: the lease, the attempt counter, and the terminal
+-- markers. Leaving `kind`, `payload`, `max_attempts` and the scope writable meant a queued
+-- message could be re-pointed at a different payload - or a dispatch message's single-attempt
+-- bound raised - after it was committed beside the change it announces.
+CREATE OR REPLACE FUNCTION refuse_outbox_identity_change() RETURNS trigger AS $$
+BEGIN
+  IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+     OR NEW.pool_id IS DISTINCT FROM OLD.pool_id
+     OR NEW.outbox_id IS DISTINCT FROM OLD.outbox_id
+     OR NEW.kind IS DISTINCT FROM OLD.kind
+     OR NEW.payload IS DISTINCT FROM OLD.payload
+     OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'outbox message % identity and contents are immutable', OLD.outbox_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- Attempts only ever increase, and a terminal marker is never withdrawn.
+  IF NEW.attempts < OLD.attempts THEN
+    RAISE EXCEPTION 'outbox message % attempt count cannot decrease', OLD.outbox_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF (OLD.published_at IS NOT NULL AND NEW.published_at IS DISTINCT FROM OLD.published_at)
+     OR (OLD.dead_lettered_at IS NOT NULL AND NEW.dead_lettered_at IS DISTINCT FROM OLD.dead_lettered_at) THEN
+    RAISE EXCEPTION 'outbox message % is already terminal', OLD.outbox_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER outbox_identity_is_immutable
+  BEFORE UPDATE ON outbox
+  FOR EACH ROW EXECUTE FUNCTION refuse_outbox_identity_change();
+
 -- Worker leases with a fencing token. The token increases on every acquisition, so a holder
 -- whose lease expired and was taken over presents a stale token and is refused on renew.
 --
@@ -980,6 +1043,21 @@ CREATE TABLE idempotency_results (
 
 CREATE OR REPLACE FUNCTION refuse_tombstone_change() RETURNS trigger AS $$
 BEGIN
+  -- The row's identity is the tombstone. Omitting the primary key from this check let a
+  -- record be moved to a different scope or key, which is the same as forging one.
+  IF NEW.scope_kind IS DISTINCT FROM OLD.scope_kind
+     OR NEW.scope_id IS DISTINCT FROM OLD.scope_id
+     OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key THEN
+    RAISE EXCEPTION 'idempotency record % cannot be moved to another scope or key', OLD.idempotency_key
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- The stored response may be discarded, but not before the retention it promised. Clearing
+  -- it early would lose the replay a caller is still entitled to.
+  IF OLD.response_body IS NOT NULL AND NEW.response_body IS NULL
+     AND now() < OLD.response_expires_at THEN
+    RAISE EXCEPTION 'idempotency response for % is retained until %', OLD.idempotency_key, OLD.response_expires_at
+      USING ERRCODE = 'restrict_violation';
+  END IF;
   -- The only permitted change is discarding the response body once its retention lapses.
   IF NEW.request_digest IS DISTINCT FROM OLD.request_digest
      OR NEW.action IS DISTINCT FROM OLD.action
