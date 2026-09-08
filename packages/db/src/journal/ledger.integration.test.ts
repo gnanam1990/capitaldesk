@@ -80,8 +80,12 @@ describeIfDatabase('ledger and claims', () => {
     }
     // And the projection, rebuilt, says the same as an independent computation.
     await ledger.rebuildProjection({ workspaceId: WORKSPACE, poolId: POOL });
-    const projected = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
-    const computed = await ledger.balancesFromEntries({ workspaceId: WORKSPACE, poolId: POOL });
+    const projected = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
+    const computed = await ledger.balancesFromEntries({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      epoch: 1,
+    });
     expect(projected).toEqual(computed);
   }
 
@@ -112,7 +116,7 @@ describeIfDatabase('ledger and claims', () => {
   it('records an explicit opening baseline and conserves it', async () => {
     await bootstrap();
     await assertConserved();
-    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
     expect(balances).toContainEqual({
       owner: 'HOUSE',
       asset: BTC,
@@ -157,7 +161,10 @@ describeIfDatabase('ledger and claims', () => {
       [WORKSPACE, POOL],
     );
     await raw.client.query(
-      `INSERT INTO ledger_entries VALUES ($1,$2,'txn-raw',1,'ASSET_CONTROL','ASSET_CONTROL','CONTROL','BTC','v1',100)`,
+      `INSERT INTO ledger_entries
+         (workspace_id, pool_id, epoch, ledger_txn_id, entry_seq, account_kind, account_owner,
+          claim_state, asset_code, asset_scale, delta_atoms)
+       VALUES ($1,$2,1,'txn-raw',1,'ASSET_CONTROL','ASSET_CONTROL','CONTROL','BTC','v1',100)`,
       [WORKSPACE, POOL],
     );
     let refusal = 'committed';
@@ -241,7 +248,7 @@ describeIfDatabase('ledger and claims', () => {
     expect(quarantined).toMatchObject({ ok: true });
     await assertConserved();
 
-    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
     expect(balances).toContainEqual({
       owner: 'strategy-a',
       asset: USDT,
@@ -322,7 +329,7 @@ describeIfDatabase('ledger and claims', () => {
     );
     expect(reservations.rowCount).toBe(1);
     await assertConserved();
-    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
     expect(balances).toContainEqual({
       owner: 'strategy-a',
       asset: USDT,
@@ -356,7 +363,7 @@ describeIfDatabase('ledger and claims', () => {
     // Read first, so the projection has rows: the refusal below must come from the trigger
     // firing on a real row, not from an UPDATE that matched nothing.
     expect(
-      (await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL })).length,
+      (await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 })).length,
     ).toBeGreaterThan(0);
     let refusal = 'accepted';
     try {

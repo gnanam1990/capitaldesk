@@ -1,9 +1,9 @@
 {
-  "name": "@capitaldesk/db",
+  "name": "@capitaldesk/ledger",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "PostgreSQL migration lifecycle and connection handling. Layer 2.",
+  "description": "Baseline preconditions, allocation authorization and per-asset conservation. Layer 1: depends only on contracts, and performs no I/O.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -17,13 +17,10 @@
     "typecheck": "tsc -b --pretty"
   },
   "dependencies": {
-    "@capitaldesk/contracts": "workspace:*",
-    "@capitaldesk/domain": "workspace:*",
-    "pg": "catalog:",
-    "@capitaldesk/ledger": "workspace:*"
+    "@capitaldesk/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@types/pg": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "fast-check": "catalog:"
   }
 }

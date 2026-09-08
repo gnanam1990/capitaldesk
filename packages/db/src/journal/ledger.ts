@@ -195,12 +195,13 @@ export class LedgerRepository {
       seq += 1;
       await client.query(
         `INSERT INTO ledger_entries
-           (workspace_id, pool_id, ledger_txn_id, entry_seq, account_kind, account_owner, claim_state,
-            asset_code, asset_scale, delta_atoms, reservation_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::numeric, $11)`,
+           (workspace_id, pool_id, epoch, ledger_txn_id, entry_seq, account_kind, account_owner,
+            claim_state, asset_code, asset_scale, delta_atoms, reservation_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::numeric, $12)`,
         [
           input.workspaceId,
           input.poolId,
+          input.epoch,
           input.ledgerTxnId,
           seq,
           entry.accountKind,
@@ -367,7 +368,15 @@ export class LedgerRepository {
    * the ledger has already moved past - so it is rebuilt inside the same transaction before it
    * is read. The rebuild is the only writer of this table.
    */
-  balances(scope: { workspaceId: string; poolId: string }): Promise<ClaimBalance[]> {
+  /**
+   * Claims as they stand in one epoch.
+   *
+   * The epoch is required, not optional. An epoch exists so a venue reset cannot let old funds
+   * become current authority, and a balance read that spanned epochs handed exactly that back:
+   * after a rotation the closed epoch's opening still appeared as spendable availability.
+   * History stays queryable by asking for its own epoch.
+   */
+  balances(scope: { workspaceId: string; poolId: string; epoch: number }): Promise<ClaimBalance[]> {
     return serializable(this.pool, async (client) => {
       const pool = await client.query<{ ledger_revision: string }>(
         'SELECT ledger_revision FROM pools WHERE workspace_id = $1 AND pool_id = $2',
@@ -380,6 +389,8 @@ export class LedgerRepository {
            FROM claim_balances WHERE workspace_id = $1 AND pool_id = $2`,
         [scope.workspaceId, scope.poolId],
       );
+      // Staleness is judged across the whole pool because the rebuild is whole-pool: one
+      // epoch's postings still advance the pool's revision.
       const stale = projected.rows[0]?.rows === '0' || projected.rows[0]?.revision !== current;
       if (stale) {
         await client.query('SELECT rebuild_claim_balances($1, $2)', [
@@ -392,13 +403,17 @@ export class LedgerRepository {
   }
 
   /** The projection exactly as stored, without a rebuild. */
-  async storedBalances(scope: { workspaceId: string; poolId: string }): Promise<ClaimBalance[]> {
+  async storedBalances(scope: {
+    workspaceId: string;
+    poolId: string;
+    epoch: number;
+  }): Promise<ClaimBalance[]> {
     return LedgerRepository.readProjection(this.pool, scope);
   }
 
   private static async readProjection(
     client: Queryable | Pool,
-    scope: { workspaceId: string; poolId: string },
+    scope: { workspaceId: string; poolId: string; epoch: number },
   ): Promise<ClaimBalance[]> {
     const result = await client.query<{
       account_owner: string;
@@ -409,8 +424,8 @@ export class LedgerRepository {
       quarantined_atoms: string;
     }>(
       `SELECT account_owner, asset_code, asset_scale, available_atoms::text, reserved_atoms::text, quarantined_atoms::text
-         FROM claim_balances WHERE workspace_id = $1 AND pool_id = $2`,
-      [scope.workspaceId, scope.poolId],
+         FROM claim_balances WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3`,
+      [scope.workspaceId, scope.poolId, scope.epoch],
     );
     return result.rows
       .map((row): ClaimBalance => ({
@@ -427,6 +442,7 @@ export class LedgerRepository {
   async balancesFromEntries(scope: {
     workspaceId: string;
     poolId: string;
+    epoch: number;
   }): Promise<ClaimBalance[]> {
     const result = await this.pool.query<{
       account_owner: string;
@@ -436,8 +452,10 @@ export class LedgerRepository {
       delta_atoms: string;
     }>(
       `SELECT account_owner, claim_state, asset_code, asset_scale, delta_atoms::text
-         FROM ledger_entries WHERE workspace_id = $1 AND pool_id = $2 AND account_kind <> 'ASSET_CONTROL'`,
-      [scope.workspaceId, scope.poolId],
+         FROM ledger_entries
+        WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3
+          AND account_kind <> 'ASSET_CONTROL'`,
+      [scope.workspaceId, scope.poolId, scope.epoch],
     );
     const totals = new Map<string, ClaimBalance>();
     for (const row of result.rows) {
@@ -482,11 +500,20 @@ async function reserveBody(client: Queryable, input: ReserveInput): Promise<Rese
     return { ok: false, reason: 'EPOCH_NOT_CURRENT', currentEpoch };
   }
 
+  // Scoped to the epoch. A closed epoch's surplus is history, not spending power: summing
+  // across epochs let old funds back a new reservation after a reset.
   const available = await client.query<{ available: string }>(
     `SELECT coalesce(sum(delta_atoms), 0)::text AS available FROM ledger_entries
-      WHERE workspace_id = $1 AND pool_id = $2 AND account_owner = $3
+      WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $6 AND account_owner = $3
         AND claim_state = 'AVAILABLE' AND asset_code = $4 AND asset_scale = $5`,
-    [input.workspaceId, input.poolId, input.strategyId, input.asset.code, input.asset.scale],
+    [
+      input.workspaceId,
+      input.poolId,
+      input.strategyId,
+      input.asset.code,
+      input.asset.scale,
+      input.epoch,
+    ],
   );
   const availableAtoms = BigInt(available.rows[0]?.available ?? '0');
   if (availableAtoms < input.atoms)

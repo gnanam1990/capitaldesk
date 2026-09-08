@@ -773,7 +773,10 @@ describeIfDatabase('6. a committed ledger transaction has a final entry set', ()
   ) => {
     try {
       await harness.admin.query(
-        `INSERT INTO ledger_entries VALUES ($1,$2,'txn-1',$3,$4,$5,$6,'USDT','v1',$7::numeric)`,
+        `INSERT INTO ledger_entries
+           (workspace_id, pool_id, epoch, ledger_txn_id, entry_seq, account_kind, account_owner,
+            claim_state, asset_code, asset_scale, delta_atoms)
+         VALUES ($1,$2,1,'txn-1',$3,$4,$5,$6,'USDT','v1',$7::numeric)`,
         [WORKSPACE, POOL, seq, kind, owner, claim, atoms],
       );
       return 'accepted';
@@ -1108,7 +1111,7 @@ describeIfDatabase('8. a reservation cannot be released beyond what it still hol
     ).toEqual({ ok: false, reason: 'EXCEEDS_REMAINING', remainingAtoms: 1_000n });
 
     // Nothing moved, and the claims are exactly where the postings put them.
-    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
     expect(balances).toContainEqual({
       owner: 'strategy-a',
       asset: USDT,
@@ -1133,7 +1136,7 @@ describeIfDatabase('8. a reservation cannot be released beyond what it still hol
       }),
     ).toMatchObject({ ok: true });
 
-    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
     expect(balances).toContainEqual({
       owner: 'strategy-a',
       asset: USDT,
@@ -1206,11 +1209,17 @@ describeIfDatabase('8. a reservation cannot be released beyond what it still hol
         [WORKSPACE, POOL],
       );
       await harness.admin.query(
-        `INSERT INTO ledger_entries VALUES ($1,$2,'txn-raw',1,'STRATEGY','strategy-a','RESERVED','USDT','v1',-14000,'res-1')`,
+        `INSERT INTO ledger_entries
+           (workspace_id, pool_id, epoch, ledger_txn_id, entry_seq, account_kind, account_owner,
+            claim_state, asset_code, asset_scale, delta_atoms, reservation_id)
+         VALUES ($1,$2,1,'txn-raw',1,'STRATEGY','strategy-a','RESERVED','USDT','v1',-14000,'res-1')`,
         [WORKSPACE, POOL],
       );
       await harness.admin.query(
-        `INSERT INTO ledger_entries VALUES ($1,$2,'txn-raw',2,'STRATEGY','strategy-a','AVAILABLE','USDT','v1',14000,NULL)`,
+        `INSERT INTO ledger_entries
+           (workspace_id, pool_id, epoch, ledger_txn_id, entry_seq, account_kind, account_owner,
+            claim_state, asset_code, asset_scale, delta_atoms, reservation_id)
+         VALUES ($1,$2,1,'txn-raw',2,'STRATEGY','strategy-a','AVAILABLE','USDT','v1',14000,NULL)`,
         [WORKSPACE, POOL],
       );
       await harness.admin.query('COMMIT');
@@ -1231,7 +1240,10 @@ describeIfDatabase('8. a reservation cannot be released beyond what it still hol
         [WORKSPACE, POOL],
       );
       await harness.admin.query(
-        `INSERT INTO ledger_entries VALUES ($1,$2,'txn-anon',1,'STRATEGY','strategy-a','RESERVED','USDT','v1',-1,NULL)`,
+        `INSERT INTO ledger_entries
+           (workspace_id, pool_id, epoch, ledger_txn_id, entry_seq, account_kind, account_owner,
+            claim_state, asset_code, asset_scale, delta_atoms, reservation_id)
+         VALUES ($1,$2,1,'txn-anon',1,'STRATEGY','strategy-a','RESERVED','USDT','v1',-1,NULL)`,
         [WORKSPACE, POOL],
       );
       await harness.admin.query('COMMIT');

@@ -293,6 +293,12 @@ importers:
       '@capitaldesk/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@capitaldesk/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@capitaldesk/ledger':
+        specifier: workspace:*
+        version: link:../ledger
       pg:
         specifier: 'catalog:'
         version: 8.23.0
@@ -310,6 +316,19 @@ importers:
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/ledger:
+    dependencies:
+      '@capitaldesk/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      fast-check:
+        specifier: 'catalog:'
+        version: 4.9.0
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

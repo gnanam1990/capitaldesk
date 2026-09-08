@@ -56,6 +56,192 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
     await client.query(`SET search_path TO ${schema}`);
   });
 
+  /**
+   * 0005 is the first migration that reshapes tables an already-running database holds. The
+   * risk it carries is not syntax: it replaces `claim_balances`' primary key and adds a NOT
+   * NULL epoch to a table that has rows. Getting that wrong on a populated database either
+   * fails the upgrade or, worse, invents an epoch for balances that belong to another one.
+   *
+   * So the upgrade is exercised against the state it will actually meet: a pool that has been
+   * through a reset, with postings on both sides of it.
+   */
+  describe('upgrading a populated database to the per-epoch projection', () => {
+    const WORKSPACE = 'ws-upgrade';
+    const POOL = 'pool-upgrade';
+
+    /** A pool with epoch 1 closed by a reset, epoch 2 open, and postings in both. */
+    async function seedRotatedHistory(): Promise<void> {
+      await client.query(
+        `INSERT INTO workspaces (workspace_id, display_name)
+                          VALUES ($1, 'Upgrade')`,
+        [WORKSPACE],
+      );
+      await client.query(
+        `INSERT INTO venue_accounts (venue, environment, stable_account_id)
+         VALUES ('binance-spot','local','acct-upgrade')`,
+      );
+      await client.query(
+        `INSERT INTO pools (workspace_id, pool_id, venue, environment, stable_account_id,
+                            state, ledger_revision)
+         VALUES ($1,$2,'binance-spot','local','acct-upgrade','READY',2)`,
+        [WORKSPACE, POOL],
+      );
+      await client.query(
+        `INSERT INTO baseline_epochs (workspace_id, pool_id, epoch, closed_at, closed_reason)
+         VALUES ($1,$2,1, now(), 'testnet reset'), ($1,$2,2, NULL, NULL)`,
+        [WORKSPACE, POOL],
+      );
+
+      // Epoch 1 opened 1000 USDT; the reset closed it. Epoch 2 opened 400. Under the schema
+      // being upgraded from, nothing on an entry records which of those it belongs to.
+      for (const [epoch, txn, atoms, revision] of [
+        [1, 'txn-epoch-1', '1000', 1],
+        [2, 'txn-epoch-2', '400', 2],
+      ] as const) {
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO ledger_transactions
+             (workspace_id, pool_id, epoch, ledger_txn_id, revision, source_kind, source_ref,
+              description)
+           VALUES ($1,$2,$3,$4,$5,'baseline',$4,'opening')`,
+          [WORKSPACE, POOL, epoch, txn, revision],
+        );
+        await client.query(
+          `INSERT INTO ledger_entries
+             (workspace_id, pool_id, ledger_txn_id, entry_seq, account_kind, account_owner,
+              claim_state, asset_code, asset_scale, delta_atoms)
+           VALUES ($1,$2,$3,1,'ASSET_CONTROL','ASSET_CONTROL','CONTROL','USDT','v1',$4),
+                  ($1,$2,$3,2,'HOUSE','HOUSE','AVAILABLE','USDT','v1',$4)`,
+          [WORKSPACE, POOL, txn, atoms],
+        );
+        await client.query('COMMIT');
+      }
+      await client.query('SELECT rebuild_claim_balances($1,$2)', [WORKSPACE, POOL]);
+    }
+
+    async function houseClaims(): Promise<{ epoch: number | null; atoms: string }[]> {
+      const hasEpoch = await client.query<{ exists: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = current_schema()
+                           AND table_name = 'claim_balances' AND column_name = 'epoch') AS exists`,
+      );
+      const epochColumn = hasEpoch.rows[0]?.exists === true ? 'epoch' : 'NULL::integer AS epoch';
+      const rows = await client.query<{ epoch: number | null; atoms: string }>(
+        `SELECT ${epochColumn}, available_atoms::text AS atoms FROM claim_balances
+          WHERE account_owner = 'HOUSE' ORDER BY 1`,
+      );
+      return rows.rows;
+    }
+
+    it('preserves every epoch’s own figures instead of guessing one', async () => {
+      const files = await loadMigrations(MIGRATIONS_DIR);
+      const before = files.filter((file) => file.version < '0005');
+      expect(before.length).toBe(files.length - 1);
+
+      await migrate(client, before, { appliedBy: 'vitest', buildId: 'pre-0005' });
+      await seedRotatedHistory();
+
+      // The state 0005 exists to correct: one row, both epochs summed into it, so a closed
+      // epoch's 1000 was still spendable authority alongside the current epoch's 400.
+      expect(await houseClaims()).toEqual([{ epoch: null, atoms: '1400' }]);
+
+      // The upgrade itself must succeed against exactly this database.
+      const result = await migrate(client, files, { appliedBy: 'vitest', buildId: 'to-0005' });
+      expect(result.applied).toEqual(['0005_baseline']);
+
+      // Both epochs survive, each with its own figures. Neither was dropped, and neither was
+      // attributed to the other.
+      expect(await houseClaims()).toEqual([
+        { epoch: 1, atoms: '1000' },
+        { epoch: 2, atoms: '400' },
+      ]);
+
+      // The entries kept their true epoch, taken from the transaction that posted them,
+      // which is what makes the rebuilt view derived rather than invented.
+      const entries = await client.query<{ epoch: number; txn: string }>(
+        `SELECT DISTINCT epoch, ledger_txn_id AS txn FROM ledger_entries ORDER BY epoch`,
+      );
+      expect(entries.rows).toEqual([
+        { epoch: 1, txn: 'txn-epoch-1' },
+        { epoch: 2, txn: 'txn-epoch-2' },
+      ]);
+    });
+
+    it('leaves ledger entries immutable again once the backfill is done', async () => {
+      // The backfill suspends the append-only trigger. If it did not restore it, this
+      // migration would silently make every posting rewritable from then on — a far worse
+      // defect than the one it set out to fix.
+      const files = await loadMigrations(MIGRATIONS_DIR);
+      await migrate(
+        client,
+        files.filter((file) => file.version < '0005'),
+        {
+          appliedBy: 'vitest',
+          buildId: 'pre-0005',
+        },
+      );
+      await seedRotatedHistory();
+      await migrate(client, files, { appliedBy: 'vitest', buildId: 'to-0005' });
+
+      const enabled = await client.query<{ tgenabled: string }>(
+        `SELECT tgenabled FROM pg_trigger
+          WHERE tgname = 'ledger_entries_are_immutable'
+            AND tgrelid = to_regclass(current_schema() || '.ledger_entries')`,
+      );
+      expect(enabled.rows[0]?.tgenabled).toBe('O');
+
+      let refusal = 'accepted';
+      try {
+        await client.query(`UPDATE ledger_entries SET delta_atoms = 1 WHERE epoch = 2`);
+      } catch (error) {
+        refusal = (error as { message?: string }).message ?? 'unknown';
+      }
+      expect(refusal).toContain('append-only table ledger_entries');
+    });
+
+    it('leaves the closed epoch unable to fund the open one', async () => {
+      // The point of the per-epoch projection is authority, not presentation. After the
+      // upgrade the closed epoch's 1000 must not cover a withdrawal in epoch 2.
+      const files = await loadMigrations(MIGRATIONS_DIR);
+      await migrate(
+        client,
+        files.filter((file) => file.version < '0005'),
+        {
+          appliedBy: 'vitest',
+          buildId: 'pre-0005',
+        },
+      );
+      await seedRotatedHistory();
+      await migrate(client, files, { appliedBy: 'vitest', buildId: 'to-0005' });
+
+      let refusal = 'accepted';
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO ledger_transactions
+             (workspace_id, pool_id, epoch, ledger_txn_id, revision, source_kind, source_ref,
+              description)
+           VALUES ($1,$2,2,'txn-overspend',3,'operator','overspend','spend across the reset')`,
+          [WORKSPACE, POOL],
+        );
+        await client.query(
+          `INSERT INTO ledger_entries
+             (workspace_id, pool_id, epoch, ledger_txn_id, entry_seq, account_kind,
+              account_owner, claim_state, asset_code, asset_scale, delta_atoms)
+           VALUES ($1,$2,2,'txn-overspend',1,'HOUSE','HOUSE','AVAILABLE','USDT','v1',-500),
+                  ($1,$2,2,'txn-overspend',2,'ASSET_CONTROL','ASSET_CONTROL','CONTROL',
+                   'USDT','v1',-500)`,
+          [WORKSPACE, POOL],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        refusal = (error as { code?: string }).code ?? 'unknown';
+        await client.query('ROLLBACK');
+      }
+      expect(refusal).toBe('23000');
+    });
+  });
+
   it('reports the shipped migrations as pending on an empty database', async () => {
     const files = await loadMigrations(MIGRATIONS_DIR);
     expect(files.length).toBeGreaterThan(0);

@@ -17,6 +17,9 @@
       "path": "./packages/binance"
     },
     {
+      "path": "./packages/ledger"
+    },
+    {
       "path": "./packages/db"
     },
     {

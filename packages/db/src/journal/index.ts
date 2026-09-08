@@ -1,4 +1,5 @@
 export * from './transaction.js';
+export * from './baseline.js';
 export * from './governance.js';
 export * from './ledger.js';
 export * from './dispatch.js';
