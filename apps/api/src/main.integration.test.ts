@@ -186,6 +186,41 @@ describeIfDatabase('the shipped API process', () => {
     expect(audited.rowCount).toBe(1);
   });
 
+  it('survives an idle database client error instead of terminating', async () => {
+    // node-postgres emits 'error' on the pool when an idle client's connection drops. With no
+    // listener Node treats it as unhandled and kills the process, so a recoverable blip took
+    // the API down. Terminating the process's own backends from outside is what a database
+    // restart looks like to the pool.
+    const before = await admin.query<{ pid: number }>(
+      `SELECT pid FROM pg_stat_activity WHERE application_name = $1`,
+      [APPLICATION_NAME],
+    );
+    expect(before.rowCount, 'the process must hold pooled connections').toBeGreaterThan(0);
+    await admin.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1`,
+      [APPLICATION_NAME],
+    );
+
+    // The process is still alive and still serving, and readiness is what reports the
+    // database - the pool reconnects on the next checkout.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(child.exitCode, `stderr: ${stderr}`).toBeNull();
+    const live = await fetch(`http://127.0.0.1:${port}/health/live`);
+    expect(live.status).toBe(200);
+    const ready = await fetch(`http://127.0.0.1:${port}/health/ready`);
+    expect([200, 503]).toContain(ready.status);
+
+    // And the pool recovers: a route that actually checks out a client works again, which is
+    // the behaviour the crash prevented. This also restores the connections the shutdown test
+    // expects to find, since the pool reconnects lazily.
+    const login = await fetch(`http://127.0.0.1:${port}/v1/workspaces/${WORKSPACE}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ loginName: 'desk.owner', password: 'not-the-password-at-all' }),
+    });
+    expect(login.status).toBe(401);
+  }, 30_000);
+
   it('exits cleanly on SIGTERM and leaves no database session behind', async () => {
     const backendCount = async (): Promise<number> => {
       const result = await admin.query<{ count: string }>(

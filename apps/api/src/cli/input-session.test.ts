@@ -1,6 +1,6 @@
 import { PassThrough, Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import { InputSession } from './input-session.js';
+import { InputInterrupted, InputSession } from './input-session.js';
 
 /**
  * Echo suppression, proven deterministically.
@@ -100,6 +100,23 @@ describe('interactive input', () => {
     expect(await session.read('first: ', false)).toBe('only-one-line');
     expect(await session.read('second: ', true)).toBe('');
     session.close();
+  });
+
+  it('reports an interrupt as an interrupt, not as an empty answer', async () => {
+    // In terminal mode readline consumes Ctrl-C and emits SIGINT itself, so the process
+    // handler never ran: the iterator closed, the read returned '', and a redemption reported
+    // WEAK_PASSWORD instead of being interrupted.
+    const input = new PassThrough();
+    const output = capture();
+    const session = new InputSession({ input, output: output.stream, interactive: true });
+
+    const reading = session.read('new owner password: ', true);
+    // What readline raises when the terminal delivers Ctrl-C.
+    (session as unknown as { reader: { emit: (event: string) => void } }).reader.emit('SIGINT');
+    await expect(reading).rejects.toBeInstanceOf(InputInterrupted);
+    session.close();
+    // Nothing of a partially typed secret is echoed on the way out.
+    expect(output.text()).not.toContain('new owner password: \n\n');
   });
 
   it('closes idempotently, so cleanup on both a success and an error path is safe', () => {

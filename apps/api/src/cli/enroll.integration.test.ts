@@ -313,6 +313,75 @@ describeIfDatabase('one-time owner enrollment', () => {
     expect(allowed.rowCount).toBe(1);
   });
 
+  it('refuses a login name already enrolled in another workspace, concurrently too', async () => {
+    // users.login_name is unique across every workspace, so the same name enrolled elsewhere
+    // collides. That surfaced as a raw 23505 with whatever the driver put in its message.
+    const OTHER = 'ws-enroll-other';
+    await primary.query(
+      `INSERT INTO workspaces (workspace_id, display_name) VALUES ($1, 'Other')`,
+      [OTHER],
+    );
+    const here = await issue();
+    expect(here.ok).toBe(true);
+    if (!here.ok) return;
+    const there = await issueEnrollment(primary, { workspaceId: OTHER, loginName: LOGIN });
+    expect(there.ok).toBe(true);
+    if (!there.ok) return;
+
+    // Sequential: the second redemption is a decision, not a database error.
+    expect(
+      await redeemEnrollment(primary, {
+        workspaceId: WORKSPACE,
+        code: here.code,
+        password: PASSWORD,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await redeemEnrollment(primary, { workspaceId: OTHER, code: there.code, password: PASSWORD }),
+    ).toEqual({ ok: false, reason: 'LOGIN_NAME_TAKEN' });
+    expect((await primary.query('SELECT 1 FROM users')).rowCount).toBe(1);
+  });
+
+  it('lets exactly one of two concurrent cross-workspace redemptions create the user', async () => {
+    const OTHER = 'ws-enroll-other';
+    await primary.query(
+      `INSERT INTO workspaces (workspace_id, display_name) VALUES ($1, 'Other')`,
+      [OTHER],
+    );
+    const here = await issue();
+    const there = await issueEnrollment(primary, { workspaceId: OTHER, loginName: LOGIN });
+    expect(here.ok && there.ok).toBe(true);
+    if (!here.ok || !there.ok) return;
+
+    const [left, right, barrier] = await Promise.all([connect(), connect(), connect()]);
+    // Both redemptions lock their own workspace row, so the barrier is the users table: the
+    // pre-check and the unique index are what decide, and exactly one must win.
+    await barrier.client.query('BEGIN');
+    await barrier.client.query('LOCK TABLE users IN EXCLUSIVE MODE');
+    const both = Promise.all([
+      redeemEnrollment(left.client, {
+        workspaceId: WORKSPACE,
+        code: here.code,
+        password: PASSWORD,
+      }),
+      redeemEnrollment(right.client, { workspaceId: OTHER, code: there.code, password: PASSWORD }),
+    ]);
+    both.catch(() => undefined);
+    try {
+      await waitUntilBlockedBy(primary, barrier.pid, [left.pid, right.pid]);
+    } finally {
+      await barrier.client.query('ROLLBACK').catch(() => undefined);
+    }
+    const [a, b] = await both;
+    expect([a, b].filter((o) => o.ok)).toHaveLength(1);
+    const refused = [a, b].filter((o) => !o.ok);
+    expect(refused).toHaveLength(1);
+    // Either the pre-check saw the winner, or the unique index did and the repository turned
+    // it into the same decision. Never a raw database error escaping to the operator.
+    expect(refused[0]).toEqual({ ok: false, reason: 'LOGIN_NAME_TAKEN' });
+    expect((await primary.query('SELECT 1 FROM users')).rowCount).toBe(1);
+  });
+
   it('refuses a weak password and an invalid login before writing or hashing anything', async () => {
     expect(await issueEnrollment(primary, { workspaceId: WORKSPACE, loginName: 'AB' })).toEqual({
       ok: false,

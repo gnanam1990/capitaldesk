@@ -381,34 +381,47 @@ export async function redeemEnrollment(
     if (taken.rowCount === 1) return { ok: false, reason: 'LOGIN_NAME_TAKEN' };
 
     const userId = newId('usr');
-    // consumed_by is an immediate foreign key, so the user row exists before the consume runs.
-    await client.query(
-      `INSERT INTO users (user_id, login_name, password_hash) VALUES ($1, $2, $3)`,
-      [userId, live.login_name, await hashHumanSecret(input.password)],
-    );
-    const consumed = await client.query(
-      `UPDATE owner_enrollments
-          SET consumed_at = $2, consumed_by = $3
-        WHERE enrollment_id = $1 AND consumed_at IS NULL AND invalidated_at IS NULL`,
-      [live.enrollment_id, now, userId],
-    );
-    // Unreachable while the row lock above holds. Asserted anyway: a future change that drops
-    // the lock must fail loudly and roll back, not mint a second owner from one code.
-    if (consumed.rowCount !== 1) {
-      throw new Error('enrollment consume affected an unexpected number of rows');
+    // The pre-check above settles the sequential case. Under concurrency both redeemers pass
+    // it and the unique index is the arbiter, so the loser's violation becomes the same
+    // decision here rather than escaping as a raw database error. A savepoint, so the refusal
+    // is a value this function returns and not an aborted transaction the caller inherits.
+    await client.query('SAVEPOINT before_user');
+    try {
+      // consumed_by is an immediate foreign key, so the user row exists before the consume runs.
+      await client.query(
+        `INSERT INTO users (user_id, login_name, password_hash) VALUES ($1, $2, $3)`,
+        [userId, live.login_name, await hashHumanSecret(input.password)],
+      );
+      const consumed = await client.query(
+        `UPDATE owner_enrollments
+            SET consumed_at = $2, consumed_by = $3
+          WHERE enrollment_id = $1 AND consumed_at IS NULL AND invalidated_at IS NULL`,
+        [live.enrollment_id, now, userId],
+      );
+      // Unreachable while the row lock above holds. Asserted anyway: a future change that drops
+      // the lock must fail loudly and roll back, not mint a second owner from one code.
+      if (consumed.rowCount !== 1) {
+        throw new Error('enrollment consume affected an unexpected number of rows');
+      }
+      await client.query(
+        `INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')`,
+        [input.workspaceId, userId],
+      );
+      await audit(client, {
+        workspaceId: input.workspaceId,
+        actorId: userId,
+        action: 'owner.enrollment.redeem',
+        outcome: 'allowed',
+        detail: { enrollmentId: live.enrollment_id, userId },
+        at: now,
+      });
+    } catch (error) {
+      if ((error as { constraint?: string }).constraint === 'users_login_name_key') {
+        await client.query('ROLLBACK TO SAVEPOINT before_user');
+        return { ok: false, reason: 'LOGIN_NAME_TAKEN' };
+      }
+      throw error;
     }
-    await client.query(
-      `INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')`,
-      [input.workspaceId, userId],
-    );
-    await audit(client, {
-      workspaceId: input.workspaceId,
-      actorId: userId,
-      action: 'owner.enrollment.redeem',
-      outcome: 'allowed',
-      detail: { enrollmentId: live.enrollment_id, userId },
-      at: now,
-    });
 
     return { ok: true, userId, loginName: live.login_name };
   });

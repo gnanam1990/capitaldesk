@@ -67,9 +67,9 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run lint`             | pass                                               |
 | `pnpm run check:layering`   | pass — 9 packages, 45 crossings checked            |
 | `pnpm run check:secrets`    | pass — 236 files scanned                           |
-| `pnpm run test:unit`        | **510 passed**, 0 skipped, 31 files                |
+| `pnpm run test:unit`        | **511 passed**, 0 skipped, 31 files                |
 | `pnpm run test:property`    | **13 passed**, seed 20260908                       |
-| `pnpm run test:integration` | **238 passed**, 19 files, against PostgreSQL 17.10 |
+| `pnpm run test:integration` | **241 passed**, 19 files, against PostgreSQL 17.10 |
 | `pnpm run build`            | pass — all packages and apps                       |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
@@ -78,7 +78,7 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 | ----------- | ----- | --------------------------------------------------------------------------------------------------------------- |
 | unit        | 507   | contracts 284, web 63, tools 37, api 36, config 35, domain 29, observability 23 (by package, from the reporter) |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                                  |
-| integration | 238   | journal 99, auth 56, migrations 30, CLI 18, worker/executor 12, identity scope 11, API 8                        |
+| integration | 241   | journal 99, auth 56, migrations 30, CLI 18, worker/executor 12, identity scope 11, API 8                        |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 88
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 99
