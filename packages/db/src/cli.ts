@@ -23,8 +23,20 @@ async function main(): Promise<void> {
   await client.connect();
   try {
     if (command === 'status') {
-      const status = await migrationStatus(client, files);
-      for (const row of status) {
+      // Read-only: this runs inside an explicit READ ONLY transaction so a reporting command
+      // can never write, including creating its own bookkeeping table.
+      await client.query('BEGIN READ ONLY');
+      let report;
+      try {
+        report = await migrationStatus(client, files);
+      } finally {
+        await client.query('ROLLBACK');
+      }
+
+      if (!report.bookkeepingExists) {
+        process.stdout.write('schema_migrations does not exist; no migration has been applied\n');
+      }
+      for (const row of report.migrations) {
         const state = row.applied
           ? row.checksumMatches
             ? 'applied'
@@ -32,7 +44,13 @@ async function main(): Promise<void> {
           : 'pending';
         process.stdout.write(`${row.version}\t${state}\n`);
       }
-      if (status.some((row) => row.checksumMatches === false)) process.exitCode = 1;
+      for (const version of report.appliedNotSupplied) {
+        process.stdout.write(`${version}\tAPPLIED BUT NOT SHIPPED BY THIS BUILD\n`);
+      }
+      for (const divergence of report.divergences) {
+        process.stderr.write(`${divergence.version}\t${divergence.kind}: ${divergence.detail}\n`);
+      }
+      if (report.divergences.length > 0) process.exitCode = 1;
       return;
     }
     if (command === 'migrate') {
