@@ -26,6 +26,81 @@ describeIfDatabase('venue read state', () => {
   const SCOPE = { workspaceId: WORKSPACE, poolId: POOL, epoch: 1, symbol: 'BTCUSDT' } as const;
   const DIGEST = `sha256:${'a'.repeat(64)}`;
 
+  /**
+   * Advance the cursor the way production does: with the page evidence that justifies it.
+   *
+   * The repository no longer exposes a bare `advance`, because a cursor that moves without
+   * durable evidence behind it is the thing `recordPageAndAdvance` exists to prevent.
+   */
+  function advance(
+    scope: { workspaceId: string; poolId: string; epoch: number; symbol: string },
+    next: { nextFromId: string; highestTradeId: string; digest: string },
+    trades: readonly { id: string; qty: string }[] = [],
+  ): ReturnType<VenueReadRepository['recordPageAndAdvance']> {
+    return repository.recordPageAndAdvance({
+      ...scope,
+      trades: trades.map((t) => ({
+        venueTradeId: t.id,
+        payload: { symbol: scope.symbol, venueTradeId: t.id, baseAtoms: t.qty },
+      })),
+      cursor: next,
+    });
+  }
+
+  /** Write one snapshot row directly, for tests of the table's own constraints. */
+  function insertSnapshotSql(row: {
+    snapshotId: string;
+    stableAccountId?: string;
+    requestedAt?: string;
+    respondedAt?: string;
+    responseDigest?: string;
+    balances?: unknown;
+    epoch?: number;
+  }): Promise<unknown> {
+    return harness.admin.query(
+      `INSERT INTO venue_account_snapshots
+         (workspace_id, pool_id, epoch, snapshot_id, stable_account_id, requested_at,
+          responded_at, source_time, response_digest, balances)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+      [
+        WORKSPACE,
+        POOL,
+        row.epoch ?? 1,
+        row.snapshotId,
+        row.stableAccountId ?? ACCOUNT.stableAccountId,
+        row.requestedAt ?? '2026-09-08T11:00:00.000Z',
+        row.respondedAt ?? '2026-09-08T11:00:00.100Z',
+        '2026-09-08T10:59:59.000Z',
+        row.responseDigest ?? DIGEST,
+        JSON.stringify(row.balances ?? [{ asset: 'USDT', freeAtoms: '100', lockedAtoms: '0' }]),
+      ],
+    );
+  }
+
+  /** Write one cut row directly, for tests of the table's own constraints. */
+  function insertCutSql(row: Record<string, unknown>): Promise<unknown> {
+    return harness.admin.query(
+      `INSERT INTO venue_observation_cuts
+         (workspace_id, pool_id, epoch, cut_id, window_from, window_to, opening_snapshot_id,
+          closing_snapshot_id, coverage_state, detection_scope, unmet, observed_symbols)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb)`,
+      [
+        WORKSPACE,
+        POOL,
+        1,
+        row['cutId'] ?? 'cut-1',
+        row['windowFrom'],
+        row['windowTo'],
+        row['openingSnapshotId'] ?? 'snap-open',
+        row['closingSnapshotId'] ?? 'snap-close',
+        row['coverageState'] ?? 'INCOMPLETE',
+        row['detectionScope'] ?? 'NET_BALANCE_CHANGES_ONLY',
+        JSON.stringify(row['unmet'] ?? ['x']),
+        JSON.stringify(row['observedSymbols'] ?? ['BTCUSDT']),
+      ],
+    );
+  }
+
   beforeAll(async () => {
     await harness.open();
   });
@@ -49,7 +124,7 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('records and reads back a cursor with the digest that advanced it', async () => {
-      const advanced = await repository.advance(SCOPE, {
+      const advanced = await advance(SCOPE, {
         nextFromId: '13',
         highestTradeId: '12',
         digest: DIGEST,
@@ -65,7 +140,7 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('survives a restart, which is the whole reason it is durable', async () => {
-      await repository.advance(SCOPE, {
+      await advance(SCOPE, {
         nextFromId: '13',
         highestTradeId: '12',
         digest: DIGEST,
@@ -76,8 +151,8 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('advances forward and increments its version', async () => {
-      await repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
-      const again = await repository.advance(SCOPE, {
+      await advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
+      const again = await advance(SCOPE, {
         nextFromId: '99',
         highestTradeId: '98',
         digest: DIGEST,
@@ -86,26 +161,26 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('refuses a rollback with a typed outcome naming both positions', async () => {
-      await repository.advance(SCOPE, { nextFromId: '99', highestTradeId: '98', digest: DIGEST });
+      await advance(SCOPE, { nextFromId: '99', highestTradeId: '98', digest: DIGEST });
       expect(
-        await repository.advance(SCOPE, {
+        await advance(SCOPE, {
           nextFromId: '13',
           highestTradeId: '12',
           digest: DIGEST,
         }),
-      ).toEqual({ ok: false, reason: 'CURSOR_NOT_ADVANCING', stored: '99', proposed: '13' });
+      ).toMatchObject({ ok: false, reason: 'CURSOR_NOT_ADVANCING', stored: '99', proposed: '13' });
       expect(await repository.cursor(SCOPE)).toMatchObject({ nextFromId: '99' });
     });
 
     it('compares cursors numerically, not as text', async () => {
       // '9' sorts after '10' as a string. A text comparison would accept the rollback below
       // and reject the legitimate advance in the previous case.
-      await repository.advance(SCOPE, { nextFromId: '10', highestTradeId: '9', digest: DIGEST });
+      await advance(SCOPE, { nextFromId: '10', highestTradeId: '9', digest: DIGEST });
       expect(
-        await repository.advance(SCOPE, { nextFromId: '9', highestTradeId: '8', digest: DIGEST }),
+        await advance(SCOPE, { nextFromId: '9', highestTradeId: '8', digest: DIGEST }),
       ).toMatchObject({ ok: false, reason: 'CURSOR_NOT_ADVANCING' });
       expect(
-        await repository.advance(SCOPE, {
+        await advance(SCOPE, {
           nextFromId: '11',
           highestTradeId: '10',
           digest: DIGEST,
@@ -116,20 +191,20 @@ describeIfDatabase('venue read state', () => {
     it('refuses an advance to the same position, which records a page that was not read', async () => {
       // An equal cursor rewrote the digest, the highest id and the version, so the evidence
       // trail claimed a page had been read when the position had not moved.
-      await repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
+      await advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
       expect(
-        await repository.advance(SCOPE, {
+        await advance(SCOPE, {
           nextFromId: '13',
           highestTradeId: '12',
           digest: DIGEST,
         }),
-      ).toEqual({ ok: false, reason: 'CURSOR_NOT_ADVANCING', stored: '13', proposed: '13' });
+      ).toMatchObject({ ok: false, reason: 'CURSOR_NOT_ADVANCING', stored: '13', proposed: '13' });
       const stored = await repository.cursor(SCOPE);
       expect(stored?.version).toBe(1);
     });
 
     it('refuses an equal advance at the table as well', async () => {
-      await repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
+      await advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
         await harness.admin.query(`UPDATE venue_trade_cursors SET advanced_by_digest = $1`, [
@@ -150,13 +225,13 @@ describeIfDatabase('venue read state', () => {
         { nextFromId: '13', highestTradeId: '20' },
       ]) {
         await expect(
-          repository.advance(SCOPE, { ...pair, digest: DIGEST }),
+          advance(SCOPE, { ...pair, digest: DIGEST }),
           JSON.stringify(pair),
         ).rejects.toThrow(/one past/);
       }
       // The positive control.
       await expect(
-        repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST }),
+        advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST }),
       ).resolves.toMatchObject({ ok: true });
     });
 
@@ -177,7 +252,7 @@ describeIfDatabase('venue read state', () => {
 
     it('refuses a digest that is not a sha256 reference, in both layers', async () => {
       await expect(
-        repository.advance(SCOPE, {
+        advance(SCOPE, {
           nextFromId: '13',
           highestTradeId: '12',
           digest: 'trust me',
@@ -202,7 +277,7 @@ describeIfDatabase('venue read state', () => {
       // trigger, where an absurd value is a hazard rather than a cursor.
       const tooLong = '1'.repeat(79);
       await expect(
-        repository.advance(SCOPE, {
+        advance(SCOPE, {
           nextFromId: tooLong,
           highestTradeId: '1'.repeat(78),
           digest: DIGEST,
@@ -211,7 +286,7 @@ describeIfDatabase('venue read state', () => {
       // The positive control: exactly at the bound is accepted.
       const atBound = '9'.repeat(77);
       await expect(
-        repository.advance(SCOPE, {
+        advance(SCOPE, {
           nextFromId: (BigInt(atBound) + 1n).toString(),
           highestTradeId: atBound,
           digest: DIGEST,
@@ -222,7 +297,7 @@ describeIfDatabase('venue read state', () => {
     it('carries a cursor far beyond the safe integer range', async () => {
       const highest = '90071992547409931234567889';
       const huge = (BigInt(highest) + 1n).toString();
-      await repository.advance(SCOPE, {
+      await advance(SCOPE, {
         nextFromId: huge,
         highestTradeId: highest,
         digest: DIGEST,
@@ -231,7 +306,7 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('refuses a rollback attempted by a writer that bypasses the repository', async () => {
-      await repository.advance(SCOPE, { nextFromId: '99', highestTradeId: '98', digest: DIGEST });
+      await advance(SCOPE, { nextFromId: '99', highestTradeId: '98', digest: DIGEST });
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
         await harness.admin.query(`UPDATE venue_trade_cursors SET next_from_id = '13'`);
@@ -243,7 +318,7 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('refuses a deletion, so a cursor cannot be quietly forgotten', async () => {
-      await repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
+      await advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
       let refusal = 'accepted';
       try {
         await harness.admin.query('DELETE FROM venue_trade_cursors');
@@ -255,7 +330,7 @@ describeIfDatabase('venue read state', () => {
 
     it('refuses a non-canonical cursor at the table as well as in the repository', async () => {
       await expect(
-        repository.advance(SCOPE, { nextFromId: '007', highestTradeId: '6', digest: DIGEST }),
+        advance(SCOPE, { nextFromId: '007', highestTradeId: '6', digest: DIGEST }),
       ).rejects.toThrow(TypeError);
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
@@ -274,8 +349,8 @@ describeIfDatabase('venue read state', () => {
     it('keeps cursors separate per symbol and per epoch', async () => {
       // `myTrades` requires a symbol and its ids are per-symbol, so there is no account-wide
       // cursor to keep. A reset opens a new epoch, whose cursor starts unset.
-      await repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
-      await repository.advance(
+      await advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
+      await advance(
         { ...SCOPE, symbol: 'ETHUSDT' },
         { nextFromId: '5', highestTradeId: '4', digest: DIGEST },
       );
@@ -299,11 +374,11 @@ describeIfDatabase('venue read state', () => {
 
     it('refuses a cursor for an epoch that does not exist', async () => {
       expect(
-        await repository.advance(
+        await advance(
           { ...SCOPE, epoch: 99 },
           { nextFromId: '1', highestTradeId: '0', digest: DIGEST },
         ),
-      ).toEqual({ ok: false, reason: 'UNKNOWN_EPOCH' });
+      ).toMatchObject({ ok: false, reason: 'UNKNOWN_EPOCH' });
     });
   });
 
@@ -439,16 +514,10 @@ describeIfDatabase('venue read state', () => {
       requestedAt = OPENED_AT,
       respondedAt = '2026-09-08T11:00:00.100Z',
     ): Promise<void> {
-      await repository.recordSnapshotForTableTests({
-        workspaceId: WORKSPACE,
-        poolId: POOL,
-        epoch: 1,
+      await insertSnapshotSql({
         snapshotId: id,
-        stableAccountId: ACCOUNT.stableAccountId,
         requestedAt,
         respondedAt,
-        sourceTime: '2026-09-08T10:59:59.000Z',
-        responseDigest: DIGEST,
         balances: [{ asset: 'USDT', freeAtoms: free, lockedAtoms: '0' }],
       });
     }
@@ -473,17 +542,10 @@ describeIfDatabase('venue read state', () => {
     it('refuses a snapshot whose interval runs backwards', async () => {
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
-        await repository.recordSnapshotForTableTests({
-          workspaceId: WORKSPACE,
-          poolId: POOL,
-          epoch: 1,
+        await insertSnapshotSql({
           snapshotId: 'snap-bad',
-          stableAccountId: ACCOUNT.stableAccountId,
           requestedAt: '2026-09-08T12:00:00.000Z',
           respondedAt: '2026-09-08T11:59:00.000Z',
-          sourceTime: null,
-          responseDigest: DIGEST,
-          balances: [],
         });
       } catch (error) {
         refusal = sqlRefusal(error);
@@ -494,18 +556,7 @@ describeIfDatabase('venue read state', () => {
     it('refuses a snapshot whose digest is not a sha256 reference', async () => {
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
-        await repository.recordSnapshotForTableTests({
-          workspaceId: WORKSPACE,
-          poolId: POOL,
-          epoch: 1,
-          snapshotId: 'snap-bad',
-          stableAccountId: ACCOUNT.stableAccountId,
-          requestedAt: '2026-09-08T12:00:00.000Z',
-          respondedAt: '2026-09-08T12:00:01.000Z',
-          sourceTime: null,
-          responseDigest: 'trust me',
-          balances: [],
-        });
+        await insertSnapshotSql({ snapshotId: 'snap-bad', responseDigest: 'trust me' });
       } catch (error) {
         refusal = sqlRefusal(error);
       }
@@ -533,19 +584,13 @@ describeIfDatabase('venue read state', () => {
       unmet: string[],
       scope: CoverageAssessment['detectionScope'],
     ): Promise<void> {
-      await repository.recordCutForTableTests({
-        workspaceId: WORKSPACE,
-        poolId: POOL,
-        epoch: 1,
+      await insertCutSql({
         cutId: `cut-${state}`,
         windowFrom: OPENED_AT,
         windowTo: CLOSED_AT,
-        openingSnapshotId: 'snap-open',
-        closingSnapshotId: 'snap-close',
         coverageState: state,
         detectionScope: scope,
         unmet,
-        observedSymbols: ['BTCUSDT'],
       });
     }
 
@@ -604,17 +649,9 @@ describeIfDatabase('venue read state', () => {
     it('refuses a snapshot attributed to an account this pool does not govern', async () => {
       let refusal = 'accepted';
       try {
-        await repository.recordSnapshotForTableTests({
-          workspaceId: WORKSPACE,
-          poolId: POOL,
-          epoch: 1,
+        await insertSnapshotSql({
           snapshotId: 'snap-foreign',
           stableAccountId: 'some-other-account',
-          requestedAt: '2026-09-08T12:00:00.000Z',
-          respondedAt: '2026-09-08T12:00:01.000Z',
-          sourceTime: null,
-          responseDigest: DIGEST,
-          balances: [],
         });
       } catch (error) {
         refusal = sqlRefusal(error).state;
@@ -632,12 +669,12 @@ describeIfDatabase('venue read state', () => {
         [WORKSPACE, POOL],
       );
       expect(
-        await repository.advance(SCOPE, {
+        await advance(SCOPE, {
           nextFromId: '13',
           highestTradeId: '12',
           digest: DIGEST,
         }),
-      ).toEqual({ ok: false, reason: 'EPOCH_CLOSED' });
+      ).toMatchObject({ ok: false, reason: 'EPOCH_CLOSED' });
 
       let refusal = 'accepted';
       try {
@@ -654,23 +691,26 @@ describeIfDatabase('venue read state', () => {
         unmet: [],
         detectionScope: 'FULL_WITHIN_PROVEN_UNIVERSE',
       };
-      const bracket = (id: string) => ({
+      // Non-overlapping: the closing reading begins after the opening one finished.
+      const bracket = (id: string, requestedAt: string, respondedAt: string) => ({
         snapshotId: id,
         stableAccountId: ACCOUNT.stableAccountId,
-        requestedAt: '2026-09-08T12:00:00.000Z',
-        respondedAt: '2026-09-08T12:00:01.000Z',
+        requestedAt,
+        respondedAt,
         sourceTime: null,
         responseDigest: DIGEST,
         balances: [{ asset: 'USDT', freeAtoms: '100', lockedAtoms: '0' }],
       });
+      const OPEN = ['2026-09-08T11:00:00.000Z', '2026-09-08T11:00:00.100Z'] as const;
+      const CLOSE = ['2026-09-08T12:00:00.000Z', '2026-09-08T12:00:00.100Z'] as const;
 
       await repository.recordAssessedCut({
         workspaceId: WORKSPACE,
         poolId: POOL,
         epoch: 1,
         cutId: 'cut-atomic',
-        opening: bracket('cut-atomic-open'),
-        closing: bracket('cut-atomic-close'),
+        opening: bracket('cut-atomic-open', OPEN[0], OPEN[1]),
+        closing: bracket('cut-atomic-close', CLOSE[0], CLOSE[1]),
         assessment,
         observedSymbols: ['BTCUSDT'],
       });
@@ -686,8 +726,8 @@ describeIfDatabase('venue read state', () => {
           poolId: POOL,
           epoch: 1,
           cutId: 'cut-rejected',
-          opening: bracket('cut-rejected-open'),
-          closing: bracket('cut-rejected-close'),
+          opening: bracket('cut-rejected-open', OPEN[0], OPEN[1]),
+          closing: bracket('cut-rejected-close', CLOSE[0], CLOSE[1]),
           assessment: { ...assessment, unmet: ['a source observation is outside its class'] },
           observedSymbols: ['BTCUSDT'],
         }),
@@ -717,19 +757,12 @@ describeIfDatabase('venue read state', () => {
      */
     describe('a cut window must be the interval its own brackets describe', () => {
       async function cutWith(overrides: Record<string, unknown>): Promise<void> {
-        await repository.recordCutForTableTests({
-          workspaceId: WORKSPACE,
-          poolId: POOL,
-          epoch: 1,
+        await insertCutSql({
           cutId: 'cut-window',
           windowFrom: OPENED_AT,
           windowTo: CLOSED_AT,
           openingSnapshotId: 'snap-open',
           closingSnapshotId: 'snap-close',
-          coverageState: 'INCOMPLETE',
-          detectionScope: 'NET_BALANCE_CHANGES_ONLY',
-          unmet: ['x'],
-          observedSymbols: ['BTCUSDT'],
           ...overrides,
         });
       }
@@ -759,6 +792,33 @@ describeIfDatabase('venue read state', () => {
         await expect(
           cutWith({ closingSnapshotId: 'snap-open', windowTo: '2026-09-08T11:00:00.100Z' }),
         ).rejects.toMatchObject({ code: '23001' });
+      });
+
+      it('refuses brackets that overlap', async () => {
+        // Comparing the two request instants alone allowed a closing reading that began while
+        // the opening one was still in flight: the two describe overlapping views of the
+        // account, and the interval between them brackets nothing.
+        await insertSnapshotSql({
+          snapshotId: 'snap-overlap',
+          requestedAt: '2026-09-08T11:00:00.050Z',
+          respondedAt: '2026-09-08T12:00:00.100Z',
+        });
+        await expect(
+          cutWith({ closingSnapshotId: 'snap-overlap', windowTo: '2026-09-08T12:00:00.100Z' }),
+        ).rejects.toMatchObject({ code: '23001' });
+      });
+
+      it('accepts brackets that merely touch, which a fast pair really produces', async () => {
+        // The positive control: the closing reading beginning exactly when the opening one
+        // finished is adjacent, not overlapping.
+        await insertSnapshotSql({
+          snapshotId: 'snap-adjacent',
+          requestedAt: '2026-09-08T11:00:00.100Z',
+          respondedAt: '2026-09-08T11:30:00.000Z',
+        });
+        await expect(
+          cutWith({ closingSnapshotId: 'snap-adjacent', windowTo: '2026-09-08T11:30:00.000Z' }),
+        ).resolves.not.toThrow();
       });
 
       it('refuses brackets in the wrong order', async () => {

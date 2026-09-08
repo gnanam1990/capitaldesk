@@ -264,9 +264,12 @@ BEGIN
       USING ERRCODE = 'restrict_violation';
   END IF;
 
-  -- The brackets must be in the order the cut claims.
-  IF closing.requested_at < opening.requested_at THEN
-    RAISE EXCEPTION 'cut % closes with a snapshot taken before it opens', NEW.cut_id
+  -- The brackets must not overlap. Comparing the two request instants alone allowed a closing
+  -- reading that began while the opening one was still in flight: the two would then describe
+  -- overlapping views of the account, and the interval between them brackets nothing.
+  IF closing.requested_at < opening.responded_at THEN
+    RAISE EXCEPTION 'cut % closes with a snapshot requested at % before its opening bracket answered at %',
+      NEW.cut_id, closing.requested_at, opening.responded_at
       USING ERRCODE = 'restrict_violation';
   END IF;
 

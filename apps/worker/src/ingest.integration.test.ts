@@ -167,12 +167,16 @@ describeIfDatabase('worker ingest catch-up', () => {
   });
 
   /** A scripted venue whose answers may vary per call. */
-  function reader(script: {
-    exchangeInfo?: (call: number) => unknown;
-    account?: (call: number) => unknown;
-    openOrders?: () => unknown;
-    myTrades?: (fromId: string | null) => unknown;
-  }): { reader: BinanceSpotReader; calls: URL[] } {
+  function reader(
+    script: {
+      exchangeInfo?: (call: number) => unknown;
+      account?: (call: number) => unknown;
+      openOrders?: () => unknown;
+      myTrades?: (fromId: string | null) => unknown;
+    },
+    /** The epoch this reader stamps onto its own observations. */
+    readerEpoch = 1,
+  ): { reader: BinanceSpotReader; calls: URL[] } {
     const calls: URL[] = [];
     let infoCall = 0;
     let accountCall = 0;
@@ -220,7 +224,11 @@ describeIfDatabase('worker ingest catch-up', () => {
           },
           now: () => new Date(Date.parse('2026-09-08T12:00:00.000Z') + tick++ * 10),
         }),
-        identity: { environment: 'testnet', expectedStableAccountId: '354937868', epoch: 1 },
+        identity: {
+          environment: 'testnet',
+          expectedStableAccountId: '354937868',
+          epoch: readerEpoch,
+        },
       }),
       calls,
     };
@@ -360,10 +368,20 @@ describeIfDatabase('worker ingest catch-up', () => {
     });
 
     it('resumes from a persisted cursor after a restart', async () => {
-      await repository.advance(
-        { workspaceId: WORKSPACE, poolId: POOL_ID, epoch: 1, symbol: 'BTCUSDT' },
-        { nextFromId: '500', highestTradeId: '499', digest: `sha256:${'b'.repeat(64)}` },
-      );
+      // Set up the way production does: the cursor moves with the page evidence that
+      // justifies it. There is no bare advance any more, precisely so this cannot be faked.
+      await repository.recordPageAndAdvance({
+        workspaceId: WORKSPACE,
+        poolId: POOL_ID,
+        epoch: 1,
+        symbol: 'BTCUSDT',
+        trades: [{ venueTradeId: '499', payload: { symbol: 'BTCUSDT', venueTradeId: '499' } }],
+        cursor: {
+          nextFromId: '500',
+          highestTradeId: '499',
+          digest: `sha256:${'b'.repeat(64)}`,
+        },
+      });
       const seen: (string | null)[] = [];
       const built = reader({
         myTrades: (fromId) => {
@@ -668,6 +686,35 @@ describeIfDatabase('worker ingest catch-up', () => {
       expect((await harness.admin.query('SELECT 1 FROM venue_account_snapshots')).rowCount).toBe(0);
     });
 
+    it('refuses a reader whose own epoch is not the pool’s, even when the scope epoch is', async () => {
+      // The scope and the reader make two separate claims. Checking only the scope let a
+      // reader on epoch 99 write a page under scope epoch 1: the writes were consistent with
+      // themselves, and the evidence they carried named a different epoch entirely.
+      const built = reader({ myTrades: () => [trade(1), trade(2)] }, 99);
+      await expect(
+        catchUp({
+          scope: {
+            workspaceId: WORKSPACE,
+            poolId: POOL_ID,
+            epoch: 1,
+            observedSymbols: ['BTCUSDT'],
+            scales: SCALES,
+            assetScales: ASSET_SCALES,
+          },
+          reader: built.reader,
+          repository,
+          session: FULLY_OBSERVABLE,
+          knownClientOrderIds: new Set(),
+          bookedEffects: {},
+          cutId: 'cut-reader-epoch',
+        }),
+      ).rejects.toThrow(/EPOCH_NOT_CURRENT/);
+
+      expect((await harness.admin.query('SELECT 1 FROM raw_observations')).rowCount).toBe(0);
+      expect((await harness.admin.query('SELECT 1 FROM venue_trade_cursors')).rowCount).toBe(0);
+      expect((await harness.admin.query('SELECT 1 FROM venue_account_snapshots')).rowCount).toBe(0);
+    });
+
     it('refuses a pool governed by a different account, writing nothing', async () => {
       await harness.admin.query(
         `INSERT INTO venue_accounts (venue, environment, stable_account_id)
@@ -693,6 +740,40 @@ describeIfDatabase('worker ingest catch-up', () => {
       await expect(run(built)).rejects.toThrow(/NO_OPEN_EPOCH/);
       expect((await harness.admin.query('SELECT 1 FROM raw_observations')).rowCount).toBe(0);
     });
+  });
+
+  it('gives two long cut ids distinct bracket ids, so they can coexist', async () => {
+    // snapshot_id is capped at 64 characters and a cut id may itself be 64. Truncating alone
+    // made two different cut ids sharing a prefix collide on their bracket ids, so the second
+    // cut could not be recorded at all.
+    const shared = 'c'.repeat(62);
+    for (const cutId of [`${shared}01`, `${shared}02`]) {
+      await catchUp({
+        scope: {
+          workspaceId: WORKSPACE,
+          poolId: POOL_ID,
+          epoch: 1,
+          observedSymbols: ['BTCUSDT'],
+          scales: SCALES,
+          assetScales: ASSET_SCALES,
+        },
+        reader: reader({}).reader,
+        repository,
+        session: FULLY_OBSERVABLE,
+        knownClientOrderIds: new Set(),
+        bookedEffects: {},
+        cutId,
+      });
+    }
+    const snapshots = await harness.admin.query<{ snapshot_id: string }>(
+      'SELECT snapshot_id FROM venue_account_snapshots',
+    );
+    expect(snapshots.rows).toHaveLength(4);
+    expect(new Set(snapshots.rows.map((row) => row.snapshot_id)).size).toBe(4);
+    for (const row of snapshots.rows) {
+      expect(row.snapshot_id.length).toBeLessThanOrEqual(64);
+    }
+    expect((await harness.admin.query('SELECT 1 FROM venue_observation_cuts')).rowCount).toBe(2);
   });
 
   describe('durability', () => {

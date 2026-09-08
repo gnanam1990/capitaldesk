@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   assessCoverage,
   describeDetection,
@@ -167,7 +168,10 @@ export async function catchUp(options: CatchUpOptions): Promise<CutResult> {
   const scopeCheck = await repository.assertReaderScope({
     workspaceId: scope.workspaceId,
     poolId: scope.poolId,
-    epoch: scope.epoch,
+    scopeEpoch: scope.epoch,
+    // The epoch the reader stamps onto its own evidence, which is not necessarily the epoch
+    // the writes are scoped by. Both are compared against the one the database says is open.
+    readerEpoch: opening.provenance.epoch,
     provenAccountId: opening.value.stableAccountId,
     environment: opening.provenance.environment,
   });
@@ -307,14 +311,16 @@ function reconcileBrackets(
  * A bounded, deterministic id for one bracket.
  *
  * `snapshot_id` is capped at 64 characters by its shape CHECK, and `cutId` may itself be 64.
- * Appending a suffix would overflow that for any long cut id, and the insert would then fail
- * after the reads had already been performed.
+ * Truncating alone was not enough: two different 64-character cut ids sharing a prefix would
+ * truncate to the same bracket id and collide, so the long form keeps a digest of the whole
+ * cut id, which distinguishes them.
  */
 function bracketId(cutId: string, side: 'open' | 'close'): string {
   const suffix = `-${side}`;
-  return cutId.length + suffix.length <= 64
-    ? `${cutId}${suffix}`
-    : `${cutId.slice(0, 64 - suffix.length)}${suffix}`;
+  if (cutId.length + suffix.length <= 64) return `${cutId}${suffix}`;
+  const digest = createHash('sha256').update(cutId).digest('hex').slice(0, 16);
+  // 64 = prefix + '-' + 16 digest characters + suffix.
+  return `${cutId.slice(0, 64 - suffix.length - 17)}-${digest}${suffix}`;
 }
 
 function snapshotRecordOf(snapshotId: string, observed: Observation<AccountSnapshot>) {

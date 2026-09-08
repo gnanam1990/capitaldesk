@@ -44,6 +44,15 @@ export interface TradeCursor {
   readonly version: number;
 }
 
+/**
+ * The only ways read state is written.
+ *
+ * `advance` was public and moved a cursor with no page evidence behind it — precisely what
+ * `recordPageAndAdvance` exists to make impossible. Single-snapshot and single-cut writers were
+ * public too, so a caller could leave a bracket with no cut, or a cut with no brackets. All
+ * three are gone. A table constraint is exercised by SQL through the test harness, which is
+ * where a test of a table constraint belongs.
+ */
 export type ScopeCheckOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: 'UNKNOWN_POOL' | 'NO_OPEN_EPOCH' }
@@ -198,25 +207,6 @@ export class VenueReadRepository {
   }
 
   /**
-   * Move a cursor forward, or refuse.
-   *
-   * Compared as integers, not as text: '9' sorts after '10' as a string, and a text comparison
-   * would accept a rollback from 10 to 9 while rejecting a legitimate advance from 9 to 10.
-   * The database refuses a rollback independently, so a writer that bypasses this method is
-   * refused too.
-   */
-  async advance(
-    scope: CursorScope,
-    next: { readonly nextFromId: string; readonly highestTradeId: string; readonly digest: string },
-  ): Promise<AdvanceCursorOutcome> {
-    // `async` so this arrives as a rejection rather than a synchronous throw. A method that
-    // returns a promise but throws before creating one is missed by every caller using
-    // `.catch()`, which is exactly how a validation failure becomes silence.
-    assertCursorShape(next);
-    return serializable(this.pool, (client) => advanceOn(client, scope, next));
-  }
-
-  /**
    * Both brackets and the assessed cut, in one transaction.
    *
    * A cut whose snapshots are missing is not evidence of anything, and snapshots with no cut
@@ -273,91 +263,6 @@ export class VenueReadRepository {
   }
 
   /** Every cursor this pool holds in this epoch, for a restart to resume from. */
-  /**
-   * Record one bracket on its own.
-   *
-   * Deliberately not exported from the repository's public surface any more: a snapshot with
-   * no cut is a reading nobody drew a conclusion from, and a cut with missing snapshots is not
-   * evidence of anything. `recordAssessedCut` is the way in. This stays only for the tests
-   * that exercise the table's own constraints directly.
-   *
-   * @internal
-   */
-  async recordSnapshotForTableTests(input: {
-    readonly workspaceId: string;
-    readonly poolId: string;
-    readonly epoch: number;
-    readonly snapshotId: string;
-    readonly stableAccountId: string;
-    readonly requestedAt: string;
-    readonly respondedAt: string;
-    readonly sourceTime: string | null;
-    readonly responseDigest: string;
-    readonly balances: readonly { asset: string; freeAtoms: string; lockedAtoms: string }[];
-  }): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO venue_account_snapshots
-         (workspace_id, pool_id, epoch, snapshot_id, stable_account_id, requested_at,
-          responded_at, source_time, response_digest, balances)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
-      [
-        input.workspaceId,
-        input.poolId,
-        input.epoch,
-        input.snapshotId,
-        input.stableAccountId,
-        input.requestedAt,
-        input.respondedAt,
-        input.sourceTime,
-        input.responseDigest,
-        JSON.stringify(input.balances),
-      ],
-    );
-  }
-
-  /**
-   * Record a cut on its own.
-   *
-   * Same reasoning as `recordSnapshotForTableTests`: kept for direct constraint tests, not for
-   * production use, and it takes a typed assessment rather than free strings.
-   *
-   * @internal
-   */
-  async recordCutForTableTests(input: {
-    readonly workspaceId: string;
-    readonly poolId: string;
-    readonly epoch: number;
-    readonly cutId: string;
-    readonly windowFrom: string;
-    readonly windowTo: string;
-    readonly openingSnapshotId: string;
-    readonly closingSnapshotId: string;
-    readonly coverageState: CoverageAssessment['state'];
-    readonly detectionScope: CoverageAssessment['detectionScope'];
-    readonly unmet: readonly string[];
-    readonly observedSymbols: readonly string[];
-  }): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO venue_observation_cuts
-         (workspace_id, pool_id, epoch, cut_id, window_from, window_to, opening_snapshot_id,
-          closing_snapshot_id, coverage_state, detection_scope, unmet, observed_symbols)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb)`,
-      [
-        input.workspaceId,
-        input.poolId,
-        input.epoch,
-        input.cutId,
-        input.windowFrom,
-        input.windowTo,
-        input.openingSnapshotId,
-        input.closingSnapshotId,
-        input.coverageState,
-        input.detectionScope,
-        JSON.stringify(input.unmet),
-        JSON.stringify(input.observedSymbols),
-      ],
-    );
-  }
 
   /**
    * Refuse a reader whose provenance does not describe this pool, before anything is written.
@@ -371,7 +276,16 @@ export class VenueReadRepository {
   async assertReaderScope(input: {
     readonly workspaceId: string;
     readonly poolId: string;
-    readonly epoch: number;
+    /** The epoch the writes will be scoped by. */
+    readonly scopeEpoch: number;
+    /**
+     * The epoch the reader stamps onto its own observations.
+     *
+     * Compared separately from `scopeEpoch`. Checking only the scope let a reader on epoch 99
+     * write a page under scope epoch 1: the writes were consistent with themselves, and the
+     * evidence they carried named a different epoch entirely.
+     */
+    readonly readerEpoch: number;
     readonly provenAccountId: string;
     readonly environment: string;
   }): Promise<ScopeCheckOutcome> {
@@ -408,8 +322,11 @@ export class VenueReadRepository {
     );
     const open = epoch.rows[0]?.epoch;
     if (open === undefined) return { ok: false, reason: 'NO_OPEN_EPOCH' };
-    if (open !== input.epoch) {
-      return { ok: false, reason: 'EPOCH_NOT_CURRENT', expected: open, observed: input.epoch };
+    // Both claims, against the one epoch the database says is open.
+    for (const observed of [input.scopeEpoch, input.readerEpoch]) {
+      if (open !== observed) {
+        return { ok: false, reason: 'EPOCH_NOT_CURRENT', expected: open, observed };
+      }
     }
     return { ok: true };
   }
@@ -425,7 +342,7 @@ export class VenueReadRepository {
    * Observations are keyed by the venue trade id under `source = 'rest'`, so a page delivered
    * twice records once — the journal's existing dedupe boundary, not a new one.
    */
-  recordPageAndAdvance(input: {
+  async recordPageAndAdvance(input: {
     readonly workspaceId: string;
     readonly poolId: string;
     readonly epoch: number;
