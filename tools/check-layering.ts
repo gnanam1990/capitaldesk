@@ -21,7 +21,12 @@ const ROOT = process.cwd();
 /** Layer 0 depends on nothing internal; each layer may depend only on strictly lower ones. */
 const LAYERS: ReadonlyArray<readonly string[]> = [
   ['@capitaldesk/contracts'],
-  ['@capitaldesk/config', '@capitaldesk/observability', '@capitaldesk/domain'],
+  [
+    '@capitaldesk/config',
+    '@capitaldesk/observability',
+    '@capitaldesk/domain',
+    '@capitaldesk/binance',
+  ],
   ['@capitaldesk/db'],
   ['@capitaldesk/api', '@capitaldesk/worker', '@capitaldesk/executor', '@capitaldesk/web'],
 ];

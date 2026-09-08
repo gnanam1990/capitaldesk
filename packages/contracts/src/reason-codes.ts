@@ -77,6 +77,18 @@ export const REASON_CODES = [
   'DISPATCH_OUTCOME_UNKNOWN',
   'DISPATCH_SENDER_UNFENCED',
 
+  // --- source reads -----------------------------------------------------------------
+  // Added for the module 05 read boundary (ADR-0014). A read that fails must say which of
+  // these it was, because the three have different correct responses: back off and retry,
+  // treat the source as degraded, or quarantine an unrecognised fact. An empty list is never
+  // one of them.
+  /** HTTP 429 or 418. Carries the venue's Retry-After when it sent one. */
+  'SOURCE_RATE_LIMITED',
+  /** Transport failure, timeout, or a 5xx: the fact is unknown, not absent. */
+  'SOURCE_UNAVAILABLE',
+  /** The response did not decode against the narrow schema, or carried an unknown shape. */
+  'SOURCE_SCHEMA_UNRECOGNIZED',
+
   // --- authority and transport ------------------------------------------------------
   'AUTHZ_SCOPE_DENIED',
   'AUTHZ_CREDENTIAL_CLASS_DENIED',

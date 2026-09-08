@@ -1,0 +1,26 @@
+{
+  "name": "@capitaldesk/binance",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Binance Spot readers. Layer 1: depends only on contracts, holds no credential value, and can reach no write endpoint.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty"
+  },
+  "dependencies": {
+    "@capitaldesk/contracts": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}
