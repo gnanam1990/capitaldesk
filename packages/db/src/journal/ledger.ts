@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { currentEpochOf } from './dispatch.js';
 import { serializable, serializableOn, type Queryable } from './transaction.js';
 
 /**
@@ -79,7 +80,12 @@ export type ReserveOutcome =
     }
   | { readonly ok: false; readonly reason: 'NONPOSITIVE_AMOUNT' }
   | { readonly ok: false; readonly reason: 'SOURCE_ALREADY_POSTED'; readonly ledgerTxnId: string }
-  | { readonly ok: false; readonly reason: 'UNKNOWN_POOL' };
+  | { readonly ok: false; readonly reason: 'UNKNOWN_POOL' }
+  | {
+      readonly ok: false;
+      readonly reason: 'EPOCH_NOT_CURRENT';
+      readonly currentEpoch: number | null;
+    };
 
 export type ReleaseOutcome =
   | { readonly ok: true; readonly revision: number }
@@ -467,6 +473,13 @@ async function reserveBody(client: Queryable, input: ReserveInput): Promise<Rese
     [input.workspaceId, input.poolId],
   );
   if (pool.rowCount !== 1) return { ok: false, reason: 'UNKNOWN_POOL' };
+
+  // Under the same lock rotation takes: a reservation against a closed epoch would commit
+  // capital to a baseline that no longer governs.
+  const currentEpoch = await currentEpochOf(client, input);
+  if (currentEpoch !== input.epoch) {
+    return { ok: false, reason: 'EPOCH_NOT_CURRENT', currentEpoch };
+  }
 
   const available = await client.query<{ available: string }>(
     `SELECT coalesce(sum(delta_atoms), 0)::text AS available FROM ledger_entries

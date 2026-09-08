@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { Pool } from 'pg';
+import { PLAN_IN_FLIGHT_STATES } from './dispatch.js';
 import { serializable, serializableOn, type Queryable } from './transaction.js';
 
 /**
@@ -62,7 +63,13 @@ export type ReleaseGovernanceOutcome =
 export type RotateEpochOutcome =
   | { readonly ok: true; readonly epoch: number }
   | { readonly ok: false; readonly reason: 'UNKNOWN_POOL' }
-  | { readonly ok: false; readonly reason: 'UNRESOLVED_ATTEMPTS'; readonly outstanding: number };
+  | { readonly ok: false; readonly reason: 'UNRESOLVED_ATTEMPTS'; readonly outstanding: number }
+  /**
+   * A plan that is sealed but has not reached a terminal outcome. Counting only unresolved
+   * attempts missed an APPROVED plan that had never prepared one: rotation closed its epoch
+   * and the plan remained dispatchable against a baseline that no longer existed.
+   */
+  | { readonly ok: false; readonly reason: 'PLAN_IN_FLIGHT'; readonly planIds: readonly string[] };
 
 function newId(prefix: string): string {
   return `${prefix}-${randomBytes(9).toString('base64url')}`;
@@ -105,6 +112,11 @@ export class GovernanceRepository {
     reason: string;
   }): Promise<ReleaseGovernanceOutcome> {
     return serializable(this.pool, async (client): Promise<ReleaseGovernanceOutcome> => {
+      // The pool row first, in the order every economic writer takes it.
+      await client.query(
+        'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
+        [input.workspaceId, input.poolId],
+      );
       const lease = await client.query<{
         lease_id: string;
         venue: string;
@@ -124,6 +136,15 @@ export class GovernanceRepository {
       await client.query(
         `UPDATE governance_leases SET released_at = now(), released_reason = $2 WHERE lease_id = $1`,
         [row.lease_id, input.reason],
+      );
+      // A pool without a lease governs nothing. Leaving it READY let an approved plan keep
+      // dispatching and its claims keep moving after the lease was retired, so the pool is
+      // halted in the same transaction - and every dispatch path independently requires an
+      // active lease, so neither guard stands alone.
+      await client.query(
+        `UPDATE pools SET state = 'HALTED', version = version + 1, updated_at = now()
+          WHERE workspace_id = $1 AND pool_id = $2`,
+        [input.workspaceId, input.poolId],
       );
       return { ok: true };
     });
@@ -156,6 +177,24 @@ export class GovernanceRepository {
       );
       const outstanding = Number(unresolved.rows[0]?.count ?? '0');
       if (outstanding > 0) return { ok: false, reason: 'UNRESOLVED_ATTEMPTS', outstanding };
+
+      // A sealed plan that has not reached a terminal outcome still carries authority, whether
+      // or not it ever prepared an attempt. The pool row is locked above, and every path that
+      // seals, reserves, prepares or marks takes the same lock and re-reads the open epoch, so
+      // rotation and preparation cannot interleave.
+      const inFlight = await client.query<{ plan_id: string }>(
+        `SELECT plan_id FROM plans
+          WHERE workspace_id = $1 AND pool_id = $2 AND state = ANY($3::text[])
+          ORDER BY plan_id`,
+        [input.workspaceId, input.poolId, PLAN_IN_FLIGHT_STATES],
+      );
+      if (inFlight.rowCount !== null && inFlight.rowCount > 0) {
+        return {
+          ok: false,
+          reason: 'PLAN_IN_FLIGHT',
+          planIds: inFlight.rows.map((r) => r.plan_id),
+        };
+      }
 
       const current = await client.query<{ epoch: number }>(
         `UPDATE baseline_epochs SET closed_at = now(), closed_reason = $3

@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { LedgerRepository } from './ledger.js';
-import { serializable, serializableOn, type Queryable } from './transaction.js';
+import { lockPools, serializable, serializableOn, type Queryable } from './transaction.js';
 
 /**
  * The posture a restored deployment starts in (T-035; ADR-0005 section 4).
@@ -32,7 +32,23 @@ export interface RestorePosture {
   readonly liabilitiesRetained: number;
 }
 
-const UNMARKED_IN_FLIGHT = ['SEALED_AWAITING_APPROVAL', 'APPROVED', 'DISPATCH_PENDING'];
+/**
+ * Every nonterminal plan state.
+ *
+ * Restricting this to the pre-marker three left an EXECUTING, RECONCILING or MANUAL_REVIEW
+ * plan that had never actually reached a marker holding its reservations through a restore.
+ * The marker, not the state name, is what says a plan has live venue authority - so the scan
+ * below excludes plans that have one and covers everything else.
+ */
+const NONTERMINAL_PLAN_STATES = [
+  'PREVIEW',
+  'SEALED_AWAITING_APPROVAL',
+  'APPROVED',
+  'DISPATCH_PENDING',
+  'EXECUTING',
+  'RECONCILING',
+  'MANUAL_REVIEW',
+];
 const MARKED_STATES = [
   'DISPATCH_MARKED',
   'SEND_ATTEMPTED',
@@ -69,7 +85,17 @@ export function enterRestorePostureOn(
 async function restoreBody(client: Queryable, input: RestoreInput): Promise<RestorePosture> {
   // Lock every pool in the canonical order first: a marker in flight either completes before
   // this sees it, or waits and then finds a halted pool and an invalidated plan.
-  await client.query('SELECT 1 FROM pools ORDER BY workspace_id, pool_id FOR UPDATE');
+  //
+  // Through `lockPools`, which is the point of having a canonical order: this is the only
+  // multi-pool writer, and it previously locked with its own raw statement while the proven
+  // helper had no caller at all.
+  const pools = await client.query<{ workspace_id: string; pool_id: string }>(
+    'SELECT workspace_id, pool_id FROM pools',
+  );
+  await lockPools(
+    client,
+    pools.rows.map((row) => ({ workspaceId: row.workspace_id, poolId: row.pool_id })),
+  );
 
   const halted = await client.query(
     `UPDATE pools SET state = 'HALTED', version = version + 1, updated_at = $1 WHERE state <> 'HALTED'`,
@@ -92,7 +118,7 @@ async function restoreBody(client: Queryable, input: RestoreInput): Promise<Rest
              AND a.state = ANY($2::text[]))
       ORDER BY p.workspace_id, p.pool_id, p.plan_id
       FOR UPDATE`,
-    [UNMARKED_IN_FLIGHT, MARKED_STATES],
+    [NONTERMINAL_PLAN_STATES, MARKED_STATES],
   );
 
   let reservationsReleased = 0;

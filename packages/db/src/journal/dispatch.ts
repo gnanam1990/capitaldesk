@@ -28,7 +28,32 @@ const IN_FLIGHT_STATES: readonly PlanState[] = [
 
 export type SealPlanOutcome =
   | { readonly ok: true }
-  | { readonly ok: false; readonly reason: 'PLAN_IN_FLIGHT'; readonly inFlightPlanId: string };
+  | { readonly ok: false; readonly reason: 'PLAN_IN_FLIGHT'; readonly inFlightPlanId: string }
+  /** The epoch named is not the pool's current open one, so its baseline no longer governs. */
+  | {
+      readonly ok: false;
+      readonly reason: 'EPOCH_NOT_CURRENT';
+      readonly currentEpoch: number | null;
+    };
+
+/**
+ * The pool's open epoch, read under the caller's lock.
+ *
+ * Every path that creates economic authority - sealing, reserving, preparing, marking - takes
+ * the pool row lock and then calls this. Rotation takes the same lock, so an epoch cannot
+ * close between the check and the write.
+ */
+export async function currentEpochOf(
+  client: Queryable,
+  scope: { readonly workspaceId: string; readonly poolId: string },
+): Promise<number | null> {
+  const result = await client.query<{ epoch: number }>(
+    `SELECT epoch FROM baseline_epochs
+      WHERE workspace_id = $1 AND pool_id = $2 AND closed_at IS NULL`,
+    [scope.workspaceId, scope.poolId],
+  );
+  return result.rows[0]?.epoch ?? null;
+}
 
 export type TransitionPlanOutcome =
   | { readonly ok: true; readonly version: number }
@@ -39,7 +64,12 @@ export type TransitionPlanOutcome =
 export type PrepareOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: 'CLIENT_ORDER_ID_REUSED' }
-  | { readonly ok: false; readonly reason: 'DISPATCH_TOKEN_REUSED' };
+  | { readonly ok: false; readonly reason: 'DISPATCH_TOKEN_REUSED' }
+  | {
+      readonly ok: false;
+      readonly reason: 'EPOCH_NOT_CURRENT';
+      readonly currentEpoch: number | null;
+    };
 
 export type MarkOutcome =
   | { readonly ok: true }
@@ -47,7 +77,13 @@ export type MarkOutcome =
   | { readonly ok: false; readonly reason: 'ATTEMPT_VOIDED'; readonly voidedReason: string }
   | { readonly ok: false; readonly reason: 'POOL_NOT_DISPATCHABLE'; readonly state: string }
   | { readonly ok: false; readonly reason: 'PLAN_NOT_DISPATCHABLE'; readonly state: PlanState }
-  | { readonly ok: false; readonly reason: 'NO_ACTIVE_LEASE' };
+  | { readonly ok: false; readonly reason: 'NO_ACTIVE_LEASE' }
+  | { readonly ok: false; readonly reason: 'SIGNED_REQUEST_MISSING' }
+  | {
+      readonly ok: false;
+      readonly reason: 'EPOCH_NOT_CURRENT';
+      readonly currentEpoch: number | null;
+    };
 
 export interface MarkInput {
   readonly workspaceId: string;
@@ -55,7 +91,16 @@ export interface MarkInput {
   readonly attemptId: string;
   readonly outboxId: string;
   readonly signedRequest: unknown;
-  readonly host: { readonly bootId: string; readonly pid: number };
+  readonly host: {
+    readonly bootId: string;
+    readonly pid: number;
+    /**
+     * When the marking process started. PIDs are reused without a reboot, so boot id and pid
+     * together do not identify a process; the start time is what distinguishes a live holder
+     * from a new process that inherited its pid (ADR-0001 condition 2).
+     */
+    readonly processStartedAt: Date;
+  };
 }
 
 /** The only pool states from which a dispatch may be marked. */
@@ -64,8 +109,32 @@ const DISPATCHABLE_POOL_STATES: readonly string[] = ['READY', 'AWAITING_APPROVAL
 export type SendAttemptedOutcome =
   { readonly ok: true } | { readonly ok: false; readonly reason: 'NOT_MARKED' };
 
+/**
+ * Evidence that a marked attempt could not have sent (ADR-0001 condition 2).
+ *
+ * `NOT_SENT_PROVEN` releases reservations, so it is the one dispatch outcome that turns
+ * uncertainty into a release. It requires all of it: the sender fenced, an account-wide scan
+ * and trade backfill covering the whole uncertainty window with no record of the client order
+ * id, and coverage COMPLETE over that window.
+ */
+export interface NotSentEvidence {
+  readonly senderFenced: boolean;
+  readonly openOrderScanClear: boolean;
+  readonly tradeBackfillClear: boolean;
+  readonly coverageComplete: boolean;
+}
+
 export type ResolveOutcome =
   | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: 'SEND_ATTEMPTED_CANNOT_BE_UNSENT';
+    }
+  | {
+      readonly ok: false;
+      readonly reason: 'NOT_SENT_EVIDENCE_INCOMPLETE';
+      readonly missing: readonly string[];
+    }
   | { readonly ok: false; readonly reason: 'UNKNOWN_ATTEMPT' }
   | {
       readonly ok: false;
@@ -103,6 +172,10 @@ export class DispatchRepository {
         'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
         [input.workspaceId, input.poolId],
       );
+      const currentEpoch = await currentEpochOf(client, input);
+      if (currentEpoch !== input.epoch) {
+        return { ok: false, reason: 'EPOCH_NOT_CURRENT', currentEpoch };
+      }
       if (IN_FLIGHT_STATES.includes(input.state)) {
         const inFlight = await client.query<{ plan_id: string }>(
           `SELECT plan_id FROM plans WHERE workspace_id = $1 AND pool_id = $2 AND state = ANY($3::text[])`,
@@ -173,6 +246,15 @@ export class DispatchRepository {
     readonly dispatchToken: string;
   }): Promise<PrepareOutcome> {
     return serializable(this.pool, async (client): Promise<PrepareOutcome> => {
+      // Same lock and the same epoch check as sealing, so rotation cannot slip between them.
+      await client.query(
+        'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
+        [input.workspaceId, input.poolId],
+      );
+      const currentEpoch = await currentEpochOf(client, input);
+      if (currentEpoch !== input.epoch) {
+        return { ok: false, reason: 'EPOCH_NOT_CURRENT', currentEpoch };
+      }
       const reused = await client.query<{ client_order_id: string; dispatch_token: string }>(
         'SELECT client_order_id, dispatch_token FROM dispatch_attempts WHERE client_order_id = $1 OR dispatch_token = $2',
         [input.clientOrderId, input.dispatchToken],
@@ -249,16 +331,45 @@ export class DispatchRepository {
     readonly poolId: string;
     readonly attemptId: string;
     readonly to: DispatchAttemptState;
+    /** Required, and only permitted, when resolving to NOT_SENT_PROVEN. */
+    readonly notSentEvidence?: NotSentEvidence;
   }): Promise<ResolveOutcome> {
     return serializable(this.pool, async (client): Promise<ResolveOutcome> => {
-      const attempt = await client.query<{ state: DispatchAttemptState }>(
-        'SELECT state FROM dispatch_attempts WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 FOR UPDATE',
+      const attempt = await client.query<{
+        state: DispatchAttemptState;
+        send_attempted_at: Date | null;
+      }>(
+        'SELECT state, send_attempted_at FROM dispatch_attempts WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 FOR UPDATE',
         [input.workspaceId, input.poolId, input.attemptId],
       );
       const row = attempt.rows[0];
       if (row === undefined) return { ok: false, reason: 'UNKNOWN_ATTEMPT' };
       if (!DISPATCH_ATTEMPT_TRANSITIONS[row.state].includes(input.to))
         return { ok: false, reason: 'TRANSITION_REFUSED', from: row.state };
+
+      if (input.to === 'NOT_SENT_PROVEN') {
+        // An attempt that recorded SEND_ATTEMPTED wrote that row immediately before the first
+        // network byte. Nothing observed afterwards can prove it was not sent, and the
+        // contract's table allowed SEND_ATTEMPTED -> UNKNOWN -> NOT_SENT_PROVEN, which would
+        // have released a known-send liability.
+        if (row.send_attempted_at !== null) {
+          return { ok: false, reason: 'SEND_ATTEMPTED_CANNOT_BE_UNSENT' };
+        }
+        const evidence = input.notSentEvidence;
+        const missing = (
+          [
+            ['senderFenced', evidence?.senderFenced],
+            ['openOrderScanClear', evidence?.openOrderScanClear],
+            ['tradeBackfillClear', evidence?.tradeBackfillClear],
+            ['coverageComplete', evidence?.coverageComplete],
+          ] as const
+        )
+          .filter(([, held]) => held !== true)
+          .map(([name]) => name);
+        if (missing.length > 0) {
+          return { ok: false, reason: 'NOT_SENT_EVIDENCE_INCOMPLETE', missing };
+        }
+      }
       await client.query(
         `UPDATE dispatch_attempts
             SET state = $4, resolved_at = CASE WHEN $5::boolean THEN now() ELSE resolved_at END
@@ -310,6 +421,18 @@ async function markBody(
   input: MarkInput,
   hooks: MarkHooks,
 ): Promise<MarkOutcome> {
+  // The marker's whole purpose is to commit what will be sent before sending it. A null or
+  // non-object signed request is nothing to commit, and the marked-state CHECK refuses it at
+  // the table too.
+  if (
+    input.signedRequest === null ||
+    input.signedRequest === undefined ||
+    typeof input.signedRequest !== 'object' ||
+    Array.isArray(input.signedRequest)
+  ) {
+    return { ok: false, reason: 'SIGNED_REQUEST_MISSING' };
+  }
+
   // The pool row first, and in the same order every other economic writer takes it.
   const pool = await client.query<{
     state: string;
@@ -371,7 +494,7 @@ async function markBody(
   const marked = await client.query<{ client_order_id: string; dispatch_token: string }>(
     `UPDATE dispatch_attempts
         SET state = 'DISPATCH_MARKED', marked_at = now(), signed_request = $4::jsonb,
-            marker_host_boot_id = $5, marker_pid = $6
+            marker_host_boot_id = $5, marker_pid = $6, marker_process_started_at = $7
       WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 AND state = 'PREPARED'
       RETURNING client_order_id, dispatch_token`,
     [
@@ -381,6 +504,7 @@ async function markBody(
       JSON.stringify(input.signedRequest),
       input.host.bootId,
       input.host.pid,
+      input.host.processStartedAt,
     ],
   );
   const row = marked.rows[0];
