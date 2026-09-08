@@ -4,14 +4,16 @@ The single authoritative record of what is built, what is proven and what is blo
 Updated with every milestone. Where a claim is not backed by a command in this document, it
 is not a claim.
 
-- **Milestone:** M6 — deterministic planning and atomic reservation (modules 09–10).
-- **Branch:** `feat/m6-planning-reservations`, stacked on module 08 pending its required merge.
-- **Pull request:** pending after module 08 merges.
+- **Milestone:** M7 — governed execution, reconciliation and owner console (modules 11–24).
+- **Branch:** `feat/m7-approval-dispatch`, based on merged module 10.
+- **Pull request:** [#8](https://github.com/gnanam1990/capitaldesk/pull/8).
 - **Previous milestones:** M0 merged as
   [#1](https://github.com/gnanam1990/capitaldesk/pull/1); M1 merged as
   [#2](https://github.com/gnanam1990/capitaldesk/pull/2) at `f2f4d59`; M2 merged as
   [#3](https://github.com/gnanam1990/capitaldesk/pull/3) at `21935cc`, from reviewed head
   `013f733` whose final totals were 717 unit, 13 property and 334 integration.
+- **Modules 08–10:** merged through
+  [#7](https://github.com/gnanam1990/capitaldesk/pull/7) at `cb93a2d`.
 - **Module 03:** complete — see [docs/handoffs/03.md](handoffs/03.md).
 - **Module 04:** complete — see [docs/handoffs/04.md](handoffs/04.md).
 - **Module 05:** PARTIAL — deterministic and real-PostgreSQL paths complete; the authenticated
@@ -27,6 +29,19 @@ is not a claim.
   [docs/handoffs/08.md](handoffs/08.md).
 - **Module 09:** complete for the v1 pure preview path — see [docs/handoffs/09.md](handoffs/09.md).
 - **Module 10:** complete for the v1 sealing transaction — see [docs/handoffs/10.md](handoffs/10.md).
+- **Module 11:** PARTIAL — local owner approvals and immutable evidence complete; native
+  approved-host evidence is unavailable. See [docs/handoffs/11.md](handoffs/11.md).
+- **Module 12:** PARTIAL — isolated local/testnet signer boundary complete; production topology
+  proof is unavailable. See [docs/handoffs/12.md](handoffs/12.md).
+- **Module 13:** complete for the local journal/simulator boundary — see
+  [docs/handoffs/13.md](handoffs/13.md).
+- **Modules 14–16:** PARTIAL — exact allocation, finality, UNKNOWN handling and drift recovery
+  are implemented; authenticated venue evidence is unavailable. See
+  [docs/handoffs/14.md](handoffs/14.md), [15.md](handoffs/15.md), and
+  [16.md](handoffs/16.md).
+- **Modules 21–24:** PARTIAL — responsive owner operations views and state contracts are
+  implemented; live SDK/SSE mutations are pending modules 17–20. See
+  [docs/handoffs/21.md](handoffs/21.md) through [24.md](handoffs/24.md).
 
 ## What this milestone is, and is not
 
@@ -44,9 +59,11 @@ M2 added the read boundary it consumes: narrow, origin-bound, credential-class-r
 readers, durable per-symbol trade cursors, and the worker catch-up that assembles a bracketed
 observation cut and asks the shared coverage predicate for a verdict.
 
-There is still **no planner, no approvals and no dispatch**, and no write adapter of any kind.
-The read boundary cannot express a write — it has one verb, and it takes an endpoint name
-rather than a URL. Module 06 moves internal claims only; nothing it does reaches a venue.
+The repository now contains the deterministic planner, atomic seal, immutable owner approval,
+approval-bound isolated signer, one-shot durable dispatcher, exact fill allocator,
+reconciliation/recovery services and responsive owner console. Production writes remain
+disabled. The read boundary still cannot express a write, and the executor cannot produce an
+order without exact sealed-plan authority and a current approval.
 
 **Five public, non-economic reads** of `testnet.binance.vision` were performed and are recorded
 in [docs/evidence/binance-read-capability.md](evidence/binance-read-capability.md). No
@@ -73,14 +90,17 @@ BLOCKED and is named as such rather than claimed.
 | Capital mandates (module 08)             | Implemented                      | 11 unit cases; 5 policy PostgreSQL cases plus intent regression suite          |
 | Deterministic planner (module 09)        | Implemented                      | `packages/planner`; 8 focused unit cases                                       |
 | Atomic plan sealing (module 10)          | Implemented                      | migration 0008; 3 focused real-PostgreSQL cases                                |
+| Owner approval journal (module 11)       | Implemented; host proof blocked  | migration 0009; 10 focused PostgreSQL cases                                    |
+| Durable dispatch (modules 12–13)         | Implemented for local/testnet    | `apps/executor`; 15 focused cases plus journal integration                      |
+| Fills and reconciliation (modules 14–16) | Implemented; venue proof blocked | `packages/reconciler`, `packages/ledger`; unit and PostgreSQL evidence          |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
-| Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
-| Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
+| Worker and executor processes            | Boundaries implemented           | `apps/worker`, `apps/executor`                                                 |
+| Owner operations console                 | Implemented, browser-verified    | `apps/web`, 11 routes and 73 focused cases                                     |
 | Identity, sessions, agent credentials    | Implemented (module 03)          | `packages/domain`, `apps/api/src/auth`, 60 unit + 88 integration cases         |
 | Same-origin console routing              | Implemented, proxy verified      | `apps/web/src/app/api-routing.ts`, 6 unit cases                                |
 | Transactional journal (module 04)        | Implemented (module 04)          | `packages/db/src/journal`, 46 integration cases on real PostgreSQL             |
 | CI                                       | Fresh checkout + real PostgreSQL | `.github/workflows/ci.yml`                                                     |
-| Economic core (M1-M3)                    | In progress; module 06 complete  | Opening inventory, epoch claims and owner allocations                          |
+| Economic core                            | Implemented through recovery     | Baseline, claims, intents, plans, approvals, dispatch, fills and reconciliation |
 | Venue integration                        | **Blocked**, see below           | —                                                                              |
 
 ## Commands and results at this branch
@@ -122,6 +142,16 @@ Modules 09–10 targeted results:
 | planner unit file        | 8 passed                           |
 | sealing integration file | 3 passed on local PostgreSQL 17.10 |
 
+Modules 11–24 accelerated results:
+
+| Command / area                         | Result                                                  |
+| -------------------------------------- | ------------------------------------------------------- |
+| repository typecheck                   | pass                                                    |
+| executor + allocation + reconciliation | 26 focused tests passed                                 |
+| owner approval                         | 10 focused PostgreSQL tests passed                      |
+| reconciliation                         | 4 new + 5 existing focused PostgreSQL tests passed      |
+| owner console                          | 73 focused tests and Next production build passed       |
+
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
 | Suite       | Count | Where                                                                                                   |
@@ -143,18 +173,17 @@ React 19.2.8, Vitest 4.1.11, zod 4.5.4, PostgreSQL 17.10 (Homebrew, local).
 | Blocker                                                              | Effect                                                                                                                                               | What would clear it                                                                          |
 | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | No authenticated Binance testnet credential is configured            | No integration proof of any kind. Account identity, symbol filters, commission rates, IOC behaviour and order correlation are all unverified.        | The user configures an authorized Spot Testnet credential for the executor and reader roles. |
-| No pre-trade fee bound derived                                       | Every shipped fee policy refuses dispatch (ADR-0010).                                                                                                | Module 14 derives a bound with an evidenced minimum fill size and partition granularity.     |
+| No venue-evidenced pre-trade fee bound                               | The local exact allocator exists, but production dispatch cannot use an unverified commission bound.                                                 | Authenticated venue evidence establishes the exact fee inputs and bound.                     |
 | No producer of a movement-universe proof or gap recovery certificate | Coverage cannot reach COMPLETE against a real account, so governed dispatch is unavailable (ADR-0002).                                               | Module 05, against a real account, with concrete cursor and retention evidence.              |
 | Competition eligibility                                              | Unverified. Not pursued by this build.                                                                                                               | Separate, explicitly authorized decision.                                                    |
 | No authenticated read has ever been performed                        | Account balances, order lookup, the open-order scan and trade history are proven only against fixtures. Reader/trader identity equality is unproven. | The user configures a `VENUE_READ` credential for the authorized account.                    |
-| `NOT_SENT_PROVEN` is unreachable                                     | A marked attempt that never sent cannot be resolved, so its reservation stays held. Conservative, and the only honest state for module 04.           | Module 15 records authoritative non-send evidence and adds the forward migration binding it. |
+| No live non-send evidence                                            | The fenced `NOT_SENT_PROVEN` path exists, but no production observation has satisfied it.                                                            | A real fenced sender plus complete open-order/trade coverage supplies the evidence.          |
 
 None of these blocks the independent implementation work in M1-M3. They block **claims of
 proof**, which is why the code reports execution as unavailable rather than assuming it.
 
 ## Next action
 
-Merge module 08 after its required CI, then open the modules 09–10 pull request. Module 11 can
-add owner approval lifecycle on the immutable sealed payload. A live bootstrap still cannot
-run because obtaining a COMPLETE observation cut needs the `VENUE_READ` credential that does
-not exist.
+Complete modules 17–29 on pull request #8, run its required CI, and merge the exact green
+head. A funded/live bootstrap still cannot run because the required `VENUE_READ` and
+`VENUE_TRADE` credentials and COMPLETE authenticated venue evidence do not exist.

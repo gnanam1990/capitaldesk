@@ -502,7 +502,7 @@ async function markBody(
     client_order_id: string;
     voided_reason: string | null;
   }>(
-    `SELECT state, plan_id, epoch, voided_reason FROM dispatch_attempts
+    `SELECT state, plan_id, epoch, client_order_id, voided_reason FROM dispatch_attempts
       WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 FOR UPDATE`,
     [input.workspaceId, input.poolId, input.attemptId],
   );
