@@ -42,6 +42,17 @@ is not a claim.
 - **Modules 21–24:** PARTIAL — responsive owner operations views and state contracts are
   implemented; live SDK/SSE mutations are pending modules 17–20. See
   [docs/handoffs/21.md](handoffs/21.md) through [24.md](handoffs/24.md).
+- **Modules 17–20:** PARTIAL — operational API/OpenAPI, durable jobs/events, SDK/CLI and
+  proposal-only agent tools are implemented; continuous external delivery and authenticated
+  host invocation remain unavailable. See [docs/handoffs/17.md](handoffs/17.md) through
+  [20.md](handoffs/20.md).
+- **Modules 25–27:** PARTIAL — deterministic fault lab, security/observability controls and
+  deployment/restore contracts are implemented; infrastructure and real-venue drills remain
+  unavailable. See [docs/handoffs/25.md](handoffs/25.md) through [27.md](handoffs/27.md).
+- **Module 28:** release proof tooling and operator package implemented; real testnet evidence
+  blocked. See [docs/handoffs/28.md](handoffs/28.md).
+- **Module 29:** BLOCKED by the finite real-boundary evidence list; the acceptance gate fails
+  closed. See [docs/handoffs/29.md](handoffs/29.md).
 
 ## What this milestone is, and is not
 
@@ -74,34 +85,37 @@ BLOCKED and is named as such rather than claimed.
 
 ## Status by area
 
-| Area                                     | Status                           | Evidence                                                                       |
-| ---------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------ |
-| Reviewed findings F1-F10                 | Resolved in ADRs, specs amended  | `docs/adr/`, `specs/capitaldesk/AMENDMENTS.md`                                 |
-| Money, identity, state, digest contracts | Implemented                      | `packages/contracts`, 230 unit + 13 property tests                             |
-| Environment contracts, fail-closed       | Implemented                      | `packages/config`, 28 cases                                                    |
-| Redacted logging                         | Implemented                      | `packages/observability`, 8 cases                                              |
-| Migration lifecycle                      | Implemented                      | `packages/db`, 22 integration cases on real PostgreSQL                         |
-| Dependency and credential boundaries     | Enforced by command              | `tools/`, 8 cases, verified to fail on real violations                         |
-| Binance read boundary (module 05)        | Implemented; venue auth BLOCKED  | `packages/binance`, 204 unit cases; `docs/evidence/binance-read-capability.md` |
-| Read cursors, snapshots and cuts         | Implemented                      | `packages/db` migration 0004, 42 integration cases on real PostgreSQL          |
-| Worker ingest catch-up                   | Implemented                      | `apps/worker`, 31 integration cases on real PostgreSQL                         |
-| Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 61 unit + 6 property; migration 0005, 65 integration cases   |
-| Strategy targets (module 07)             | Implemented                      | 10 unit, 12 real-PostgreSQL route/repository cases; migration 0006             |
-| Capital mandates (module 08)             | Implemented                      | 11 unit cases; 5 policy PostgreSQL cases plus intent regression suite          |
-| Deterministic planner (module 09)        | Implemented                      | `packages/planner`; 8 focused unit cases                                       |
-| Atomic plan sealing (module 10)          | Implemented                      | migration 0008; 3 focused real-PostgreSQL cases                                |
-| Owner approval journal (module 11)       | Implemented; host proof blocked  | migration 0009; 10 focused PostgreSQL cases                                    |
+| Area                                     | Status                           | Evidence                                                                        |
+| ---------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------- |
+| Reviewed findings F1-F10                 | Resolved in ADRs, specs amended  | `docs/adr/`, `specs/capitaldesk/AMENDMENTS.md`                                  |
+| Money, identity, state, digest contracts | Implemented                      | `packages/contracts`, 230 unit + 13 property tests                              |
+| Environment contracts, fail-closed       | Implemented                      | `packages/config`, 28 cases                                                     |
+| Redacted logging                         | Implemented                      | `packages/observability`, 8 cases                                               |
+| Migration lifecycle                      | Implemented                      | `packages/db`, 22 integration cases on real PostgreSQL                          |
+| Dependency and credential boundaries     | Enforced by command              | `tools/`, 8 cases, verified to fail on real violations                          |
+| Binance read boundary (module 05)        | Implemented; venue auth BLOCKED  | `packages/binance`, 204 unit cases; `docs/evidence/binance-read-capability.md`  |
+| Read cursors, snapshots and cuts         | Implemented                      | `packages/db` migration 0004, 42 integration cases on real PostgreSQL           |
+| Worker ingest catch-up                   | Implemented                      | `apps/worker`, 31 integration cases on real PostgreSQL                          |
+| Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 61 unit + 6 property; migration 0005, 65 integration cases    |
+| Strategy targets (module 07)             | Implemented                      | 10 unit, 12 real-PostgreSQL route/repository cases; migration 0006              |
+| Capital mandates (module 08)             | Implemented                      | 11 unit cases; 5 policy PostgreSQL cases plus intent regression suite           |
+| Deterministic planner (module 09)        | Implemented                      | `packages/planner`; 8 focused unit cases                                        |
+| Atomic plan sealing (module 10)          | Implemented                      | migration 0008; 3 focused real-PostgreSQL cases                                 |
+| Owner approval journal (module 11)       | Implemented; host proof blocked  | migration 0009; 10 focused PostgreSQL cases                                     |
 | Durable dispatch (modules 12–13)         | Implemented for local/testnet    | `apps/executor`; 15 focused cases plus journal integration                      |
 | Fills and reconciliation (modules 14–16) | Implemented; venue proof blocked | `packages/reconciler`, `packages/ledger`; unit and PostgreSQL evidence          |
-| Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
-| Worker and executor processes            | Boundaries implemented           | `apps/worker`, `apps/executor`                                                 |
-| Owner operations console                 | Implemented, browser-verified    | `apps/web`, 11 routes and 73 focused cases                                     |
-| Identity, sessions, agent credentials    | Implemented (module 03)          | `packages/domain`, `apps/api/src/auth`, 60 unit + 88 integration cases         |
-| Same-origin console routing              | Implemented, proxy verified      | `apps/web/src/app/api-routing.ts`, 6 unit cases                                |
-| Transactional journal (module 04)        | Implemented (module 04)          | `packages/db/src/journal`, 46 integration cases on real PostgreSQL             |
-| CI                                       | Fresh checkout + real PostgreSQL | `.github/workflows/ci.yml`                                                     |
+| Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                        |
+| Worker and executor processes            | Boundaries implemented           | `apps/worker`, `apps/executor`                                                  |
+| Owner operations console                 | Implemented, browser-verified    | `apps/web`, 11 routes and 73 focused cases                                      |
+| API, SDK, CLI and agent tools (17–20)    | Implemented; delivery partial    | 20 focused unit + 6 PostgreSQL cases on the module branch                       |
+| Fault/security/deployment (25–27)        | Implemented; infra proof partial | 61 focused and 851 full unit cases on the module branch                         |
+| Release evidence (28–29)                 | Tooling complete; gate blocked   | exact-head proof manifest tests; honest failing release gate                    |
+| Identity, sessions, agent credentials    | Implemented (module 03)          | `packages/domain`, `apps/api/src/auth`, 60 unit + 88 integration cases          |
+| Same-origin console routing              | Implemented, proxy verified      | `apps/web/src/app/api-routing.ts`, 6 unit cases                                 |
+| Transactional journal (module 04)        | Implemented (module 04)          | `packages/db/src/journal`, 46 integration cases on real PostgreSQL              |
+| CI                                       | Fresh checkout + real PostgreSQL | `.github/workflows/ci.yml`                                                      |
 | Economic core                            | Implemented through recovery     | Baseline, claims, intents, plans, approvals, dispatch, fills and reconciliation |
-| Venue integration                        | **Blocked**, see below           | —                                                                              |
+| Venue integration                        | **Blocked**, see below           | —                                                                               |
 
 ## Commands and results at this branch
 
@@ -144,13 +158,21 @@ Modules 09–10 targeted results:
 
 Modules 11–24 accelerated results:
 
-| Command / area                         | Result                                                  |
-| -------------------------------------- | ------------------------------------------------------- |
-| repository typecheck                   | pass                                                    |
-| executor + allocation + reconciliation | 26 focused tests passed                                 |
-| owner approval                         | 10 focused PostgreSQL tests passed                      |
-| reconciliation                         | 4 new + 5 existing focused PostgreSQL tests passed      |
-| owner console                          | 73 focused tests and Next production build passed       |
+| Command / area                         | Result                                             |
+| -------------------------------------- | -------------------------------------------------- |
+| repository typecheck                   | pass                                               |
+| executor + allocation + reconciliation | 26 focused tests passed                            |
+| owner approval                         | 10 focused PostgreSQL tests passed                 |
+| reconciliation                         | 4 new + 5 existing focused PostgreSQL tests passed |
+| owner console                          | 73 focused tests and Next production build passed  |
+
+Integrated modules 17–29 accelerated results:
+
+| Command / area                   | Result                                              |
+| -------------------------------- | --------------------------------------------------- |
+| repository typecheck             | pass                                                |
+| new platform/fault/release tests | 51 focused tests passed on the integrated branch    |
+| dispatch + non-send PostgreSQL   | 18 focused integration tests passed after CI repair |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
@@ -184,6 +206,6 @@ proof**, which is why the code reports execution as unavailable rather than assu
 
 ## Next action
 
-Complete modules 17–29 on pull request #8, run its required CI, and merge the exact green
-head. A funded/live bootstrap still cannot run because the required `VENUE_READ` and
+Run pull request #8's required CI and merge the exact green head. A funded/live bootstrap
+still cannot run because the required `VENUE_READ` and
 `VENUE_TRADE` credentials and COMPLETE authenticated venue evidence do not exist.
