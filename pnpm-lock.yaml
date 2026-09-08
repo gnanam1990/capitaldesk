@@ -293,6 +293,9 @@ importers:
       '@capitaldesk/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@capitaldesk/ledger':
+        specifier: workspace:*
+        version: link:../ledger
       pg:
         specifier: 'catalog:'
         version: 8.23.0

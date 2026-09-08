@@ -18,7 +18,8 @@
   },
   "dependencies": {
     "@capitaldesk/contracts": "workspace:*",
-    "pg": "catalog:"
+    "pg": "catalog:",
+    "@capitaldesk/ledger": "workspace:*"
   },
   "devDependencies": {
     "@types/pg": "catalog:",
