@@ -60,6 +60,27 @@ Every transaction names its source operation, unique within the pool and epoch. 
 makes reapplying an observation after a crash idempotent: the second posting of the same fill
 is a unique violation, not a double count (T-030).
 
+### 2b. A claim never ends a transaction negative, and a reservation's remainder is derived
+
+Balancing per asset does not keep a claim above zero. A posting that moves 14,000 out of a
+RESERVED claim holding nothing and into AVAILABLE balances exactly, and leaves the claim at
+-14,000. `release` compared its amount against the reservation's _original_ size, so after a
+fill had consumed part of it, releasing the whole original was accepted: AVAILABLE went to
+20,000 and RESERVED to -14,000, and only the projection rebuild noticed, afterwards.
+
+Two changes, and the first is the one that matters. Every RESERVED movement now carries the
+reservation it belongs to, and a `CHECK` makes that mutual: a RESERVED entry must name one,
+and nothing else may. A reservation's remainder is therefore the sum of its own entries -
+derived from authoritative postings, not a counter someone maintains - and `release` refuses
+more than that, returning `EXCEEDS_REMAINING` with the figure.
+
+Second, a deferred constraint trigger requires that no HOUSE or STRATEGY claim aggregate, and
+no individual reservation, ends the transaction below zero, for every affected owner, asset
+and claim state. Deferred, so it reads the state actually being committed; per row, so a
+direct `postTransaction` caller and a raw SQL writer are held to it equally. INV-03 was a
+constraint on the projection, which is rebuilt after the fact; it is now a constraint on the
+postings themselves.
+
 ### 3. Balances are a projection with one writer
 
 `claim_balances` refuses every write unless a session flag has been set — and the only thing
