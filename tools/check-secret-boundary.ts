@@ -35,6 +35,7 @@ const READ_VARIABLES = ['CAPITALDESK_READ_CREDENTIAL_REF', 'BINANCE_READ_API_SEC
  * real secret pasted into one is still caught.
  */
 const ENV_EXAMPLE = /(^|\/)\.?env(\..+)?\.example$/;
+const DEPLOYMENT_CREDENTIAL_MAP = /^deploy\/compose\.yaml$/;
 const TRADE_ALLOWED_PREFIXES = ['apps/executor', 'packages/config', 'tools', 'docs', 'specs'];
 const READ_ALLOWED_PREFIXES = ['apps/worker', 'packages/config', 'tools', 'docs', 'specs'];
 
@@ -44,6 +45,7 @@ function mayName(relative: string, prefixes: readonly string[]): boolean {
   const normalised = relative.split(path.sep).join('/');
   return (
     ENV_EXAMPLE.test(normalised) ||
+    DEPLOYMENT_CREDENTIAL_MAP.test(normalised) ||
     prefixes.some((prefix) => normalised === prefix || normalised.startsWith(`${prefix}/`))
   );
 }

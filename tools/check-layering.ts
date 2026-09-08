@@ -31,7 +31,13 @@ const LAYERS: ReadonlyArray<readonly string[]> = [
     '@capitaldesk/reconciler',
   ],
   ['@capitaldesk/db'],
-  ['@capitaldesk/api', '@capitaldesk/worker', '@capitaldesk/executor', '@capitaldesk/web'],
+  [
+    '@capitaldesk/api',
+    '@capitaldesk/worker',
+    '@capitaldesk/executor',
+    '@capitaldesk/web',
+    '@capitaldesk/fault-lab',
+  ],
 ];
 
 const LAYER_OF = new Map<string, number>();

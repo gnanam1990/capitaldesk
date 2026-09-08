@@ -326,6 +326,15 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/fault-lab:
+    devDependencies:
+      tsx:
+        specifier: 'catalog:'
+        version: 4.23.13
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/ledger:
     dependencies:
       '@capitaldesk/contracts':

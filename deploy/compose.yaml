@@ -1,0 +1,110 @@
+name: capitaldesk
+
+x-service-hardening: &service-hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ['/tmp:rw,noexec,nosuid,size=16m']
+  restart: unless-stopped
+  init: true
+
+x-common-environment: &common-environment
+  CAPITALDESK_ENV: ${CAPITALDESK_ENV:?set CAPITALDESK_ENV}
+  CAPITALDESK_VENUE: binance-spot
+  CAPITALDESK_VENUE_BASE_URL: ${CAPITALDESK_VENUE_BASE_URL:?set venue URL}
+  CAPITALDESK_ACCOUNT_ALIAS: ${CAPITALDESK_ACCOUNT_ALIAS:?set account alias}
+  CAPITALDESK_BASELINE_EPOCH: ${CAPITALDESK_BASELINE_EPOCH:?set baseline epoch}
+  CAPITALDESK_LOG_LEVEL: ${CAPITALDESK_LOG_LEVEL:-info}
+  CAPITALDESK_BUILD_ID: ${CAPITALDESK_BUILD_ID:?set immutable build id}
+  CAPITALDESK_DATABASE_URL_REF: file:///run/secrets/database_url
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: capitaldesk
+      POSTGRES_USER: capitaldesk
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [capitaldesk-db:/var/lib/postgresql/data]
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U capitaldesk -d capitaldesk]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    <<: *service-hardening
+    user: 10001:10001
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args: { CAPITALDESK_SERVICE: api }
+    environment:
+      <<: *common-environment
+      CAPITALDESK_API_HOST: 0.0.0.0
+      CAPITALDESK_API_PORT: 3000
+      CAPITALDESK_OWNER_SESSION_SECRET_REF: file:///run/secrets/owner_session
+    secrets: [database_url, owner_session]
+    networks: [database, frontend]
+    ports: [127.0.0.1:3000:3000]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  worker:
+    <<: *service-hardening
+    user: 10002:10002
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args: { CAPITALDESK_SERVICE: worker }
+    environment:
+      <<: *common-environment
+      CAPITALDESK_READ_CREDENTIAL_REF: file:///run/secrets/venue_read
+    secrets: [database_url, venue_read]
+    networks: [database, venue-read-egress]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  executor:
+    <<: *service-hardening
+    profiles: [testnet-write]
+    user: 10003:10003
+    restart: 'no'
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args: { CAPITALDESK_SERVICE: executor }
+    environment:
+      <<: *common-environment
+      CAPITALDESK_WRITE_CAPABILITY: enabled
+      CAPITALDESK_TRADE_CREDENTIAL_REF: file:///run/secrets/venue_trade
+      CAPITALDESK_SIGNED_REQUEST_VALIDITY_MS: 5000
+      CAPITALDESK_CLOCK_SKEW_BUDGET_MS: 1000
+      CAPITALDESK_AUTHORIZATION_DURABILITY: ${CAPITALDESK_AUTHORIZATION_DURABILITY:?set durability class}
+    secrets: [database_url, venue_trade, authorization_evidence_store]
+    volumes:
+      - authorization-evidence:/var/lib/capitaldesk/authorization-evidence
+    networks: [database, venue-trade-egress]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  capitaldesk-db:
+  authorization-evidence:
+
+networks:
+  database: { internal: true }
+  frontend: {}
+  venue-read-egress: {}
+  venue-trade-egress: {}
+
+secrets:
+  database_url: { external: true }
+  postgres_password: { external: true }
+  owner_session: { external: true }
+  venue_read: { external: true }
+  venue_trade: { external: true }
+  authorization_evidence_store: { external: true }

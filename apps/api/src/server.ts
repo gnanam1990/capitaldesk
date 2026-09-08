@@ -11,6 +11,7 @@ import { ApprovalRepository, IntentRepository, PolicyRepository } from '@capital
 import { registerIntentRoutes } from './intents/routes.js';
 import { registerPolicyRoutes } from './policies/routes.js';
 import { registerApprovalRoutes } from './approvals/routes.js';
+import { API_BODY_LIMIT_BYTES, applySecurityHeaders } from './security-headers.js';
 
 /**
  * Probe PostgreSQL with every step bounded.
@@ -110,7 +111,14 @@ export function buildServer(config: ApiConfig, dependencies: ServerDependencies 
     // that carries an identity field a visible error rather than a silently ignored one, so
     // an attempt to smuggle a role or a workspace id fails loudly.
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
+    bodyLimit: API_BODY_LIMIT_BYTES,
   }) as unknown as FastifyInstance;
+
+  const secureTransport = config.deploymentEnvironment !== 'local';
+  app.addHook('onRequest', (_request, reply, done) => {
+    applySecurityHeaders(reply, secureTransport);
+    done();
+  });
 
   const startedAt = Date.now();
 
@@ -131,7 +139,7 @@ export function buildServer(config: ApiConfig, dependencies: ServerDependencies 
   const identityPool = dependencies.identityPool;
   if (identityPool !== undefined) {
     const repository = new IdentityRepository(identityPool);
-    const secureCookies = config.deploymentEnvironment !== 'local';
+    const secureCookies = secureTransport;
     void app
       .register(authPlugin, {
         repository,

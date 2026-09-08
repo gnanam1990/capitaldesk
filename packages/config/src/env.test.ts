@@ -67,6 +67,7 @@ describe('environment contracts', () => {
       const config = loadApiConfig(API_BASE);
       expect(config.economicEnvironment).toBe('testnet');
       expect(config.httpPort).toBe(3000);
+      expect(config.httpHost).toBe('127.0.0.1');
     });
   });
 
