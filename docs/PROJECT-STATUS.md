@@ -66,19 +66,19 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run typecheck`        | pass                                              |
 | `pnpm run lint`             | pass                                              |
 | `pnpm run check:layering`   | pass — 9 packages, 43 crossings checked           |
-| `pnpm run check:secrets`    | pass — 209 files scanned                          |
-| `pnpm run test:unit`        | **506 passed**, 0 skipped, 31 files               |
+| `pnpm run check:secrets`    | pass — 210 files scanned                          |
+| `pnpm run test:unit`        | **507 passed**, 0 skipped, 31 files               |
 | `pnpm run test:property`    | **13 passed**, seed 20260908                      |
 | `pnpm run test:integration` | **135 passed**, 9 files, against PostgreSQL 17.10 |
 | `pnpm run build`            | pass — all packages and apps                      |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
-| Suite       | Count | Where                                                                                                |
-| ----------- | ----- | ---------------------------------------------------------------------------------------------------- |
-| unit        | 506   | contracts 186, domain 57, config 20, web 35, api auth/cli 31, observability 8, tools 8, api 5, other |
-| property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                       |
-| integration | 135   | auth 56, migrations 30, identity scope 11, CLI 18, worker/executor 12, API 8                         |
+| Suite       | Count | Where                                                                                                           |
+| ----------- | ----- | --------------------------------------------------------------------------------------------------------------- |
+| unit        | 507   | contracts 284, web 63, tools 37, api 36, config 35, domain 29, observability 23 (by package, from the reporter) |
+| property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                                  |
+| integration | 135   | auth 56, migrations 30, identity scope 11, CLI 18, worker/executor 12, API 8                                    |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 88
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), not the workspace figures.

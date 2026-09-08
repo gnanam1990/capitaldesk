@@ -15,12 +15,12 @@
     "@capitaldesk/contracts": "workspace:*",
     "@fontsource-variable/manrope": "catalog:",
     "@fontsource/ibm-plex-mono": "catalog:",
+    "@next/env": "catalog:",
     "next": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"
   },
   "devDependencies": {
-    "@next/env": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "typescript": "catalog:"
