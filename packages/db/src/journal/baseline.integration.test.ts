@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { ContractViolation } from '@capitaldesk/contracts';
 import {
   supportedAssets,
   verifyConservation,
@@ -64,6 +65,8 @@ describeIfDatabase('account baseline and owner allocation', () => {
       coverageState?: string;
       detectionScope?: string;
       unmet?: string;
+      /** The closing snapshot's holdings. The opening is derived from exactly these. */
+      balances?: readonly { asset: string; freeAtoms: string; lockedAtoms: string }[];
     } = {},
   ): Promise<void> {
     for (const [id, requestedAt, respondedAt] of [
@@ -74,7 +77,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
         `INSERT INTO venue_account_snapshots
            (workspace_id, pool_id, epoch, snapshot_id, stable_account_id, requested_at,
             responded_at, source_time, response_digest, balances)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,'[]'::jsonb)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9::jsonb)`,
         [
           WORKSPACE,
           POOL,
@@ -84,6 +87,11 @@ describeIfDatabase('account baseline and owner allocation', () => {
           requestedAt,
           respondedAt,
           DIGEST,
+          JSON.stringify(
+            id.endsWith('-close')
+              ? (overrides.balances ?? [{ asset: 'USDT@v1', freeAtoms: '1000', lockedAtoms: '0' }])
+              : [],
+          ),
         ],
       );
     }
@@ -117,7 +125,6 @@ describeIfDatabase('account baseline and owner allocation', () => {
       baselineId: 'baseline-1',
       cutId: 'cut-1',
       supported: SUPPORTED,
-      balances: [{ asset: USDT, atoms: 1_000n }],
       excludedAssets: [],
       ...overrides,
     });
@@ -167,6 +174,12 @@ describeIfDatabase('account baseline and owner allocation', () => {
           quarantinedAtoms: BigInt(claim.quarantined),
         })),
     }));
+  }
+
+  /** Nothing economic was written: no postings and no baseline record. */
+  async function assertNothingWritten(): Promise<void> {
+    expect((await harness.admin.query('SELECT 1 FROM ledger_entries')).rowCount).toBe(0);
+    expect((await harness.admin.query('SELECT 1 FROM account_baselines')).rowCount).toBe(0);
   }
 
   /** T-011: opening ownership is explicit, and it is HOUSE. */
@@ -239,11 +252,6 @@ describeIfDatabase('account baseline and owner allocation', () => {
     });
 
     describe('it fails closed before any economic write', () => {
-      async function assertNothingWritten(): Promise<void> {
-        expect((await harness.admin.query('SELECT 1 FROM ledger_entries')).rowCount).toBe(0);
-        expect((await harness.admin.query('SELECT 1 FROM account_baselines')).rowCount).toBe(0);
-      }
-
       it('refuses a cut that is not COMPLETE', async () => {
         await seedCompleteCut('cut-incomplete', 1, {
           coverageState: 'UNSUPPORTED',
@@ -302,11 +310,14 @@ describeIfDatabase('account baseline and owner allocation', () => {
         await assertNothingWritten();
       });
 
-      it('refuses an asset this pool does not support', async () => {
-        const outcome = await bootstrap({
-          balances: [{ asset: { code: 'DOGE', scaleVersion: 'v1' }, atoms: 1n }],
+      it('refuses a snapshot holding an asset this pool does not support', async () => {
+        await seedCompleteCut('cut-doge', 1, {
+          balances: [{ asset: 'DOGE@v1', freeAtoms: '1', lockedAtoms: '0' }],
         });
-        expect(refusedAssessment(outcome).unsupportedAssets).toEqual(['DOGE@v1']);
+        // Refused while deriving the opening, before any posting exists.
+        const failure = await bootstrap({ cutId: 'cut-doge' }).catch((error: unknown) => error);
+        expect((failure as ContractViolation).reason).toBe('FEE_ASSET_UNSUPPORTED');
+        expect((failure as ContractViolation).detail['asset']).toBe('DOGE@v1');
         await assertNothingWritten();
       });
 
@@ -338,6 +349,72 @@ describeIfDatabase('account baseline and owner allocation', () => {
       });
     });
 
+    /**
+     * The opening is a function of the snapshot, never a claim made alongside it.
+     *
+     * The service used to take the amounts from the request, so a caller could name a cut
+     * whose snapshot held nothing and open 1000 against it — and the record then said the
+     * opening came from that cut, with nothing in the system disagreeing.
+     */
+    describe('the opening is derived from the named closing snapshot', () => {
+      it('posts exactly what the closing snapshot holds, free plus locked', async () => {
+        await seedCompleteCut('cut-derived', 1, {
+          balances: [
+            { asset: 'USDT@v1', freeAtoms: '900', lockedAtoms: '100' },
+            { asset: 'BTC@v1', freeAtoms: '50000000', lockedAtoms: '0' },
+          ],
+        });
+        expect(await bootstrap({ cutId: 'cut-derived' })).toMatchObject({ ok: true });
+        const balances = await ledger.balances({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+        });
+        expect(balances.map((b) => [b.asset.code, b.availableAtoms] as const)).toEqual([
+          ['BTC', 50_000_000n],
+          ['USDT', 1_000n],
+        ]);
+      });
+
+      it('opens zero only when the bound snapshot is actually zero', async () => {
+        await seedCompleteCut('cut-empty', 1, { balances: [] });
+        expect(await bootstrap({ cutId: 'cut-empty' })).toMatchObject({ ok: true });
+        expect((await harness.admin.query('SELECT 1 FROM ledger_entries')).rowCount).toBe(0);
+        const stored = await baselines.baseline({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+        });
+        expect(stored?.baselineId).toBe('baseline-1');
+      });
+
+      it('refuses a snapshot with a negative or malformed amount', async () => {
+        for (const [cutId, balances] of [
+          ['cut-negative', [{ asset: 'USDT@v1', freeAtoms: '-1', lockedAtoms: '0' }]],
+          ['cut-fraction', [{ asset: 'USDT@v1', freeAtoms: '1.5', lockedAtoms: '0' }]],
+          ['cut-exponent', [{ asset: 'USDT@v1', freeAtoms: '1e3', lockedAtoms: '0' }]],
+        ] as const) {
+          await seedCompleteCut(cutId, 1, { balances });
+          const failure = await bootstrap({ cutId }).catch((error: unknown) => error);
+          expect((failure as ContractViolation).reason, cutId).toBe('EVIDENCE_CONTRADICTORY');
+        }
+        await assertNothingWritten();
+      });
+
+      it('refuses a snapshot listing one asset twice', async () => {
+        // Adding them would silently double the opening; taking either would be a choice
+        // nobody made.
+        await seedCompleteCut('cut-dupe', 1, {
+          balances: [
+            { asset: 'USDT@v1', freeAtoms: '100', lockedAtoms: '0' },
+            { asset: 'USDT@v1', freeAtoms: '900', lockedAtoms: '0' },
+          ],
+        });
+        await expect(bootstrap({ cutId: 'cut-dupe' })).rejects.toThrow(/lists an asset twice/);
+        await assertNothingWritten();
+      });
+    });
+
     /** T-056: one account bootstraps once. */
     describe('idempotency and conflict', () => {
       it('replays the same request without posting a second opening', async () => {
@@ -356,11 +433,51 @@ describeIfDatabase('account baseline and owner allocation', () => {
       it('refuses the same baseline id claiming a different cut', async () => {
         await bootstrap();
         await seedCompleteCut('cut-2');
-        expect(await bootstrap({ cutId: 'cut-2' })).toEqual({
+        expect(await bootstrap({ cutId: 'cut-2' })).toMatchObject({
           ok: false,
           reason: 'BASELINE_CONFLICT',
-          storedCutId: 'cut-1',
         });
+      });
+
+      it('refuses a replay whose supported set or exclusions changed', async () => {
+        // The identity is not the only immutable fact. A replay that changed what the
+        // baseline claims to cover would rewrite its coverage disclosure silently.
+        await bootstrap();
+        expect(await bootstrap({ excludedAssets: ['DOGE@v1'] })).toMatchObject({
+          ok: false,
+          reason: 'BASELINE_CONFLICT',
+        });
+        expect(
+          await bootstrap({
+            supported: supportedAssets({
+              base: BTC,
+              quote: USDT,
+              feeAssets: [{ code: 'BNB', scaleVersion: 'v1' }],
+            }),
+          }),
+        ).toMatchObject({ ok: false, reason: 'BASELINE_CONFLICT' });
+        // And the stored record is unchanged.
+        const stored = await baselines.baseline({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+        });
+        expect(stored?.excludedAssets).toEqual([]);
+        expect(stored?.supportedAssets).toEqual(['BTC@v1', 'USDT@v1']);
+      });
+
+      it('keeps the ledger transaction id within its bound for a maximal baseline id', async () => {
+        // `ledger_txn_id` is capped at 64 characters and a baseline id may itself be 64.
+        // Prefixing alone overflowed, and the insert then failed after the evidence had been
+        // read.
+        const longest = `b${'x'.repeat(63)}`;
+        expect(longest).toHaveLength(64);
+        const outcome = await bootstrap({ baselineId: longest });
+        expect(outcome).toMatchObject({ ok: true });
+        const txn = await harness.admin.query<{ ledger_txn_id: string }>(
+          'SELECT ledger_txn_id FROM ledger_transactions',
+        );
+        expect((txn.rows[0]?.ledger_txn_id ?? '').length).toBeLessThanOrEqual(64);
       });
 
       it('refuses a second baseline of the same epoch under a different id', async () => {
@@ -420,18 +537,15 @@ describeIfDatabase('account baseline and owner allocation', () => {
         reason: 'testnet reset',
       });
       expect(rotated).toEqual({ ok: true, epoch: 2 });
-      await seedCompleteCut('cut-2', 2);
+      await seedCompleteCut('cut-2', 2, {
+        balances: [{ asset: 'USDT@v1', freeAtoms: '100', lockedAtoms: '0' }],
+      });
     }
 
     it('shows only the new epoch’s opening, and keeps the old one queryable', async () => {
       await bootstrap();
       await rotateToEpochTwo();
-      await bootstrap({
-        epoch: 2,
-        baselineId: 'baseline-2',
-        cutId: 'cut-2',
-        balances: [{ asset: USDT, atoms: 100n }],
-      });
+      await bootstrap({ epoch: 2, baselineId: 'baseline-2', cutId: 'cut-2' });
 
       const current = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 2 });
       expect(current.find((row) => row.owner === 'HOUSE')?.availableAtoms).toBe(100n);
@@ -444,12 +558,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
     it('cannot spend the closed epoch’s funds in the new one', async () => {
       await bootstrap();
       await rotateToEpochTwo();
-      await bootstrap({
-        epoch: 2,
-        baselineId: 'baseline-2',
-        cutId: 'cut-2',
-        balances: [{ asset: USDT, atoms: 100n }],
-      });
+      await bootstrap({ epoch: 2, baselineId: 'baseline-2', cutId: 'cut-2' });
 
       // 500 was affordable under the old opening and is not under the new one.
       expect(
@@ -473,12 +582,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
       // The positive control: the bound is the new opening, not a ban on allocating.
       await bootstrap();
       await rotateToEpochTwo();
-      await bootstrap({
-        epoch: 2,
-        baselineId: 'baseline-2',
-        cutId: 'cut-2',
-        balances: [{ asset: USDT, atoms: 100n }],
-      });
+      await bootstrap({ epoch: 2, baselineId: 'baseline-2', cutId: 'cut-2' });
       expect(
         await baselines.allocate({
           workspaceId: WORKSPACE,
@@ -510,12 +614,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
         atoms: 1_000n,
       });
       await rotateToEpochTwo();
-      await bootstrap({
-        epoch: 2,
-        baselineId: 'baseline-2',
-        cutId: 'cut-2',
-        balances: [{ asset: USDT, atoms: 100n }],
-      });
+      await bootstrap({ epoch: 2, baselineId: 'baseline-2', cutId: 'cut-2' });
 
       // strategy-a holds 1000 in the closed epoch and nothing in the current one.
       expect(
@@ -535,12 +634,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
     it('conserves each epoch on its own, never mixed', async () => {
       await bootstrap();
       await rotateToEpochTwo();
-      await bootstrap({
-        epoch: 2,
-        baselineId: 'baseline-2',
-        cutId: 'cut-2',
-        balances: [{ asset: USDT, atoms: 100n }],
-      });
+      await bootstrap({ epoch: 2, baselineId: 'baseline-2', cutId: 'cut-2' });
       // 1000 in the old epoch and 100 in the new one, each balanced against its own control.
       expect(verifyConservation(await positions(1)).conserved).toBe(true);
       expect(verifyConservation(await positions(2)).conserved).toBe(true);
@@ -553,12 +647,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
     it('carries the transaction’s epoch onto every entry it posts', async () => {
       await bootstrap();
       await rotateToEpochTwo();
-      await bootstrap({
-        epoch: 2,
-        baselineId: 'baseline-2',
-        cutId: 'cut-2',
-        balances: [{ asset: USDT, atoms: 100n }],
-      });
+      await bootstrap({ epoch: 2, baselineId: 'baseline-2', cutId: 'cut-2' });
       const mismatched = await harness.admin.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM ledger_entries e
            JOIN ledger_transactions t
@@ -692,10 +781,31 @@ describeIfDatabase('account baseline and owner allocation', () => {
 
     it('refuses the same allocation id claiming different facts', async () => {
       await allocate();
-      expect(await allocate({ atoms: 900n })).toEqual({
-        ok: false,
-        reason: 'ALLOCATION_CONFLICT',
-      });
+      for (const changed of [
+        { atoms: 900n },
+        { to: 'strategy-b' },
+        { from: 'strategy-a', to: 'HOUSE' },
+        { asset: BTC },
+        // The authorising session is part of the decision, not metadata alongside it.
+        { authorizedBy: 'session-2' },
+      ]) {
+        const label = Object.keys(changed).join(',');
+        expect(await allocate(changed), label).toEqual({
+          ok: false,
+          reason: 'ALLOCATION_CONFLICT',
+        });
+      }
+    });
+
+    it('keeps the ledger transaction id within its bound for a maximal allocation id', async () => {
+      const longest = `a${'x'.repeat(63)}`;
+      expect(longest).toHaveLength(64);
+      expect(await allocate({ allocationId: longest })).toMatchObject({ ok: true });
+      const txn = await harness.admin.query<{ ledger_txn_id: string }>(
+        `SELECT ledger_txn_id FROM owner_allocations WHERE allocation_id = $1`,
+        [longest],
+      );
+      expect((txn.rows[0]?.ledger_txn_id ?? '').length).toBeLessThanOrEqual(64);
     });
 
     it('refuses allocating before any baseline exists', async () => {
