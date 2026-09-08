@@ -15,6 +15,11 @@
     "@capitaldesk/config": "workspace:*",
     "@capitaldesk/contracts": "workspace:*",
     "@capitaldesk/observability": "workspace:*",
+    "@fastify/cookie": "catalog:",
+    "@fastify/csrf-protection": "catalog:",
+    "@fastify/rate-limit": "catalog:",
+    "@fastify/session": "catalog:",
+    "@node-rs/argon2": "catalog:",
     "fastify": "catalog:",
     "pg": "catalog:",
     "pino": "catalog:"
