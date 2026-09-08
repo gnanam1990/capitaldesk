@@ -199,11 +199,26 @@ CREATE TRIGGER owner_allocations_name_a_real_strategy
 
 ALTER TABLE ledger_entries ADD COLUMN epoch INTEGER;
 
+-- Backfilling means updating an append-only table, which its own trigger refuses — correctly,
+-- because at runtime nothing may rewrite a posting. The trigger is therefore suspended for
+-- exactly this statement and restored immediately, inside the migration's own transaction.
+--
+-- The alternative was to teach the immutability trigger a bypass flag, as the projection
+-- rebuild has. That was rejected: a permanent escape hatch on ledger immutability would
+-- outlive this migration and be available to any session, whereas a disable and re-enable
+-- here cannot be reached once this transaction commits.
+--
+-- The value is not chosen. It is copied from the transaction that already posted the entry,
+-- so no epoch is invented for history that predates this column.
+ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_are_immutable;
+
 UPDATE ledger_entries e
    SET epoch = t.epoch
   FROM ledger_transactions t
  WHERE t.workspace_id = e.workspace_id AND t.pool_id = e.pool_id
    AND t.ledger_txn_id = e.ledger_txn_id;
+
+ALTER TABLE ledger_entries ENABLE TRIGGER ledger_entries_are_immutable;
 
 ALTER TABLE ledger_entries ALTER COLUMN epoch SET NOT NULL;
 
@@ -219,27 +234,23 @@ CREATE INDEX ledger_entries_by_epoch_owner_asset
 
 -- The projection is per epoch, so a rotation starts a fresh view without deleting the old.
 --
--- Two things make this awkward on a populated database, and both were wrong in the first
--- draft. `claim_balances` already carries the guard that refuses any write outside a
--- derived rebuild, so a plain UPDATE here fails on a database that has rows; and hard-coding
--- the existing rows to epoch 1 would invent an epoch for every pool that had already rotated,
--- silently attributing an old epoch's balances to a new one.
+-- Three things make this awkward on a populated database. `claim_balances` carries a guard
+-- refusing any write outside a derived rebuild, so a plain UPDATE fails once there are rows.
+-- Hard-coding the existing rows to epoch 1 would invent an epoch for every pool that had
+-- already rotated, attributing an old epoch's balances to a new one. And one old row can
+-- correspond to several new ones, so no in-place update could express the change anyway.
 --
--- The projection is derived state, so it is not migrated at all: the rows are discarded under
--- the guard's own flag and rebuilt from the immutable entries, which now carry their true
--- epoch. History is preserved because the entries are, and every epoch reappears with its own
--- figures rather than one guessed value.
+-- The projection is derived state, so it is not migrated at all — it is re-derived. The
+-- clearing is left to `rebuild_claim_balances` rather than done here: that function is the
+-- single sanctioned place where these rows may be discarded, because it re-derives them from
+-- the immutable entries in the same call. History is preserved because the entries are, and
+-- every epoch reappears with its own figures rather than one guessed value.
+--
+-- Hence the ordering below: the column is added nullable, the old key dropped, the rebuild
+-- redefined and run, and only then is the column made NOT NULL under its new key. Reversing
+-- any two of those steps fails on a database that has rows.
 ALTER TABLE claim_balances ADD COLUMN epoch INTEGER;
 ALTER TABLE claim_balances DROP CONSTRAINT claim_balances_pkey;
-
-SELECT set_config('capitaldesk.projection_rebuild', 'on', false);
-DELETE FROM claim_balances;
-SELECT set_config('capitaldesk.projection_rebuild', 'off', false);
-
-ALTER TABLE claim_balances ALTER COLUMN epoch SET NOT NULL;
-ALTER TABLE claim_balances
-  ADD CONSTRAINT claim_balances_pkey
-  PRIMARY KEY (workspace_id, pool_id, epoch, account_owner, asset_code, asset_scale);
 
 -- Rebuild, per epoch. Every epoch is rebuilt, so the old view stays queryable and the new
 -- one starts from its own postings alone.
@@ -273,6 +284,25 @@ BEGIN
   RETURN at_revision;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Rebuild every existing pool now, so an upgraded database holds a correct per-epoch view at
+-- the end of this migration rather than whenever some later write happens to trigger one. A
+-- fresh database has no pools and this does nothing.
+DO $$
+DECLARE
+  target RECORD;
+BEGIN
+  FOR target IN SELECT workspace_id, pool_id FROM pools LOOP
+    PERFORM rebuild_claim_balances(target.workspace_id, target.pool_id);
+  END LOOP;
+END $$;
+
+-- Every row now carries the epoch it was derived under, so the column and its new key can be
+-- enforced.
+ALTER TABLE claim_balances ALTER COLUMN epoch SET NOT NULL;
+ALTER TABLE claim_balances
+  ADD CONSTRAINT claim_balances_pkey
+  PRIMARY KEY (workspace_id, pool_id, epoch, account_owner, asset_code, asset_scale);
 
 -- Claims are non-negative within their own epoch. Summing across epochs let a closed epoch's
 -- surplus cover a current shortfall, which is precisely the authority a reset removes.
@@ -338,9 +368,8 @@ DECLARE
   closing      venue_account_snapshots%ROWTYPE;
   snapshot_total NUMERIC;
   txn          ledger_transactions%ROWTYPE;
-  control_total NUMERIC;
-  house_total  NUMERIC;
-  entry_count  INTEGER;
+  mismatch_count INTEGER;
+  duplicate_count INTEGER;
 BEGIN
   SELECT * INTO cut FROM venue_observation_cuts
    WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
@@ -364,6 +393,13 @@ BEGIN
   SELECT coalesce(sum((b->>'freeAtoms')::NUMERIC + (b->>'lockedAtoms')::NUMERIC), 0)
     INTO snapshot_total
     FROM jsonb_array_elements(closing.balances) AS b;
+
+  SELECT count(*) - count(DISTINCT b->>'asset') INTO duplicate_count
+    FROM jsonb_array_elements(closing.balances) AS b;
+  IF duplicate_count <> 0 THEN
+    RAISE EXCEPTION 'baseline % closing snapshot lists an asset more than once', NEW.baseline_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
 
   IF NEW.ledger_txn_id IS NULL THEN
     -- "No postings" is only consistent with an account that held nothing.
@@ -389,24 +425,48 @@ BEGIN
       USING ERRCODE = 'restrict_violation';
   END IF;
 
-  SELECT
-    coalesce(sum(delta_atoms) FILTER (WHERE account_kind = 'ASSET_CONTROL'), 0),
-    coalesce(sum(delta_atoms) FILTER (WHERE account_kind = 'HOUSE' AND claim_state = 'AVAILABLE'), 0),
-    count(*)
-    INTO control_total, house_total, entry_count
-    FROM ledger_entries
-   WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
-     AND ledger_txn_id = NEW.ledger_txn_id;
+  -- Compare each asset and scale independently. Comparing one grand total lets a direct
+  -- writer replace one asset with another that happens to have the same atom count.
+  WITH expected AS (
+    SELECT split_part(b->>'asset', '@', 1) AS asset_code,
+           split_part(b->>'asset', '@', 2) AS asset_scale,
+           ((b->>'freeAtoms')::NUMERIC + (b->>'lockedAtoms')::NUMERIC) AS atoms
+      FROM jsonb_array_elements(closing.balances) AS b
+     WHERE ((b->>'freeAtoms')::NUMERIC + (b->>'lockedAtoms')::NUMERIC) <> 0
+  ), actual AS (
+    SELECT asset_code, asset_scale,
+           count(*) AS entry_count,
+           count(*) FILTER (
+             WHERE account_kind = 'ASSET_CONTROL' AND account_owner = 'ASSET_CONTROL'
+               AND claim_state = 'CONTROL') AS control_count,
+           count(*) FILTER (
+             WHERE account_kind = 'HOUSE' AND account_owner = 'HOUSE'
+               AND claim_state = 'AVAILABLE') AS house_count,
+           coalesce(sum(delta_atoms) FILTER (
+             WHERE account_kind = 'ASSET_CONTROL' AND account_owner = 'ASSET_CONTROL'
+               AND claim_state = 'CONTROL'), 0) AS control_atoms,
+           coalesce(sum(delta_atoms) FILTER (
+             WHERE account_kind = 'HOUSE' AND account_owner = 'HOUSE'
+               AND claim_state = 'AVAILABLE'), 0) AS house_atoms
+      FROM ledger_entries
+     WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
+       AND epoch = NEW.epoch AND ledger_txn_id = NEW.ledger_txn_id
+     GROUP BY asset_code, asset_scale
+  ), mismatches AS (
+    SELECT 1
+      FROM expected e
+      FULL JOIN actual a USING (asset_code, asset_scale)
+     WHERE e.atoms IS DISTINCT FROM a.control_atoms
+        OR e.atoms IS DISTINCT FROM a.house_atoms
+        OR a.entry_count IS DISTINCT FROM 2
+        OR a.control_count IS DISTINCT FROM 1
+        OR a.house_count IS DISTINCT FROM 1
+  )
+  SELECT count(*) INTO mismatch_count FROM mismatches;
 
-  -- An opening credits control and HOUSE by the same amount, and by exactly what the snapshot
-  -- says the account holds. Anything else is an opening that does not match its evidence.
-  IF control_total <> snapshot_total OR house_total <> snapshot_total THEN
-    RAISE EXCEPTION 'baseline % posts control % and HOUSE % against a snapshot holding %',
-      NEW.baseline_id, control_total, house_total, snapshot_total
-      USING ERRCODE = 'restrict_violation';
-  END IF;
-  IF entry_count = 0 THEN
-    RAISE EXCEPTION 'baseline % names a transaction with no entries', NEW.baseline_id
+  IF mismatch_count <> 0 THEN
+    RAISE EXCEPTION 'baseline % postings do not match its closing snapshot per asset',
+      NEW.baseline_id
       USING ERRCODE = 'restrict_violation';
   END IF;
 
@@ -489,12 +549,49 @@ CREATE CONSTRAINT TRIGGER owner_allocations_match_their_entries
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION refuse_unsupported_allocation();
 
--- An allocation names the owner session that authorised it.
---
--- A foreign key, so the column cannot hold a string nobody issued. Whether that session was
--- live, in this workspace and held by an owner is decided by the service under the same lock
--- as the availability it spent; what the database guarantees is that the session is real and
--- stays referenced.
+-- An allocation names a live owner session in the same workspace. This is repeated at the
+-- database boundary because a direct writer can bypass the repository's principal check.
+CREATE OR REPLACE FUNCTION refuse_unauthorised_allocation_session() RETURNS trigger AS $$
+DECLARE
+  session_workspace TEXT;
+  session_user TEXT;
+  session_revoked TIMESTAMPTZ;
+  absolute_expiry TIMESTAMPTZ;
+  idle_expiry TIMESTAMPTZ;
+  member_role TEXT;
+  disabled TIMESTAMPTZ;
+BEGIN
+  SELECT s.workspace_id, s.user_id, s.revoked_at, s.absolute_expires_at, s.idle_expires_at,
+         m.role, u.disabled_at
+    INTO session_workspace, session_user, session_revoked, absolute_expiry, idle_expiry,
+         member_role, disabled
+    FROM owner_sessions s
+    LEFT JOIN memberships m
+      ON m.workspace_id = s.workspace_id AND m.user_id = s.user_id
+    LEFT JOIN users u ON u.user_id = s.user_id
+   WHERE s.session_id_hash = NEW.authorized_by;
+
+  IF session_workspace IS NULL
+     OR session_workspace <> NEW.workspace_id
+     OR session_revoked IS NOT NULL
+     OR absolute_expiry <= now()
+     OR idle_expiry <= now()
+     OR member_role <> 'owner'
+     OR disabled IS NOT NULL THEN
+    RAISE EXCEPTION 'allocation % is not authorised by a live owner session in workspace %',
+      NEW.allocation_id, NEW.workspace_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER owner_allocations_require_live_owner_session
+  AFTER INSERT ON owner_allocations
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION refuse_unauthorised_allocation_session();
+
+-- The foreign key keeps the provenance row referenced after the liveness check.
 ALTER TABLE owner_allocations
   ADD CONSTRAINT owner_allocations_authorized_by_session
   FOREIGN KEY (authorized_by) REFERENCES owner_sessions (session_id_hash);

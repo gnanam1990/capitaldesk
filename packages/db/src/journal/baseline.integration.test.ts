@@ -32,7 +32,12 @@ const describeIfDatabase = DATABASE_URL === undefined ? describe.skip : describe
 const USDT = { code: 'USDT', scaleVersion: 'v1' } as const;
 const BTC = { code: 'BTC', scaleVersion: 'v1' } as const;
 const SUPPORTED = supportedAssets({ base: BTC, quote: USDT, feeAssets: [] });
-const OWNER = { kind: 'owner-session', role: 'owner', subjectId: 'user-owner' } as const;
+const OWNER = {
+  kind: 'owner-session',
+  role: 'owner',
+  subjectId: 'user-owner',
+  scope: { workspaceId: WORKSPACE, poolId: null, strategyId: null },
+} as const;
 const SESSION = 'f'.repeat(64);
 const OTHER_SESSION = 'e'.repeat(64);
 const DIGEST = `sha256:${'a'.repeat(64)}`;
@@ -383,7 +388,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
       });
 
       /** T-032: a reset closes the epoch, and old funds are not current holdings. */
-      it('refuses a closed epoch, and a cut from another epoch', async () => {
+      it('refuses a closed epoch', async () => {
         await harness.admin.query(
           `UPDATE baseline_epochs SET closed_at = now(), closed_reason = 'reset'`,
         );
@@ -623,6 +628,44 @@ describeIfDatabase('account baseline and owner allocation', () => {
           await expect(
             insertBaseline({ cutId: 'cut-2', ledgerTxnId: 'baseline-baseline-1' }),
           ).rejects.toBeTruthy();
+        });
+
+        it('compares the opening with the snapshot per asset, not as one grand total', async () => {
+          await seedCompleteCut('cut-mixed', 1, {
+            balances: [
+              { asset: 'USDT@v1', freeAtoms: '1000', lockedAtoms: '0' },
+              { asset: 'BTC@v1', freeAtoms: '200', lockedAtoms: '0' },
+            ],
+          });
+          expect(
+            await ledger.postTransaction({
+              workspaceId: WORKSPACE,
+              poolId: POOL,
+              epoch: 1,
+              ledgerTxnId: 'baseline-forged',
+              source: { kind: 'baseline', ref: 'forged' },
+              description: 'wrong asset with the same aggregate atom count',
+              entries: [
+                {
+                  accountKind: 'ASSET_CONTROL',
+                  owner: 'ASSET_CONTROL',
+                  claimState: 'CONTROL',
+                  asset: { code: 'USDT', scale: 'v1' },
+                  deltaAtoms: 1_200n,
+                },
+                {
+                  accountKind: 'HOUSE',
+                  owner: 'HOUSE',
+                  claimState: 'AVAILABLE',
+                  asset: { code: 'USDT', scale: 'v1' },
+                  deltaAtoms: 1_200n,
+                },
+              ],
+            }),
+          ).toMatchObject({ ok: true });
+          await expect(
+            insertBaseline({ cutId: 'cut-mixed', ledgerTxnId: 'baseline-forged' }),
+          ).rejects.toMatchObject({ code: '23001' });
         });
 
         it('refuses cost_basis_known = true until a proven basis exists', async () => {
@@ -1180,10 +1223,30 @@ describeIfDatabase('account baseline and owner allocation', () => {
     it('refuses an agent credential', async () => {
       expect(
         await allocate({
-          actor: { kind: 'agent-credential', role: 'agent', subjectId: 'user-owner' },
+          actor: {
+            kind: 'agent-credential',
+            role: 'agent',
+            subjectId: 'agent-1',
+            scope: { workspaceId: WORKSPACE, poolId: POOL, strategyId: 'strategy-a' },
+          },
         }),
-      ).toEqual({ ok: false, reason: 'UNAUTHORIZED', detail: 'ACTOR_MAY_NOT_ALLOCATE' });
+      ).toEqual({ ok: false, reason: 'UNAUTHORIZED', detail: 'CAPABILITY_NOT_GRANTED' });
       expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(0);
+    });
+
+    it('refuses an owner principal scoped to another workspace', async () => {
+      expect(
+        await allocate({
+          actor: {
+            ...OWNER,
+            scope: { workspaceId: OTHER_WORKSPACE, poolId: null, strategyId: null },
+          },
+        }),
+      ).toEqual({
+        ok: false,
+        reason: 'UNAUTHORIZED',
+        detail: 'WORKSPACE_SCOPE_MISMATCH',
+      });
     });
 
     /**
@@ -1226,7 +1289,12 @@ describeIfDatabase('account baseline and owner allocation', () => {
         expect(
           await allocate({
             sessionIdHash: foreign,
-            actor: { kind: 'owner-session', role: 'owner', subjectId: 'user-elsewhere' },
+            actor: {
+              kind: 'owner-session',
+              role: 'owner',
+              subjectId: 'user-elsewhere',
+              scope: { workspaceId: WORKSPACE, poolId: null, strategyId: null },
+            },
           }),
         ).toMatchObject({ reason: 'UNAUTHORIZED', detail: 'SESSION_WRONG_WORKSPACE' });
       });
@@ -1236,7 +1304,12 @@ describeIfDatabase('account baseline and owner allocation', () => {
         await seedOwnerSession('9'.repeat(64), 'user-other', 'operator');
         expect(
           await allocate({
-            actor: { kind: 'owner-session', role: 'owner', subjectId: 'user-other' },
+            actor: {
+              kind: 'owner-session',
+              role: 'owner',
+              subjectId: 'user-other',
+              scope: { workspaceId: WORKSPACE, poolId: null, strategyId: null },
+            },
           }),
         ).toMatchObject({ reason: 'UNAUTHORIZED', detail: 'SESSION_SUBJECT_MISMATCH' });
       });
@@ -1247,7 +1320,12 @@ describeIfDatabase('account baseline and owner allocation', () => {
         expect(
           await allocate({
             sessionIdHash: operator,
-            actor: { kind: 'owner-session', role: 'owner', subjectId: 'user-operator' },
+            actor: {
+              kind: 'owner-session',
+              role: 'owner',
+              subjectId: 'user-operator',
+              scope: { workspaceId: WORKSPACE, poolId: null, strategyId: null },
+            },
           }),
         ).toMatchObject({ reason: 'UNAUTHORIZED', detail: 'MEMBERSHIP_NOT_OWNER' });
       });
@@ -1282,6 +1360,45 @@ describeIfDatabase('account baseline and owner allocation', () => {
           refusal = sqlRefusal(error);
         }
         expect(refusal.constraint).toBe('owner_allocations_authorized_by_session');
+      });
+
+      it('refuses a direct write naming an expired owner session', async () => {
+        const expired = '8'.repeat(64);
+        await seedOwnerSession(expired, 'user-owner', 'owner', { expired: true });
+        await ledger.postTransaction({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+          ledgerTxnId: 'allocation-expired',
+          source: { kind: 'owner-allocation', ref: 'expired' },
+          description: 'must not be authorised by an expired session',
+          entries: [
+            {
+              accountKind: 'HOUSE',
+              owner: 'HOUSE',
+              claimState: 'AVAILABLE',
+              asset: { code: 'USDT', scale: 'v1' },
+              deltaAtoms: -1n,
+            },
+            {
+              accountKind: 'STRATEGY',
+              owner: 'strategy-a',
+              claimState: 'AVAILABLE',
+              asset: { code: 'USDT', scale: 'v1' },
+              deltaAtoms: 1n,
+            },
+          ],
+        });
+        await expect(
+          harness.admin.query(
+            `INSERT INTO owner_allocations
+               (workspace_id, pool_id, epoch, allocation_id, revision, from_owner, to_owner,
+                asset_code, asset_scale, atoms, authorized_by, ledger_txn_id)
+             VALUES ($1,$2,1,'expired',99,'HOUSE','strategy-a','USDT','v1',1,$3,
+                     'allocation-expired')`,
+            [WORKSPACE, POOL, expired],
+          ),
+        ).rejects.toMatchObject({ code: '23001' });
       });
     });
 

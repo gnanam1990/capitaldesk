@@ -4,13 +4,13 @@ import {
   assessBaselineReadiness,
   authorizeAllocation,
   openingFromSnapshot,
-  type AllocationActor,
   type BaselineAssessment,
   type BaselinePreconditions,
   type OpeningPosition,
   type SnapshotBalance,
   type SupportedAssets,
 } from '@capitaldesk/ledger';
+import { authorize, type Principal } from '@capitaldesk/domain';
 import { formatAssetKey, type AssetKey } from '@capitaldesk/contracts';
 import { LedgerRepository, type AssetRef } from './ledger.js';
 import { serializable, type Queryable } from './transaction.js';
@@ -79,7 +79,7 @@ export interface AllocationInput {
    * construct, and the first version of this accepted one with no owner session in the
    * database at all.
    */
-  readonly actor: AllocationActor;
+  readonly actor: Principal;
   /**
    * The SHA-256 of the owner session this was authorised under.
    *
@@ -259,6 +259,14 @@ export class BaselineRepository {
    */
   allocate(input: AllocationInput): Promise<AllocationOutcome> {
     return serializable(this.pool, async (client): Promise<AllocationOutcome> => {
+      const capability = authorize(input.actor, 'allocation.write', {
+        workspaceId: input.workspaceId,
+        poolId: input.poolId,
+      });
+      if (!capability.allowed) {
+        return { ok: false, reason: 'UNAUTHORIZED', detail: capability.reason };
+      }
+
       await client.query(
         'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
         [input.workspaceId, input.poolId],

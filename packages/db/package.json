@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@capitaldesk/contracts": "workspace:*",
+    "@capitaldesk/domain": "workspace:*",
     "pg": "catalog:",
     "@capitaldesk/ledger": "workspace:*"
   },

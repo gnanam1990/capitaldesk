@@ -48,7 +48,6 @@ const ASSERTION_LOCK_TIMEOUT = '5s';
  * Generous, because every suite migrates its own schema and they queue behind one lock; and
  * still bounded, because a genuinely stuck migration must fail rather than hang the run.
  */
-const MIGRATION_LOCK_WAIT = '60s';
 
 export interface Backend {
   readonly client: Client;
@@ -81,24 +80,13 @@ export class JournalHarness {
     await this.admin.query(`DROP SCHEMA IF EXISTS ${this.schema} CASCADE`);
     await this.admin.query(`CREATE SCHEMA ${this.schema}`);
     await this.admin.query(`SET search_path TO ${this.schema}`);
-    // The migrator takes a global advisory lock so concurrent runs cannot interleave, and
-    // `lock_timeout` applies to that wait like any other. With the suites migrating their
-    // schemas in parallel, a waiter could exceed the 5-second assertion timeout and fail with
-    // `lock_timeout` — a scheduling artefact reported as a test failure, which is exactly the
-    // intermittent failure this suite showed.
-    //
-    // The migration wait gets its own generous bound and the assertion timeout is restored
-    // immediately after. It is still bounded: a genuinely stuck migration fails rather than
-    // hanging the run.
-    await this.admin.query(`SET lock_timeout = '${MIGRATION_LOCK_WAIT}'`);
-    try {
-      await migrate(this.admin, await loadMigrations(MIGRATIONS_DIR), {
-        appliedBy: 'vitest',
-        buildId: 'journal-test',
-      });
-    } finally {
-      await this.admin.query(`SET lock_timeout = '${ASSERTION_LOCK_TIMEOUT}'`);
-    }
+    // No special handling for the migrator's advisory lock is needed here: `migrate` suspends
+    // and restores `lock_timeout` around its own wait, so this connection's short assertion
+    // timeout survives and does not turn a queue of parallel suites into a spurious failure.
+    await migrate(this.admin, await loadMigrations(MIGRATIONS_DIR), {
+      appliedBy: 'vitest',
+      buildId: 'journal-test',
+    });
     await this.admin.query(
       `INSERT INTO workspaces (workspace_id, display_name) VALUES ($1,'Journal'), ($2,'Other')`,
       [WORKSPACE, OTHER_WORKSPACE],

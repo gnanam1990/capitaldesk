@@ -293,6 +293,9 @@ importers:
       '@capitaldesk/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@capitaldesk/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@capitaldesk/ledger':
         specifier: workspace:*
         version: link:../ledger

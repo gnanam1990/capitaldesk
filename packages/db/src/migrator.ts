@@ -359,7 +359,26 @@ export async function migrate(
   // scoped so it spans every per-migration transaction, and released in `finally` so a
   // failure cannot strand it. A waiter blocks here and then observes the completed history,
   // so it correctly reports everything as already applied.
-  await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+  // `lock_timeout` applies to this wait like any other lock wait, and waiting is the correct
+  // behaviour here rather than a fault: the second deployer is meant to block until the first
+  // finishes. A caller that had set a lock_timeout for its own statements would otherwise have
+  // its migration cancelled for doing exactly the right thing, and would then report a
+  // spurious failure for a migration that was applied successfully by the other process.
+  //
+  // So the wait runs with the timeout suspended and the caller's value restored afterwards,
+  // leaving the connection as it was found. The per-migration statements inside
+  // `runMigrations` keep whatever the caller configured.
+  //
+  // `set_config` rather than `SET`, because the value being restored is read back at runtime
+  // and `SET` takes no bind parameter.
+  const inherited = await client.query<{ lock_timeout: string }>('SHOW lock_timeout');
+  const restore = inherited.rows[0]?.lock_timeout ?? '0';
+  await client.query("SELECT set_config('lock_timeout', '0', false)");
+  try {
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+  } finally {
+    await client.query("SELECT set_config('lock_timeout', $1, false)", [restore]);
+  }
   try {
     return await runMigrations(client, files, context);
   } finally {
