@@ -119,7 +119,7 @@ describeIfDatabase('owner mandate journal', () => {
     ).rejects.toThrow(/append-only table policy_versions/);
   });
 
-  it('refuses agent-authored policy changes regardless of prompt content', async () => {
+  it('refuses agent-authored policy changes regardless of prompt content', () => {
     expect(() =>
       repository.publish({
         workspaceId: WORKSPACE,
