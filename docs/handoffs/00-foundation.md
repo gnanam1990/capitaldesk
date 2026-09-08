@@ -55,6 +55,8 @@ pnpm run test:unit                    231 passed, 0 skipped, 15 files
 pnpm run test:property                 13 passed, seed 20260908
 pnpm run test:integration              22 passed (PostgreSQL 17.10)
 pnpm run test:integration (no db)      22 skipped — reported as skipped, never as coverage
+                                       (superseded: the gate now refuses to start with no
+                                        database URL; see docs/handoffs/04.md)
 pnpm run build                        pass
 ```
 

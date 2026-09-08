@@ -90,8 +90,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
 
-      # The suite skips itself when no database is configured. Assert it did not skip, so a
-      # broken service container cannot be reported as passing integration coverage.
+      # The gate refuses to start without CAPITALDESK_TEST_DATABASE_URL, so a missing service
+      # container fails immediately rather than exiting 0 with everything skipped. The
+      # assertion below is the second line of defence: a reachable-but-wrong database, or one
+      # suite skipping itself for another reason, is still not integration coverage.
       - name: Run integration suite
         run: pnpm run test:integration --reporter=json --outputFile=integration-results.json
 
