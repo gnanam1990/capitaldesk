@@ -1,0 +1,26 @@
+{
+  "name": "@capitaldesk/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Validated, fail-closed environment contracts and the credential-class boundary. Layer 1.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty"
+  },
+  "dependencies": {
+    "@capitaldesk/contracts": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "tools/**/*.ts",
+    "vitest.config.ts",
+    "eslint.config.mjs",
+    "packages/*/src/**/*.test.ts",
+    "apps/*/src/**/*.test.ts"
+  ]
+}
