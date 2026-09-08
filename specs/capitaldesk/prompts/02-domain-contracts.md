@@ -4,6 +4,15 @@
 **Requirements:** FR-004, FR-006, FR-007, FR-013  
 **Owns:** packages/contracts, packages/domain pure types/reducers
 
+> **Amended by ADR-0001, ADR-0003, ADR-0004, ADR-0006 and ADR-0010.** The state map in task 2
+> gains `SEND_ATTEMPTED`, `NOT_SENT_PROVEN` and `IRRECOVERABLE_UNCERTAINTY` on the dispatch
+> attempt, and `EXPIRED_IN_MATCH`, `PENDING_CANCEL` and `UNSUPPORTED_OBSERVATION` on venue
+> observations. The plan digest in task 3 additionally binds the timing envelope
+> (`submissionDeadlineAt`, `signedRequestValidityMs`, `clockSkewBudgetMs`),
+> `cohortClosedAtSequence`, `feePolicyVersion` and `authorizationDurability`. Task 3's
+> "reject unknown decision-changing fields" must be enforced at runtime over nested objects,
+> not only stated: an unknown key that leaves the digest unchanged defeats INV-08.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

@@ -4,6 +4,11 @@
 **Requirements:** FR-006–FR-013, FR-020  
 **Owns:** web intents, plan builder and approval routes
 
+> **Amended by ADR-0003, ADR-0006 and ADR-0008.** Show `submissionDeadlineAt` as a fact
+> distinct from plan expiry and session expiry. Show a late opposing intent invalidating an
+> unmarked plan, and — after the marker — an in-flight order and a queued opposing intent as
+> two facts, without implying either cancels the other.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

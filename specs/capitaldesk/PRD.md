@@ -1,9 +1,12 @@
 # CapitalDesk — Product Requirements Document
 
-Version: 1.0 planning baseline  
+Version: 1.1, amended 8 September 2026  
 Date: 8 September 2026  
 Status: implementation specification; no deployment or customer validation implied  
-Related: [technical design](TDD.md), [test plan](TEST-PLAN.md), [implementation plan](IMPLEMENTATION-PLAN.md), [UI specification](UI-UX.md), [sources](SOURCES.md), [module prompts](prompts/README.md)
+Related: [technical design](TDD.md), [test plan](TEST-PLAN.md), [implementation plan](IMPLEMENTATION-PLAN.md), [UI specification](UI-UX.md), [sources](SOURCES.md), [module prompts](prompts/README.md), [amendments](AMENDMENTS.md)
+
+> **Amended.** Sections 5, 6, 8 and 10 carry amendments resolving review findings F2, F3,
+> F8 and F9. The original reviewed text is preserved in git history at commit `c68137e`.
 
 ## 1. Product decision
 
@@ -65,6 +68,15 @@ An ordinary Spot API key does not prove access to an Agentic managed account. Th
 
 Trading agents must not have another write path to the governed account. If agents retain direct credentials, CapitalDesk cannot promise exclusive enforcement. Out-of-band manual or external changes are still possible; detecting one quarantines affected execution until the account and claims are reconciled.
 
+> **Amended by ADR-0002 — owner operating constraint.** Binance provides no account-wide
+> completed-trade endpoint, so this release **detects** any unexplained balance movement
+> account-wide but **attributes** activity only within the declared observed symbol set.
+> Complete attribution therefore holds only while no external trading occurs on the governed
+> account. A violation is always detected and quarantines the pool; it is not always
+> explained. Deposits, withdrawals and internal transfers are unobservable in the v1 testnet
+> surface. State this limitation to operators; do not describe the product as reconciling all
+> external activity.
+
 Technical success on Spot testnet plus Agent OS proposal tools does not establish hackathon eligibility. Eligibility is unverified until current official rules accept the demonstrated integration. The product remains useful independently of an event deadline.
 
 ## 6. End-to-end owner journey
@@ -73,7 +85,7 @@ Technical success on Spot testnet plus Agent OS proposal tools does not establis
 2. Reconcile balances, existing orders, and required trade history into a new baseline epoch. Classify existing activity before enabling execution.
 3. Create strategy identities and explicitly assign virtual asset claims and spend budgets. Keep unassigned assets visible.
 4. Register agents with proposal-only tokens. Let agents submit absolute targets with revisions and price constraints.
-5. Review compatible intents or a conflict. Resolve opposite directions by deferring or revising; there is no hidden cross or optimizer override.
+5. Review compatible intents or a conflict. Resolve opposite directions by deferring or revising; there is no hidden cross or optimizer override. *(ADR-0008: the candidate set closes at seal. A later opposing intent invalidates a sealed but unmarked plan and releases its reservations; after the dispatch marker it queues instead, because the order cannot be recalled.)*
 6. Review the exact plan: participating revisions, capital reservations, order parameters, fee allowance, FIFO allocation, expiry, and evidence freshness.
 7. Approve the current plan digest. Complete native confirmation as well when the selected integration requires it.
 8. Dispatch once after durable preparation and a last current-state validation. Observe real venue acknowledgement and fills.
@@ -127,6 +139,13 @@ An IOC order can expire without fills or partially fill before terminating. An u
 
 An approval expires and becomes invalid on relevant change. Approval and required host confirmation may happen at different times; the executor must revalidate the approved digest and current eligibility immediately before dispatch.
 
+> **Amended by ADR-0003.** The approval also binds an absolute `submissionDeadlineAt`: the
+> latest instant at which an order may take economic effect. The signed request is frozen at
+> the dispatch marker and the sending path cannot re-sign, so a worker that pauses across the
+> deadline has its request rejected by the venue rather than executed late. The owner is
+> consenting to a deadline, not to an open-ended authorization that a paused process can
+> revive.
+
 ## 9. First complete release versus later expansion
 
 | First complete release | Later direction; not required for release |
@@ -147,7 +166,7 @@ Multi-owner custody, pooled client money, internal crossing, leverage, or deriva
 | Correctness | All named invariants and high-risk recovery scenarios in `TEST-PLAN.md` pass; duplicate dispatch, double allocation, or unauthorized overspend blocks release. |
 | Durability | Restart at every persisted state boundary produces a valid replay/recovery path. No correctness-critical state exists only in worker memory or UI state. |
 | Performance | On the documented reference environment, proposal validation and plan preview p95 under 1 second for 10 strategies and 100 queued intents, excluding exchange latency; benchmark conditions published. |
-| Read freshness | Views display source age and synchronization state. A configurable freshness threshold blocks dispatch when necessary evidence is too old; defaults and rationale documented in the technical design. |
+| Read freshness | Views display source age and synchronization state. A configurable freshness threshold blocks dispatch when necessary evidence is too old. *(ADR-0009: four named freshness classes, each requiring a configured maximum age with no default; a missing value refuses startup rather than choosing how stale evidence may be before it authorizes a trade.)* |
 | Concurrency | One account's reservation and execution races are serialized or transactionally protected; parallel workers cannot create different active ownership of the same commitment. |
 | Accessibility | WCAG 2.2 AA target: keyboard-complete owner journey, visible focus, non-color statuses, minimum 4.5:1 normal-text contrast, and reduced-motion support. |
 | Responsive UX | Usable at widths 375, 768, 1024, and 1440 pixels; no page-level horizontal overflow. Wide detailed tables may use a labelled, bounded scroll region. |

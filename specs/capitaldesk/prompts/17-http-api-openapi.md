@@ -4,6 +4,10 @@
 **Requirements:** FR-001–FR-022  
 **Owns:** apps/api routes, runtime schemas and generated OpenAPI
 
+> **Amended by [ADR-0006](../../../docs/adr/0006-owner-lifecycle-contracts.md).** The route
+> table gains the thirteen enumerated lifecycle actions, each with its actor allowlist,
+> idempotency scope, expected-version requirement, event and sealed-plan effect.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

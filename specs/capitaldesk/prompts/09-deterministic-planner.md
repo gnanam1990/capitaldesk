@@ -4,6 +4,11 @@
 **Requirements:** FR-007–FR-012  
 **Owns:** packages/planner preview/compatibility algorithm
 
+> **Amended by [ADR-0008](../../../docs/adr/0008-intent-cohort-and-closure.md).** Exclude
+> expired, superseded, deferred, unauthorized and zero-delta intents **before**
+> opposite-direction evaluation, so an ineligible intent cannot cause an account-wide denial.
+> Sealing binds `cohortClosedAtSequence`.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

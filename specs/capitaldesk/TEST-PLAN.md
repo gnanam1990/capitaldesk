@@ -1,6 +1,12 @@
 # CapitalDesk — Adversarial Test Plan
 
-Status: implementation specification; no tests or live integrations have been executed for this document.
+Status: implementation specification, amended 8 September 2026.
+
+> **Amended.** Sections 4, 5, 6, 7, 8 and 11 carry amendments from ADR-0001 to ADR-0010, and
+> section 11 gains scenarios T-059 to T-070. See [AMENDMENTS.md](AMENDMENTS.md). The original
+> reviewed text is preserved in git history at commit `c68137e`.
+
+The 58 original scenarios and the 12 added here are specified, not executed by this document.
 
 Read alongside `PRD.md`, `TDD.md`, `IMPLEMENTATION-PLAN.md`, `UI-UX.md`, and `SOURCES.md`. If those documents disagree on a money or authorization boundary, record the conflict and stop that implementation slice until the contracts agree. Tests refer to invariant descriptions rather than unstable numbering.
 
@@ -50,6 +56,12 @@ Each strategy's actual quote cost is `199.199 USDT`. Final balances: A owns `300
 
 This exact fixture is deterministic test evidence. A live testnet run must report the fill quantities and commissions actually observed; it must not manufacture this partial fill for the video.
 
+> **Amended by ADR-0010.** This fixture's 0.1% quote fee on a BUY is policy
+> `QUOTE_FEE_FIXTURE_V1`, which the standard Binance schedule does not match. It remains
+> valid deterministic fixture policy and its golden numbers are unchanged, but it is refused
+> outside the `local` environment. The one initially enabled real policy is
+> `STANDARD_NO_BNB_V1`, where commission is taken in the received asset.
+
 ## 5. Intent, approval, and dispatch eligibility
 
 ### T-001 — Absolute targets do not become repeated buys
@@ -77,6 +89,12 @@ A requests BUY while B requests SELL on the same symbol. Assert `CONFLICT`, no v
 Mutate allocation order, strategy revision, symbol, side, quantity, limit, fee ceiling, account, epoch, policy version, inventory version, or expiry after approval. Assert the old approval cannot authorize the changed plan. No field may be silently repaired under an old approval.
 
 ### T-007 — Expiry at the dispatch boundary
+
+> **Amended by ADR-0003.** Also assert the absolute `submissionDeadlineAt`: the worst-case
+> venue acceptance cutoff must be bound to it, not the local transmission cutoff. Assert
+> against an independently written model of the documented venue predicate, at zero and both
+> extreme permitted clock offsets, with a simulated pause between the final check and the
+> physical send. Asserting the helper against itself proves nothing here.
 
 Approve before expiry, block the worker, advance the clock past expiry, then release it. Assert the atomic eligibility check refuses dispatch and persists a reason. Test exact-boundary comparisons and database/application clock disagreement.
 
@@ -154,6 +172,11 @@ Intercept every network dispatch path. Assert its dispatch marker and client ide
 
 ### T-025 — Kill after marker, before send
 
+> **Amended by ADR-0001.** This scenario proves non-resend; it does not prove recovery. Its
+> positive counterpart is T-059: with the sender provably fenced and no `SEND_ATTEMPTED`
+> record, the attempt reaches `NOT_SENT_PROVEN` and releases its reservations. T-060 is the
+> unfenced case, which must stay UNKNOWN and release nothing.
+
 Kill the broker after marker commit but before network send. Restart with a new lease owner. Assert the operation is `UNKNOWN`; neither automatic takeover nor automatic send occurs. Keep its reservations held pending the approved resolution process.
 
 ### T-026 — Exchange accepted, response lost
@@ -219,6 +242,11 @@ In approved-host mode, give CapitalDesk a valid owner approval but deny or omit 
 Expire the owner session, revoke an agent, or change its policy while a request is queued. Assert fresh dispatch eligibility observes the change. Read access, proposal rights, owner approval, and broker execution rights must have independent negative tests.
 
 ### T-041 — External orders and balance drift
+
+> **Amended by ADR-0002.** Separate detection from attribution. An external trade on a
+> different quote-sharing symbol must be **detected** and quarantine the pool; it is not
+> required to be attributed, because Binance offers no account-wide completed-trade endpoint.
+> Assert that the product reports the movement as unexplained rather than guessing a cause.
 
 Place or import an external manual order, transfer, or fill outside CapitalDesk. Assert drift is visible, new exposure pauses where attribution is unresolved, and current reservations are not freed from a misleading free-balance observation. No automatic compensating trade occurs.
 
@@ -295,6 +323,94 @@ Fixture owned base=0, target=1000 base atoms, approved gross BUY=1000. A full fi
 ### T-058 — SELL quantity includes base commission before admission
 
 Fixture owned base=2000, target=1000, lot step1, verified fee bound=1 base atom for any nonzero permitted execution. The largest admitted gross sale is999, not1000. A full sale with fee1 leaves net1000 and SATISFIED; actual fee0 leaves net1001 and PARTIAL. Test partial fill600 plus fee1 leaves1399. Gross order status and intent satisfaction remain separate, all asset posting signs follow the BUY/SELL matrix, and no replan is automatic. A fee above the verified bound preserves the actual observation and quarantines the checkpoint without debiting another strategy.
+
+### T-059 — A fenced sender proves the order was never sent
+
+Commit `DISPATCH_MARKED`, kill before any `SEND_ATTEMPTED` record, then fence the sender: the
+egress token is durably revoked with no `TOKEN_CONSUMED` record, or the host boot id has
+changed. With an account-wide open-order scan and trade backfill covering the window showing
+no record of the client order id, and coverage COMPLETE, assert the attempt reaches
+`NOT_SENT_PROVEN` and its reservations release. Assert no venue request was ever sent, and
+that pursuing the target again requires a new preview and approval rather than a resend.
+
+### T-060 — Without a fence, absence is never proven
+
+The same sequence with the sender unfenced — the process may still resume. Assert the attempt
+stays `UNKNOWN`, reservations stay held, and no elapsed time and no number of repeated
+NOT_FOUND responses moves it. Assert that reaching `IRRECOVERABLE_UNCERTAINTY` still releases
+nothing and retains the liability under its epoch.
+
+### T-061 — Coverage predicate, condition by condition
+
+Fail each of the five coverage conditions in turn and assert dispatch is blocked with the
+specific unmet condition named: a stream gap that was not backfilled; an account-wide
+open-order scan revealing an unknown order; a trade backfill that does not reach the last
+booked trade; bracketing snapshots disagreeing with booked effects; a source outside its
+freshness class. Assert an unobservable movement type yields `UNSUPPORTED`, not `INCOMPLETE`.
+
+### T-062 — Agreeing balances alone do not establish coverage
+
+Construct a window where bracketing snapshots agree exactly with booked effects while a stream
+gap remains unbackfilled. Assert coverage is not COMPLETE. Condition 4 is a cross-check, never
+the proof.
+
+### T-063 — A paused transmitter cannot be accepted late
+
+For an envelope the validator accepted, sweep true venue clock offsets across the permitted
+range and transmission pauses from zero to well beyond the window. Using an independent model
+of the documented venue predicate, assert there is no offset and no pause at which the venue
+accepts the bytes after the approved deadline. Include the counterexample envelope
+(`signedTimestamp = deadline - 900ms`, `recvWindow = 1000ms`, `skew = 100ms`) and assert the
+validator refuses it.
+
+### T-064 — An unknown venue status quarantines
+
+Deliver a status outside the known set. Assert it is stored raw, mapped to
+`UNSUPPORTED_OBSERVATION`, and quarantines the affected accounting rather than being mapped to
+the nearest familiar status. Repeat for an `EXPIRED_IN_MATCH` terminal with and without prior
+fills, and for a `TRADE_PREVENTION` report whose prevented quantity must never become a fill.
+
+### T-065 — Recovery from the authorization evidence bundle
+
+Lose the database after a sealed plan partially filled, retaining the content-addressed
+authorization bundle. Assert the original FIFO schedule is recovered exactly from the bundle
+and attribution matches the pre-loss expectation. Then repeat without the bundle and assert
+`RESTORE_ATTRIBUTION_UNRECOVERABLE`: no guessed order, no pro-rata split, no HOUSE assignment.
+
+### T-066 — Lifecycle effects at marked and unmarked plan states
+
+For every lifecycle action, assert its resolved effect at each plan state. An invalidating
+action against an unmarked plan invalidates it and releases reservations in the same
+transaction. The same action against a marked plan affects future authority only: the plan is
+untouched, reservations are unchanged, and no cancellation is claimed. Assert no action ever
+resolves to invalidation while marked. Assert the owner can halt and only the owner can
+resume, and that agents and viewers can perform none of these.
+
+### T-067 — Deferral survives a newer revision
+
+Defer a strategy's target, then submit revision N+1 from the same strategy. Assert it remains
+deferred until the owner reinstates or an explicit window passes, and that it cannot enter a
+plan in the meantime.
+
+### T-068 — Late opposing intent, before and after the marker
+
+Submit an opposing intent after seal but before `DISPATCH_MARKED`: assert the plan is
+invalidated with `PLAN_INVALIDATED_BY_OPPOSING_INTENT` and its reservations release. Submit
+one after the marker: assert the plan is untouched, the new intent is `QUEUED_NEXT_COHORT`,
+and the console shows both facts without implying either cancels the other.
+
+### T-069 — Concentration is uncomputable, not zero
+
+Remove the reference price for one asset in the denominator, or age it past its freshness
+class. Assert concentration is `UNCOMPUTABLE`, every risk-increasing action is blocked, and the
+asset is neither valued at zero nor skipped. Include a zero denominator and a HOUSE-only pool.
+
+### T-070 — An unproven fee policy refuses dispatch
+
+Select a policy whose cumulative debit bound is not proven. Assert dispatch is refused with
+`FEE_BOUND_UNPROVEN` before any venue request. Assert the fixture policy is refused outside the
+local environment, and that an observed BNB commission under a policy that requires BNB
+payment disabled quarantines rather than being absorbed.
 
 ## 12. Proposed command and evidence contract
 

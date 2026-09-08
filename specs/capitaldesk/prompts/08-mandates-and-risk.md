@@ -4,6 +4,12 @@
 **Requirements:** FR-005, FR-009, FR-011, FR-013  
 **Owns:** packages/domain policy engine and owner policy services
 
+> **Amended by [ADR-0009](../../../docs/adr/0009-risk-policy-arithmetic.md).** Concentration,
+> its denominator, HOUSE and fee-asset inclusion, the four freshness classes, the time
+> sources and the fail-closed defaults are now exact. A missing freshness configuration
+> refuses startup; an unpriceable denominator asset makes concentration `UNCOMPUTABLE` and
+> blocks risk-increasing actions rather than valuing it at zero.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

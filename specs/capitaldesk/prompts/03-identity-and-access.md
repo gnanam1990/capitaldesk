@@ -4,6 +4,11 @@
 **Requirements:** FR-001, FR-003, FR-021  
 **Owns:** apps/api auth, packages/domain permission model, identity migrations
 
+> **Amended by [ADR-0006](../../../docs/adr/0006-owner-lifecycle-contracts.md).**
+> Authorization is a per-action allowlist of actor scopes, not one required role per action.
+> Owner and operator may both halt a pool; only the owner may resume; agents and viewers may
+> perform no lifecycle mutation.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

@@ -4,6 +4,10 @@
 **Requirements:** FR-005, FR-010–FR-013  
 **Owns:** seal/reservation services and integrity constraints
 
+> **Amended by ADR-0008 and ADR-0010.** Sealing binds the cohort cutoff and the fee policy
+> version. A fee policy whose cumulative debit bound is unproven refuses sealing rather than
+> reserving against an assumed rate.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

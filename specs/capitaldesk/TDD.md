@@ -1,6 +1,8 @@
 # CapitalDesk — Technical Design Document
 
-Version 1.0, 8 September 2026. Proposed architecture; no runtime implementation or security audit is claimed.
+Version 1.1, amended 8 September 2026. Proposed architecture; no runtime implementation or security audit is claimed.
+
+> **Amended.** Sections 2, 3, 6, 7, 8, 9, 10, 11 and 13 carry amendments resolving review findings F1-F10. Each is marked inline and indexed in [AMENDMENTS.md](AMENDMENTS.md). The original reviewed text is preserved in git history at commit `c68137e`.
 
 ## 1. System contract
 
@@ -35,7 +37,13 @@ docs/                  gate evidence, ADRs, runbooks, readiness and proof
 specs/capitaldesk/     this specification pack
 ```
 
-Dependencies: contracts → pure domain/ledger → transactional DB and narrow adapters → planner/services → applications. Web never imports executor, database or secrets. Enforce a mechanical dependency check. A queue notification is a hint; PostgreSQL is the authority for work and economic state. Redis is unnecessary for the first release.
+Dependencies: contracts → pure domain/ledger → transactional DB and narrow adapters → planner/services → applications. Web never imports executor, database or secrets. Enforce a mechanical dependency check.
+
+> **Amended by ADR-0007.** The dependency check resolves every import to the workspace
+> package owning the file on disk, so a relative path climbing into another package — or
+> into its compiled `dist/` — is caught exactly like a package specifier. A `config` package
+> holds the validated environment contracts; it sits alongside `observability` above
+> `contracts` and below the applications. A queue notification is a hint; PostgreSQL is the authority for work and economic state. Redis is unnecessary for the first release.
 
 ## 3. Trust and execution modes
 
@@ -60,6 +68,17 @@ The write adapter invokes an allowlisted command/method with typed arguments; ne
 Only enable when the actual approved host, authenticated schemas, exact order identity, account/fill observations and per-action confirmation can be proven. The current public guide requires user confirmation for orders, cancels and transfers. A CapitalDesk local approval is not a substitute for native confirmation. The native confirmed payload must match the sealed child order.
 
 Do not share the execution-authorized host session with untrusted proposal agents. If the host exposes unrestricted trade tools to them or cannot bind the final call to the sealed order, the mode is OBSERVATION_ONLY. Never relabel a human-pasted order as controlled execution.
+
+### Credential classes
+
+> **Amended by ADR-0007.** Three separate secret classes with separate mounts:
+> `VENUE_READ` (USER_DATA) into the worker's account reader only; `VENUE_TRADE` (TRADE)
+> into the executor only; `OWNER_SESSION` into the API only. The console mounts none.
+> Configuration carries a *reference* — a path or secret-manager URI — never a value, and a
+> credential variable present in the wrong role is a startup refusal naming the variable.
+> The read and trade credentials must resolve to the same stable authenticated account id;
+> a mismatch blocks governance. Whether the configured account supports the split is an
+> authenticated integration question and remains open.
 
 ### Enforcement limit
 
@@ -139,6 +158,17 @@ Pre-existing unrelated orders cannot be adopted automatically. Bootstrap either 
 
 AVAILABLE → RESERVED is an internal claim transfer; it does not change ASSET_CONTROL. For BUY: reserve the verified cumulative gross quote-debit ceiling plus the supported quote-commission ceiling, within the explicitly approved maxQuoteDebitAtoms. The usual exact-quote fixture is ceil(limitPrice × requestedBaseQty) plus the fee ceiling; it is not a universal assumption about venue rounding. For SELL: reserve gross base quantity plus the validated worst cumulative base commission. Third-asset fees need explicit supported per-strategy fee claims/reservation; unsupported fee routing blocks dispatch.
 
+> **Amended by ADR-0010.** A fee policy is a capability that can be disabled. Each declares
+> whether a conservative cumulative debit bound has been proven for every permitted partial
+> fill; an unproven policy refuses dispatch with `FEE_BOUND_UNPROVEN` rather than assuming a
+> rate. The one initially enabled policy is `STANDARD_NO_BNB_V1`: commission in the received
+> asset at the verified per-symbol rate, per-fill ceiling `ceil(rate x fillQuantity)`,
+> requiring the account's BNB fee payment to be verified disabled. `BNB_DISCOUNT_UNPROVEN` is
+> defined and disabled, because the documented BNB-insufficiency fallback changes the debited
+> asset mid-order and has no proven bound. The golden example below uses
+> `QUOTE_FEE_FIXTURE_V1`, which remains valid fixture policy and is refused outside the local
+> environment.
+
 The adapter must document a conservative cumulative debit/fee bound valid across all permitted partial fills, including venue-native precision/rounding. A quoted rate alone does not prove a bound if repeated fill rounding can exceed it. Bind each strategy's per-asset debit/commission caps and the allocation-algorithm version into approval. If no affordable supported bound can be established, refuse that fee policy before dispatch. Do not assume exchange quoteQty always floors. Base BUY fees may be deducted from the newly acquired gross base only within an explicit fee cap; they cannot consume another strategy's base. Quote SELL fees may consume that strategy's attributed proceeds within the approved cap; extra existing-claim funding requires an explicit reservation. Unfilled proceeds never back unrelated new orders.
 
 Use the same account-wide lock for all claims, including fee assets. v1 rejects a second selected symbol; future multi-symbol support must retain account-wide base/quote collision protection. A frozen source balance does not turn unfilled SELL proceeds into BUY capacity. Snapshot `free + locked` is total balance, but only reconciled `free` can back new exchange lock requirements. Internal reservations and venue locked balance are mapped, not subtracted twice.
@@ -202,9 +232,29 @@ Delta is target minus that strategy's net owned base claim at the last eligible 
 
 Targets describe net holdings, while orders request gross quantity. For BUY admit gross g <= target − owned; a base commission may leave a residual below target. For SELL let D = owned − target and admit gross g only when g + worstSupportedBaseCommission(g) <= D and the available-claim constraint holds. The fee bound must cover partial as well as full fills. Thus a supported sell cannot move net ownership below its target; lower fees or lot rounding may leave a residual above it. Do not round g up to remove that residual. SATISFIED means the exact net target is reached; no implicit tolerance or automatic residual order is allowed in v1.
 
+> **Amended by ADR-0008.** Sealing binds `cohortClosedAtSequence`, the accepted-sequence at
+> which candidates stopped being eligible, and it is part of the plan digest. Proposals
+> arriving while a plan is sealed or in flight are accepted and recorded as
+> `QUEUED_NEXT_COHORT`, never rejected. A new opposing intent invalidates a sealed but
+> **unmarked** plan and releases its reservations; after the marker the plan is untouched,
+> because the order cannot be recalled. Expired, superseded, deferred, unauthorized and
+> zero-delta intents are excluded **before** opposite-direction evaluation, so an intent that
+> has stopped participating cannot cause an account-wide denial.
+
 ### Mandates
 
-Owner-configured per-strategy allocation limits, asset/symbol allowlists, max child quote notional, daily gross BUY notional, pool concentration bounds, price-data freshness, plan lifetime and optional owner risk-increase halt. Limits are deterministic versioned policy; LLM confidence is not a permission. An agent cannot create a priority flag that overrides an owner risk mandate.
+Owner-configured per-strategy allocation limits, asset/symbol allowlists, max child quote notional, daily gross BUY notional, pool concentration bounds, price-data freshness, plan lifetime and optional owner risk-increase halt.
+
+> **Amended by ADR-0009.** Concentration is
+> `value(s,a) / sum over every owner and asset of value(o,b)`, valued in the pool's reference
+> quote asset. HOUSE claims, fee assets and quarantined claims are all inside the
+> denominator; excluding HOUSE would let unassigned inventory reduce measured concentration.
+> The comparison is rational integer arithmetic, never a float. If any denominator asset has
+> no reference price inside its freshness class, concentration is `UNCOMPUTABLE` and every
+> risk-increasing action is blocked — it is never treated as zero. Freshness classes
+> (`PRICE_SNAPSHOT`, `ACCOUNT_SNAPSHOT`, `SYMBOL_METADATA`, `VENUE_CLOCK`) each require a
+> configured maximum age with **no default**; a missing value refuses startup. Eligibility
+> uses venue `serverTime`, latency budgets use the local monotonic clock, reporting uses UTC. Limits are deterministic versioned policy; LLM confidence is not a permission. An agent cannot create a priority flag that overrides an owner risk mandate.
 
 Daily gross budget = committed filled BUY notional + outstanding worst-case BUY reservations for the budget bucket. Pre-dispatch plans crossing the UTC boundary invalidate. Submitted orders retain their dispatch budget bucket until final, with next-day pool reservations still accounting for open economic exposure. Never recover risk budget by cancelling after an actual fill.
 
@@ -231,13 +281,27 @@ Plan: PREVIEW -> SEALED_AWAITING_APPROVAL -> APPROVED -> DISPATCH_PENDING
       -> EXECUTING -> RECONCILING -> COMPLETED | PARTIAL | UNFILLED
       \-> INVALIDATED | DECLINED | EXPIRED | MANUAL_REVIEW
 
-Dispatch attempt: PREPARED -> DISPATCH_MARKED -> ACKNOWLEDGED | REJECTED | UNKNOWN
-                                                  -> RECONCILING
+Dispatch attempt: PREPARED -> DISPATCH_MARKED -> SEND_ATTEMPTED -> ACKNOWLEDGED | REJECTED | UNKNOWN
+                  UNKNOWN -> ACKNOWLEDGED | REJECTED | NOT_SENT_PROVEN | IRRECOVERABLE_UNCERTAINTY
 
-Venue order observation: NEW | PARTIALLY_FILLED | FILLED | CANCELED | EXPIRED | REJECTED
+Venue order observation: NEW | PARTIALLY_FILLED | FILLED | CANCELED | PENDING_CANCEL
+                       | EXPIRED | EXPIRED_IN_MATCH | REJECTED | UNSUPPORTED_OBSERVATION
 Accounting: INCOMPLETE | PROVISIONAL | RECONCILED | CONFLICT
 Pool: BOOTSTRAPPING | READY | AWAITING_APPROVAL | IN_FLIGHT | QUARANTINED | HALTED
 ```
+
+> **Amended by ADR-0001.** `SEND_ATTEMPTED` commits durably immediately before the first
+> network byte. An attempt holding `DISPATCH_MARKED` without it, whose sender is provably
+> fenced, cannot have sent anything and resolves to `NOT_SENT_PROVEN`, which releases its
+> reservations but never authorizes a resend. Where the fence cannot be established the
+> attempt terminates at `IRRECOVERABLE_UNCERTAINTY`: an honest record that retains the
+> liability and releases nothing. Elapsed time and a repeated NOT_FOUND remain insufficient.
+>
+> **Amended by ADR-0004.** `EXPIRED_IN_MATCH` is a real Binance self-trade-prevention terminal
+> status and was missing. `UNSUPPORTED_OBSERVATION` preserves an unknown future status as raw
+> evidence with a fail-closed disposition instead of mapping it to the nearest familiar one.
+> `TRADE_PREVENTION` execution reports and their prevented quantities are retained as
+> evidence and are never fills.
 
 Keep transport attempt state, observed venue state, accounting state and intent satisfaction separate. An IOC can be EXPIRED with nonzero filled quantity. Plan COMPLETED means the approved gross child fully filled and financially reconciled; it does not mean every net target is SATISFIED. Plan PARTIAL means the child partly filled and its proven terminal remainder is accounted. A completed BUY or SELL can leave an intent PARTIAL because of fees or conservative quantity admission. A manual-review state is not proof of economic absence.
 
@@ -250,6 +314,16 @@ Owner timeout/decline can release only never-dispatched reservations in the same
 Use PostgreSQL SERIALIZABLE transactions, lock pool rows and asset claims in stable order, and retry serialization failure only before any external effect. Seal writes immutable allocations, reservations, source revisions, canonical plan hash and outbox row together.
 
 Plan hash binds pool/account/epoch, child client ID, side/symbol/type/TIF/quantity/limit, allocation order/amounts, allocation-algorithm version, per-strategy asset debit/commission caps, fee policy, intent revisions, mandate revision, baseline/ledger revisions, and expiry. Owner confirmation uses the authenticated session and CSRF defense. Native venue confirmation, if required, remains separate.
+
+> **Amended by ADR-0003.** The approval binds an absolute `submissionDeadlineAt` in addition
+> to `approvalExpiresAt`. The complete signed request, including its `timestamp` and
+> `recvWindow`, is produced inside the marker transaction and persisted with the marker; the
+> sending path holds no key material and no signing function, so an old marker cannot acquire
+> a fresh signature. The binding condition is that the **worst-case venue acceptance cutoff**
+> — `signedAtLocal + recvWindow + clockSkewBudget` — is no later than `submissionDeadlineAt`.
+> Binding the local transmission cutoff instead leaves a window of twice the skew budget in
+> which a paused sender's bytes remain valid after the approval lapsed. A `-1021` rejection is
+> decisive about that attempt only; it never resolves a different outstanding UNKNOWN.
 
 Before DISPATCH_MARKED, atomically revalidate owner approval, expiry, current mandates, no unresolved prior work, reconciled account/market age and exact payload digest. A newer snapshot revision may be compatible: retain the approved economic payload but recompute eligibility under a versioned predicate; if any bound changes or cannot be proven, invalidate and request a new preview/approval. Never automatically alter quantity/price/fees behind the same approval.
 
@@ -269,6 +343,20 @@ Financial finality requires: known terminal order, cumulative filled quantity/qu
 
 ### Account observation boundary
 
+> **Amended by ADR-0002.** Coverage is `COMPLETE` only when all five conditions hold:
+> (1) stream continuity across the window or a backfilled gap; (2) an account-wide open-order
+> scan at `t1` showing no unknown order; (3) per-symbol trade backfill by cursor with no gap to
+> the last booked trade; (4) bracketing balance snapshots differing by exactly the booked
+> effects — necessary, never sufficient; (5) every source inside its freshness class.
+>
+> The guarantee is narrowed honestly: Binance offers no account-wide completed-trade endpoint,
+> so v1 **detects** any unexplained movement account-wide but **attributes** activity only
+> within the declared observed symbol set. Complete attribution holds only while no external
+> trading occurs on the governed account; a violation is always detected and quarantines the
+> pool, and is not always explained. Deposits, withdrawals and internal transfers are
+> unobservable in the v1 testnet surface, so coverage is `UNSUPPORTED` where such a movement is
+> possible. No global upstream sequence guarantee is claimed.
+
 REST and streams are not assumed to be one atomic snapshot. During v1 reconciliation, pause governed dispatch, catch up exact known order/trade ranges, take before/after account snapshots and verify no intervening economic observations. Record snapshot request intervals, source timestamps, trade cursors and the justified cut. Matching repeated balances alone is not proof of complete history; a missing reliable cut remains INCOMPLETE.
 
 External trade, transfer, unknown open order, scale change, incomplete history or testnet reset quarantines the entire pool in v1. Never overwrite the control ledger to match a snapshot. Resolve with evidenced compensating postings, an explicit owner allocation or a new baseline epoch, retaining the old history. Outstanding UNKNOWN execution prevents rebaseline/release until resolved; rebaseline is not an escape from liability.
@@ -276,6 +364,17 @@ External trade, transfer, unknown open order, scale change, incomplete history o
 ## 10. Persistence schema
 
 All mutable business records include workspace/pool scope, optimistic version and created/updated UTC time. Economic deletion is prohibited; use closed/archived states with retained references.
+
+> **Amended by ADR-0005.** `authorizationDurability` is required configuration bound into the
+> plan digest. Under `SYNCHRONOUS_REPLICA` the sealed payload, approval, allocation schedule
+> and dispatch marker are committed to a replica in a distinct failure domain before the
+> executor may mark, giving RPO zero for the authorization record set. `AT_RISK_SINGLE_NODE`
+> is permitted for local and testnet work and the owner accepts that a loss covering a sealed
+> plan yields `RESTORE_ATTRIBUTION_UNRECOVERABLE`. Before marking, a content-addressed
+> authorization evidence bundle is appended outside the database's failure domain so FIFO is
+> recoverable when the database is not. Where neither survives, the reconciler records
+> `RESTORE_ATTRIBUTION_UNRECOVERABLE` and stops: it never guesses a FIFO order, splits pro
+> rata or assigns to HOUSE. A hash cannot recover a lost payload.
 
 | Table | Key facts and constraints |
 |---|---|
@@ -323,6 +422,19 @@ Version `/v1`. Money fields are atom strings plus asset/scale; never anonymous n
 | GET /events | authenticated SSE with persisted Last-Event-ID resume |
 | GET /health/live; GET /health/ready | process versus DB/source/executor readiness |
 
+> **Amended by ADR-0006.** The lifecycle actions the UI promised are now enumerated with
+> allowed actor scopes, idempotency scope, expected-version requirement, emitted event and
+> sealed-plan effect: `INTENT_DEFER`, `INTENT_REINSTATE`, `POLICY_VERSION_PUBLISH`,
+> `CREDENTIAL_ISSUE`, `CREDENTIAL_REVOKE`, `CREDENTIAL_ROTATE`, `STRATEGY_ARCHIVE`,
+> `ACCOUNT_LINK`, `ACCOUNT_UNLINK`, `POOL_CREATE`, `POOL_HALT`, `POOL_RESUME`,
+> `POOL_EPOCH_ROTATE`. Authorization is an allowlist per action, not one required role: owner
+> and operator may both halt, only the owner may resume, and agents and viewers may perform
+> none. Against an unmarked plan an invalidating action invalidates it and releases its
+> reservations; against a marked plan the same action affects **future dispatch authority
+> only** — it does not invalidate the plan, release reservations, or cancel anything the
+> venue accepted. Owner deferral binds the `strategyTargetKey`, so a newer revision from the
+> same strategy cannot escape it.
+
 There is no public generic placeOrder, sign, arbitrary command, raw RPC or arbitrary destination endpoint. The executor consumes internally authenticated sealed jobs only. Agent credentials cannot approve/seal/allocate/halt/resume/admin by default; narrowly scoped proposal withdrawal before sealing can be added as a distinct permission.
 
 Pagination caps, retention and idempotency-response lifetime are documented. Keep permanent economic request tombstones even after large response bodies expire; expired cached response must never cause a second economic operation. CSRF protects cookie-authenticated mutations; scoped machine keys use a separate route auth path.
@@ -338,6 +450,10 @@ Two reference agents use real permitted market observations to form proposals fo
 Release performance requirement: on a declared reference machine with 10 strategies and 100 queued intents, p95 local proposal validation and preview under 1 second excluding venue calls. Stretch capacity benchmark: 100 registered strategies, 20 proposal writes/second sustained for 60 seconds, p95 preview under 500ms and p95 API reads under 300ms for 50 concurrent viewers. These are proposed measurement targets, not observed performance. v1 remains one in-flight plan per pool; do not claim HFT throughput.
 
 Configure source freshness and recovery latency from measured upstream capabilities; document values rather than inventing universal exchange guarantees. Alert on age of UNKNOWN, last complete account cut, unapplied fills, unexplained delta, queue lag, fee mismatch and authorization failure. Bounded retries respect Retry-After. Logs avoid credential material and sensitive raw headers.
+
+> **Amended by ADR-0005.** A restored deployment starts HALTED and RECONCILING and reconciles
+> dispatch history against the venue before resuming. A restored copy starting while the
+> original still runs must fail the governance lease check rather than both governing.
 
 Backups retain database plus encrypted configuration references and evidence manifests. Restore starts HALTED/RECONCILING; it never drains a restored dispatch outbox into trades. Reconcile dispatch history with the exchange before resuming. Fault injection endpoints are absent from production builds and cannot route to real-money hosts.
 

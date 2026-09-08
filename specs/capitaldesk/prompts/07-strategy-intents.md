@@ -4,6 +4,11 @@
 **Requirements:** FR-003, FR-006, FR-007, FR-021  
 **Owns:** intent/strategy services and proposal routes
 
+> **Amended by ADR-0006 and ADR-0008.** Implement defer and reinstate with the deferral bound
+> to the `strategyTargetKey`, so revision N+1 cannot escape an owner deferral. Proposals
+> arriving while a plan is sealed or in flight are accepted as `QUEUED_NEXT_COHORT`, never
+> rejected.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

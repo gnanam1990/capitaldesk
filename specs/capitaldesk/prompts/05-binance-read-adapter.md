@@ -4,6 +4,12 @@
 **Requirements:** FR-001, FR-002, FR-011, FR-018  
 **Owns:** packages/binance read-only interfaces, worker ingest adapters
 
+> **Amended by ADR-0002, ADR-0004 and ADR-0007.** Implement the five-condition coverage
+> predicate with persisted per-symbol trade cursors and the account-wide open-order scan.
+> Preserve `EXPIRED_IN_MATCH`, `TRADE_PREVENTION` and unknown statuses as raw evidence. The
+> reader uses the separate `VENUE_READ` credential and must never be given a TRADE key; its
+> authenticated account id must equal the executor's.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

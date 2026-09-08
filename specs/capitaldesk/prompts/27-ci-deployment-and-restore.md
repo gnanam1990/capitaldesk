@@ -4,6 +4,11 @@
 **Requirements:** FR-022–FR-024  
 **Owns:** CI, containers, release manifests, migration and restore scripts
 
+> **Amended by [ADR-0005](../../../docs/adr/0005-authorization-durability.md).** Declare the
+> authorization durability class and prove it. Restore rehearsals must include a backup
+> predating a sealed plan, recovery from the authorization evidence bundle retaining the
+> original FIFO, and the case where neither survives and attribution is unrecoverable.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt
