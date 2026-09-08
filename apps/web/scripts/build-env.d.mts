@@ -4,4 +4,4 @@ export declare function resolveBuildEnv(input: {
   loadedFiles: Record<string, string | undefined>;
 }):
   | { ok: true; env: Record<string, string>; applied: string[] }
-  | { ok: false; declared: string; missing: string[] };
+  | { ok: false; declared: string; missing: string[]; conflictsWith?: string };

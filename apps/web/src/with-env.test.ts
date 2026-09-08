@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -15,6 +15,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  */
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WRAPPER = path.join(WEB_DIR, 'scripts', 'with-env.mjs');
+/**
+ * Signal forwarding is a property of the wrapper, not of Next. This probe runs the wrapper's
+ * own forwarding logic around an arbitrary child so the test does not depend on how Next
+ * happens to handle a signal.
+ */
+const WRAPPER_CHILD_PROBE = path.join(WEB_DIR, 'scripts', 'forward-signals.mjs');
 
 const manifest = JSON.parse(readFileSync(path.join(WEB_DIR, 'package.json'), 'utf8')) as {
   scripts: Record<string, string>;
@@ -173,4 +179,68 @@ describe('the wrapper as a process', () => {
     expect(ran.status, ran.stderr).toBe(0);
     expect(ran.stderr).not.toContain('local defaults applied');
   });
+  it('refuses a build whose two environment declarations disagree', () => {
+    const ran = run(cleanEnv({ CAPITALDESK_ENV: 'testnet', NEXT_PUBLIC_CAPITALDESK_ENV: 'local' }));
+    expect(ran.status).toBe(2);
+    expect(ran.stderr).toContain('CAPITALDESK_ENV is testnet');
+    expect(ran.stderr).toContain('NEXT_PUBLIC_CAPITALDESK_ENV is local');
+    expect(ran.stdout).not.toMatch(/Next\.js v/);
+  });
+
+  it('forwards SIGTERM to the child and does not outlive it', async () => {
+    // A supervisor's SIGTERM reached the wrapper alone, so `pnpm start` looked stopped while
+    // Next kept serving. The child here is a stand-in that reports the signal it received.
+    const script = path.join(envDir, 'child.mjs');
+    writeFileSync(
+      script,
+      [
+        "process.on('SIGTERM', () => { process.stdout.write('child-received-SIGTERM\\n'); process.exit(7); });",
+        "process.stdout.write('child-ready\\n');",
+        'setInterval(() => {}, 1000);',
+      ].join('\n'),
+    );
+
+    const child = spawn(process.execPath, [WRAPPER_CHILD_PROBE, script], {
+      cwd: envDir,
+      // Next's type augmentation makes NODE_ENV a required member of ProcessEnv, so the web
+      // tsconfig needs this assertion; the tools tsconfig has no such augmentation and calls
+      // it unnecessary. Both must pass, and the child deliberately has no NODE_ENV.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+      env: cleanEnv() as NodeJS.ProcessEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
+
+    await new Promise<void>((resolve, reject) => {
+      const deadline = setTimeout(
+        () => reject(new Error(`child never started: ${stdout}`)),
+        15_000,
+      );
+      const poll = setInterval(() => {
+        if (stdout.includes('child-ready')) {
+          clearInterval(poll);
+          clearTimeout(deadline);
+          resolve();
+        }
+      }, 25);
+    });
+
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve) => {
+        child.once('exit', (code, signal) => resolve({ code, signal }));
+      },
+    );
+    child.kill('SIGTERM');
+    const outcome = await Promise.race([
+      exited,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('wrapper did not exit')), 15_000),
+      ),
+    ]);
+
+    expect(stdout).toContain('child-received-SIGTERM');
+    // The child's own exit code decides the wrapper's, so a supervisor sees what the child did.
+    expect(outcome.code).toBe(7);
+  }, 40_000);
 });

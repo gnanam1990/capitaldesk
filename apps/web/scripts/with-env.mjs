@@ -26,6 +26,7 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolveBuildEnv } from './build-env.mjs';
+import { forwardSignalsTo } from './forward.mjs';
 
 const args = process.argv.slice(2);
 if (args.length === 0) {
@@ -50,11 +51,19 @@ const { combinedEnv } = loadEnvConfig(envDir, args[0] === 'dev', {
 
 const resolved = resolveBuildEnv({ explicit, loadedFiles: combinedEnv });
 if (!resolved.ok) {
-  process.stderr.write(
-    `refusing to run \`next ${args.join(' ')}\` for ${resolved.declared} without: ${resolved.missing.join(', ')}\n` +
-      'These values are baked into the build, so a default here would ship a console ' +
-      'configured for somewhere else.\n',
-  );
+  if (resolved.conflictsWith !== undefined) {
+    process.stderr.write(
+      `refusing to run \`next ${args.join(' ')}\`: CAPITALDESK_ENV is ${resolved.declared} but ` +
+        `NEXT_PUBLIC_CAPITALDESK_ENV is ${resolved.conflictsWith}. One deployment has one ` +
+        'environment; the console would report the other.\n',
+    );
+  } else {
+    process.stderr.write(
+      `refusing to run \`next ${args.join(' ')}\` for ${resolved.declared} without: ${resolved.missing.join(', ')}\n` +
+        'These values are baked into the build, so a default here would ship a console ' +
+        'configured for somewhere else.\n',
+    );
+  }
   process.exit(2);
 }
 if (resolved.applied.length > 0) {
@@ -69,8 +78,6 @@ const next = spawn(process.execPath, [nextBin, ...args], {
   stdio: 'inherit',
   shell: false,
 });
-next.on('exit', (code, signal) => process.exit(signal !== null ? 1 : (code ?? 1)));
-next.on('error', (error) => {
-  process.stderr.write(`${error.message}\n`);
-  process.exit(1);
-});
+
+// The wrapper is a transparent parent: see forward.mjs for what that means and why.
+forwardSignalsTo(next);

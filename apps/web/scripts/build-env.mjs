@@ -29,7 +29,7 @@ function present(value) {
 
 /**
  * @param {{ explicit: Record<string, string|undefined>, loadedFiles: Record<string, string|undefined> }} input
- * @returns {{ ok: true, env: Record<string, string>, applied: string[] } | { ok: false, declared: string, missing: string[] }}
+ * @returns {{ ok: true, env: Record<string, string>, applied: string[] } | { ok: false, declared: string, missing: string[] } | { ok: false, declared: string, conflictsWith: string }}
  */
 export function resolveBuildEnv({ explicit, loadedFiles }) {
   /** @type {Record<string, string>} */
@@ -42,6 +42,22 @@ export function resolveBuildEnv({ explicit, loadedFiles }) {
 
   if (!present(env.NEXT_PUBLIC_CAPITALDESK_BUILD_ID) && present(env.CAPITALDESK_BUILD_ID)) {
     env.NEXT_PUBLIC_CAPITALDESK_BUILD_ID = env.CAPITALDESK_BUILD_ID;
+  }
+
+  // Two declarations of the same fact must agree. Accepting both independently let a console
+  // be built for one environment while the process declared another, and the console's own
+  // banner is the one place an operator has to be able to trust.
+  if (
+    present(env.CAPITALDESK_ENV) &&
+    present(env.NEXT_PUBLIC_CAPITALDESK_ENV) &&
+    env.CAPITALDESK_ENV !== env.NEXT_PUBLIC_CAPITALDESK_ENV
+  ) {
+    return {
+      ok: false,
+      declared: env.CAPITALDESK_ENV,
+      conflictsWith: env.NEXT_PUBLIC_CAPITALDESK_ENV,
+      missing: [],
+    };
   }
 
   const declared = env.CAPITALDESK_ENV ?? env.NEXT_PUBLIC_CAPITALDESK_ENV ?? 'local';
