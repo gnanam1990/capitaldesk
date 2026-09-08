@@ -4,9 +4,9 @@ The single authoritative record of what is built, what is proven and what is blo
 Updated with every milestone. Where a claim is not backed by a command in this document, it
 is not a claim.
 
-- **Milestone:** M4 — strategy lifecycle and versioned absolute targets (module 07).
-- **Branch:** `feat/m4-strategy-intents`, branched from `main` at `1b26bb2`.
-- **Pull request:** pending after the verification recorded below.
+- **Milestone:** M5 — deterministic capital mandates (module 08).
+- **Branch:** `feat/m5-policy-mandates`, branched from `main` at `6d83497`.
+- **Pull request:** pending after the fast local sanity checks recorded below.
 - **Previous milestones:** M0 merged as
   [#1](https://github.com/gnanam1990/capitaldesk/pull/1); M1 merged as
   [#2](https://github.com/gnanam1990/capitaldesk/pull/2) at `f2f4d59`; M2 merged as
@@ -22,6 +22,9 @@ is not a claim.
 - **Module 07:** PARTIAL — all owned target acceptance and lifecycle paths are complete;
   planner-owned T-004/T-005 and the generated-child portion of T-010 need module 09. See
   [docs/handoffs/07.md](handoffs/07.md).
+- **Module 08:** complete for owned paths — owner mandate, immutable policy journal and
+  budget-hold paths are implemented and focused PostgreSQL tests pass. See
+  [docs/handoffs/08.md](handoffs/08.md).
 
 ## What this milestone is, and is not
 
@@ -65,6 +68,7 @@ BLOCKED and is named as such rather than claimed.
 | Worker ingest catch-up                   | Implemented                      | `apps/worker`, 31 integration cases on real PostgreSQL                         |
 | Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 61 unit + 6 property; migration 0005, 65 integration cases   |
 | Strategy targets (module 07)             | Implemented                      | 10 unit, 12 real-PostgreSQL route/repository cases; migration 0006             |
+| Capital mandates (module 08)             | Implemented                      | 11 unit cases; 5 policy PostgreSQL cases plus intent regression suite          |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
@@ -75,11 +79,10 @@ BLOCKED and is named as such rather than claimed.
 | Economic core (M1-M3)                    | In progress; module 06 complete  | Opening inventory, epoch claims and owner allocations                          |
 | Venue integration                        | **Blocked**, see below           | —                                                                              |
 
-## Commands and results at this head
+## Commands and results at this branch
 
-Run from a clean tree at the branch head. The head SHA is recorded in the pull request
-description rather than here, so this document does not have to be rewritten by the commit
-that would change it:
+Module 08 is using the user's accelerated gate. The last full-workspace results below belong
+to merged module 07. Module 08 adds the targeted results listed after them.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -99,6 +102,14 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run test:integration`                   | **417 passed**, 26 files, against PostgreSQL 17.10          |
 | `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
 | `pnpm run build`                              | pass — all packages and apps                                |
+
+Module 08 targeted results:
+
+| Command                             | Result                              |
+| ----------------------------------- | ----------------------------------- |
+| `pnpm typecheck`                    | pass                                |
+| mandate unit file                   | 11 passed                           |
+| policy and intent integration files | 15 passed on local PostgreSQL 17.10 |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
@@ -132,7 +143,7 @@ proof**, which is why the code reports execution as unavailable rather than assu
 
 ## Next action
 
-Open and merge the module 07 pull request after the branch-head checks pass, then implement
-module 08 immutable mandates. Modules 09 and 10 are unblocked by the accepted target and claim
-models. A live bootstrap still cannot run because obtaining a COMPLETE observation cut needs
-the `VENUE_READ` credential that does not exist.
+Open module 08's pull request, let required PostgreSQL CI execute the migration and repository
+tests, then merge it. Modules 09 and 10 are unblocked by the target, claim and mandate models.
+A live bootstrap still cannot run because obtaining a COMPLETE observation cut needs the
+`VENUE_READ` credential that does not exist.

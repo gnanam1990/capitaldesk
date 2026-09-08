@@ -56,6 +56,8 @@ interface PoolMarketRow {
   readonly quote_asset_scale: string | null;
   readonly max_target_base_atoms: string | null;
   readonly active_policy_version: string | null;
+  readonly strategy_max_target_base_atoms: string | null;
+  readonly strategy_max_plan_quote_debit_atoms: string | null;
 }
 
 interface ConfiguredPoolMarketRow extends PoolMarketRow {
@@ -66,6 +68,8 @@ interface ConfiguredPoolMarketRow extends PoolMarketRow {
   readonly quote_asset_scale: string;
   readonly max_target_base_atoms: string;
   readonly active_policy_version: string;
+  readonly strategy_max_target_base_atoms: string;
+  readonly strategy_max_plan_quote_debit_atoms: string;
 }
 
 interface IntentRow {
@@ -120,16 +124,22 @@ async function currentEpochAndMarket(
   client: Queryable,
   workspaceId: string,
   poolId: string,
+  strategyId: string,
 ): Promise<ConfiguredPoolMarketRow> {
   const result = await client.query<PoolMarketRow>(
     `SELECT e.epoch, p.selected_symbol, p.base_asset_code, p.base_asset_scale,
             p.quote_asset_code, p.quote_asset_scale, p.max_target_base_atoms::text,
-            p.active_policy_version::text
+            p.active_policy_version::text,
+            limits.max_target_base_atoms::text AS strategy_max_target_base_atoms,
+            limits.max_plan_quote_debit_atoms::text AS strategy_max_plan_quote_debit_atoms
        FROM pools p
        JOIN baseline_epochs e USING (workspace_id, pool_id)
+       LEFT JOIN strategy_policy_limits limits
+         ON limits.workspace_id=p.workspace_id AND limits.pool_id=p.pool_id
+        AND limits.policy_version=p.active_policy_version AND limits.strategy_id=$3
       WHERE p.workspace_id=$1 AND p.pool_id=$2 AND e.closed_at IS NULL
       FOR UPDATE OF p, e`,
-    [workspaceId, poolId],
+    [workspaceId, poolId, strategyId],
   );
   const row = result.rows[0];
   if (row === undefined) {
@@ -142,7 +152,9 @@ async function currentEpochAndMarket(
     row.quote_asset_code === null ||
     row.quote_asset_scale === null ||
     row.max_target_base_atoms === null ||
-    row.active_policy_version === null
+    row.active_policy_version === null ||
+    row.strategy_max_target_base_atoms === null ||
+    row.strategy_max_plan_quote_debit_atoms === null
   ) {
     violate(
       'POLICY_CONFIGURATION_MISSING',
@@ -391,7 +403,7 @@ export class IntentRepository {
       untilAt: input.untilAt?.toISOString() ?? null,
     });
     return transactional(this.pool, async (client): Promise<TargetControlOutcome> => {
-      await currentEpochAndMarket(client, input.workspaceId, input.poolId);
+      await currentEpochAndMarket(client, input.workspaceId, input.poolId, input.strategyId);
       const replay = await IdempotencyRepository.beginOn(client, {
         scopeKind: 'strategyTarget',
         scopeId,
@@ -545,7 +557,12 @@ export class IntentRepository {
     // the complete write predicate for one pool, and READ COMMITTED refreshes the statement
     // snapshot after waiting, so every contender observes the winner before deciding.
     return await transactional(this.pool, async (client): Promise<ProposeIntentOutcome> => {
-      const market = await currentEpochAndMarket(client, input.workspaceId, input.poolId);
+      const market = await currentEpochAndMarket(
+        client,
+        input.workspaceId,
+        input.poolId,
+        input.strategyId,
+      );
       const replay = await IdempotencyRepository.beginOn(client, {
         scopeKind: 'strategyTarget',
         scopeId,
@@ -570,11 +587,14 @@ export class IntentRepository {
           symbol: market.selected_symbol,
           baseAsset: configuredAsset(market.base_asset_code, market.base_asset_scale),
           quoteAsset: configuredAsset(market.quote_asset_code, market.quote_asset_scale),
-          maxTargetBaseAtoms: BigInt(market.max_target_base_atoms),
+          maxTargetBaseAtoms: BigInt(market.strategy_max_target_base_atoms),
           activePolicyVersion: BigInt(market.active_policy_version),
         },
         input.now ?? new Date(),
       );
+      if (validated.maxQuoteDebit.atoms > BigInt(market.strategy_max_plan_quote_debit_atoms)) {
+        violate('POLICY_BUDGET_EXCEEDED', 'target exceeds the strategy per-plan quote debit limit');
+      }
 
       const sameRevision = await client.query<IntentRow>(
         `SELECT intent_id,strategy_revision::text,request_digest,accepted_sequence::text,
