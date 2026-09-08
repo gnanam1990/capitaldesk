@@ -23,8 +23,8 @@ function draft(policyVersion = '1', strategyDaily = '1000', poolDaily = '1000'):
   return {
     policyVersion,
     selectedSymbol: 'BTCUSDT',
-    baseAsset: 'BTC:v1',
-    quoteAsset: 'USDT:v1',
+    baseAsset: 'BTC@v1',
+    quoteAsset: 'USDT@v1',
     maxPoolPlanQuoteDebitAtoms: '1000',
     maxDailyGrossBuyQuoteAtoms: poolDaily,
     poolConcentrationNumerator: '8',
@@ -120,7 +120,7 @@ describeIfDatabase('owner mandate journal', () => {
   });
 
   it('refuses agent-authored policy changes regardless of prompt content', async () => {
-    await expect(
+    expect(() =>
       repository.publish({
         workspaceId: WORKSPACE,
         poolId: POOL,
@@ -129,7 +129,7 @@ describeIfDatabase('owner mandate journal', () => {
         draft: draft(),
         actor: AGENT,
       }),
-    ).rejects.toBeInstanceOf(ContractViolation);
+    ).toThrow(ContractViolation);
   });
 
   it('serializes same-pool concurrent exhaustion so only one hold wins', async () => {

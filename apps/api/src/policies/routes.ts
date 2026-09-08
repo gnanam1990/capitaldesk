@@ -45,8 +45,8 @@ const POLICY_SCHEMA = {
   properties: {
     policyVersion: POSITIVE_SCHEMA,
     selectedSymbol: { type: 'string', pattern: '^[A-Z0-9]{2,32}$' },
-    baseAsset: { type: 'string', pattern: '^[A-Z0-9]{1,16}:[A-Za-z0-9._-]{1,32}$' },
-    quoteAsset: { type: 'string', pattern: '^[A-Z0-9]{1,16}:[A-Za-z0-9._-]{1,32}$' },
+    baseAsset: { type: 'string', pattern: '^[A-Z0-9]{1,16}@[A-Za-z0-9._-]{1,32}$' },
+    quoteAsset: { type: 'string', pattern: '^[A-Z0-9]{1,16}@[A-Za-z0-9._-]{1,32}$' },
     maxPoolPlanQuoteDebitAtoms: ATOMS_SCHEMA,
     maxDailyGrossBuyQuoteAtoms: ATOMS_SCHEMA,
     poolConcentrationNumerator: ATOMS_SCHEMA,
