@@ -60,28 +60,29 @@ pnpm run verify
 CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm run test:integration
 ```
 
-| Command                     | Result                                             |
-| --------------------------- | -------------------------------------------------- |
-| `pnpm run format:check`     | pass                                               |
-| `pnpm run typecheck`        | pass                                               |
-| `pnpm run lint`             | pass                                               |
-| `pnpm run check:layering`   | pass — 9 packages, 45 crossings checked            |
-| `pnpm run check:secrets`    | pass — 236 files scanned                           |
-| `pnpm run test:unit`        | **511 passed**, 0 skipped, 31 files                |
-| `pnpm run test:property`    | **13 passed**, seed 20260908                       |
-| `pnpm run test:integration` | **241 passed**, 19 files, against PostgreSQL 17.10 |
-| `pnpm run build`            | pass — all packages and apps                       |
+| Command                                       | Result                                                      |
+| --------------------------------------------- | ----------------------------------------------------------- |
+| `pnpm run format:check`                       | pass                                                        |
+| `pnpm run typecheck`                          | pass                                                        |
+| `pnpm run lint`                               | pass                                                        |
+| `pnpm run check:layering`                     | pass — 9 packages, 46 crossings checked                     |
+| `pnpm run check:secrets`                      | pass — 240 files scanned                                    |
+| `pnpm run test:unit`                          | **513 passed**, 0 skipped, 32 files                         |
+| `pnpm run test:property`                      | **13 passed**, seed 20260908                                |
+| `pnpm run test:integration`                   | **259 passed**, 21 files, against PostgreSQL 17.10          |
+| `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
+| `pnpm run build`                              | pass — all packages and apps                                |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
 | Suite       | Count | Where                                                                                                           |
 | ----------- | ----- | --------------------------------------------------------------------------------------------------------------- |
-| unit        | 507   | contracts 284, web 63, tools 37, api 36, config 35, domain 29, observability 23 (by package, from the reporter) |
+| unit        | 513   | contracts 284, web 65, tools 39, api 38, config 35, domain 29, observability 23 (by package, from the reporter) |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                                  |
-| integration | 241   | journal 99, auth 56, migrations 30, CLI 18, worker/executor 12, identity scope 11, API 8                        |
+| integration | 259   | journal 117, auth 60, migrations 30, CLI 20, worker/executor 12, identity scope 11, API 9                       |
 
-No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 88
-integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 99
+No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 91
+integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 117
 integration cases in [docs/handoffs/04.md](handoffs/04.md) — not the workspace figures.
 
 Toolchain: Node 22.23.1, pnpm 11.10.0, TypeScript 5.9.3, Fastify 5.12.3, Next 16.3.4,
@@ -95,6 +96,7 @@ React 19.2.8, Vitest 4.1.11, zod 4.5.4, PostgreSQL 17.10 (Homebrew, local).
 | No pre-trade fee bound derived                                       | Every shipped fee policy refuses dispatch (ADR-0010).                                                                                         | Module 14 derives a bound with an evidenced minimum fill size and partition granularity.     |
 | No producer of a movement-universe proof or gap recovery certificate | Coverage cannot reach COMPLETE against a real account, so governed dispatch is unavailable (ADR-0002).                                        | Module 05, against a real account, with concrete cursor and retention evidence.              |
 | Competition eligibility                                              | Unverified. Not pursued by this build.                                                                                                        | Separate, explicitly authorized decision.                                                    |
+| `NOT_SENT_PROVEN` is unreachable                                     | A marked attempt that never sent cannot be resolved, so its reservation stays held. Conservative, and the only honest state for module 04.    | Module 15 records authoritative non-send evidence and adds the forward migration binding it. |
 
 None of these blocks the independent implementation work in M1-M3. They block **claims of
 proof**, which is why the code reports execution as unavailable rather than assuming it.
