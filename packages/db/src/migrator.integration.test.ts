@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
+  BookkeepingTableIncompatible,
   MigrationChecksumMismatch,
   MigrationHistoryDiverged,
   checksumOf,
@@ -243,6 +244,206 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
 
     const rows = await client.query<{ id: number }>('SELECT id FROM pre_existing');
     expect(rows.rows).toEqual([{ id: 42 }]);
+  });
+
+  // --- regression: PR 1 review, concurrent deploys both applied the same migration -----
+  // Two clients read the same pending history and both executed it; the loser failed on a
+  // duplicate relation rather than waiting. Reproduced with a 400ms migration: one succeeded,
+  // the other failed on pg_type_typname_nsp_index in 421ms.
+  describe('concurrent migration runs are serialized', () => {
+    const slowSql = 'SELECT pg_sleep(0.4); CREATE TABLE overlap_target(id int primary key);';
+    const slow: MigrationFile[] = [
+      { version: '0001_overlap', sql: slowSql, checksum: checksumOf(slowSql) },
+    ];
+
+    async function connectInSchema(): Promise<Client> {
+      const extra = new Client({ connectionString: DATABASE_URL });
+      await extra.connect();
+      await extra.query(`SET search_path TO ${schema}`);
+      return extra;
+    }
+
+    it('applies exactly once when two clients migrate at the same time', async () => {
+      const [a, b] = await Promise.all([connectInSchema(), connectInSchema()]);
+      try {
+        const results = await Promise.all([
+          migrate(a, slow, { appliedBy: 'client-a', buildId: 'a' }),
+          migrate(b, slow, { appliedBy: 'client-b', buildId: 'b' }),
+        ]);
+
+        // Both calls succeed; exactly one of them did the work.
+        const applied = results.flatMap((r) => r.applied);
+        const skipped = results.flatMap((r) => r.alreadyApplied);
+        expect(applied).toEqual(['0001_overlap']);
+        expect(skipped).toEqual(['0001_overlap']);
+
+        const rows = await client.query<{ n: number }>(
+          'SELECT count(*)::int AS n FROM schema_migrations',
+        );
+        expect(rows.rows[0]?.n).toBe(1);
+      } finally {
+        await Promise.all([a.end(), b.end()]);
+      }
+    });
+
+    it('releases the lock so a later run is not blocked', async () => {
+      const extra = await connectInSchema();
+      try {
+        await migrate(extra, slow, { appliedBy: 'first', buildId: 'f' });
+        // Would hang if the advisory lock leaked rather than being released in `finally`.
+        const second = await migrate(client, slow, { appliedBy: 'second', buildId: 's' });
+        expect(second.applied).toEqual([]);
+      } finally {
+        await extra.end();
+      }
+    });
+
+    it('releases the lock even when the run is refused', async () => {
+      const extra = await connectInSchema();
+      try {
+        await migrate(extra, slow, { appliedBy: 'first', buildId: 'f' });
+        // A divergent manifest throws; the lock must still be released.
+        await expect(
+          migrate(extra, [], { appliedBy: 'older', buildId: 'o' }),
+        ).rejects.toBeInstanceOf(MigrationHistoryDiverged);
+        const after = await migrate(client, slow, { appliedBy: 'after', buildId: 'a' });
+        expect(after.alreadyApplied).toEqual(['0001_overlap']);
+      } finally {
+        await extra.end();
+      }
+    });
+  });
+
+  // --- regression: PR 1 review, an unrelated schema_migrations was trusted --------------
+  // CREATE TABLE IF NOT EXISTS silently accepts a relation that merely shares the name, and
+  // the migrator would then record against columns that do not mean what it thinks.
+  describe('a pre-existing bookkeeping relation is validated', () => {
+    it('refuses a table with the right name and the wrong columns', async () => {
+      await client.query('CREATE TABLE schema_migrations (id int primary key, note text)');
+      const files = await loadMigrations(MIGRATIONS_DIR);
+      await expect(
+        migrate(client, files, { appliedBy: 'vitest', buildId: 'b' }),
+      ).rejects.toBeInstanceOf(BookkeepingTableIncompatible);
+    });
+
+    it('names what is wrong with it', async () => {
+      await client.query('CREATE TABLE schema_migrations (id int primary key, note text)');
+      try {
+        await migrate(client, await loadMigrations(MIGRATIONS_DIR), {
+          appliedBy: 'vitest',
+          buildId: 'b',
+        });
+        throw new Error('expected a refusal');
+      } catch (error) {
+        expect((error as Error).message).toContain('column version is missing');
+        expect((error as Error).message).toContain('primary key is (id)');
+      }
+    });
+
+    it('refuses it from read-only status too, rather than reporting nonsense', async () => {
+      await client.query('CREATE TABLE schema_migrations (id int primary key, note text)');
+      await expect(
+        migrationStatus(client, await loadMigrations(MIGRATIONS_DIR)),
+      ).rejects.toBeInstanceOf(BookkeepingTableIncompatible);
+    });
+
+    it('refuses a nullable required column', async () => {
+      // Same column names and types, but a null checksum defeats the immutability check.
+      await client.query(`
+        CREATE TABLE schema_migrations (
+          version    TEXT PRIMARY KEY,
+          checksum   TEXT,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          applied_by TEXT NOT NULL,
+          build_id   TEXT NOT NULL
+        )`);
+      await expect(
+        migrate(client, await loadMigrations(MIGRATIONS_DIR), { appliedBy: 'v', buildId: 'b' }),
+      ).rejects.toThrow(/checksum is nullable/);
+    });
+
+    it('refuses an applied_at with no default', async () => {
+      await client.query(`
+        CREATE TABLE schema_migrations (
+          version    TEXT PRIMARY KEY,
+          checksum   TEXT NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL,
+          applied_by TEXT NOT NULL,
+          build_id   TEXT NOT NULL
+        )`);
+      await expect(
+        migrate(client, await loadMigrations(MIGRATIONS_DIR), { appliedBy: 'v', buildId: 'b' }),
+      ).rejects.toThrow(/applied_at has no default/);
+    });
+
+    it('refuses a composite primary key', async () => {
+      await client.query(`
+        CREATE TABLE schema_migrations (
+          version    TEXT NOT NULL,
+          checksum   TEXT NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          applied_by TEXT NOT NULL,
+          build_id   TEXT NOT NULL,
+          PRIMARY KEY (version, checksum)
+        )`);
+      await expect(
+        migrate(client, await loadMigrations(MIGRATIONS_DIR), { appliedBy: 'v', buildId: 'b' }),
+      ).rejects.toThrow(/primary key is \(version, checksum\)/);
+    });
+
+    it('refuses a wrong column type', async () => {
+      await client.query(`
+        CREATE TABLE schema_migrations (
+          version    TEXT PRIMARY KEY,
+          checksum   TEXT NOT NULL,
+          applied_at TEXT NOT NULL DEFAULT '',
+          applied_by TEXT NOT NULL,
+          build_id   TEXT NOT NULL
+        )`);
+      await expect(
+        migrate(client, await loadMigrations(MIGRATIONS_DIR), { appliedBy: 'v', buildId: 'b' }),
+      ).rejects.toThrow(/applied_at has type text/);
+    });
+
+    // The relation unqualified SQL resolves to is the one that must be validated. Checking
+    // by name across the search path mixes rows from every schema that has the name, and
+    // answers the primary-key question for whichever one the name resolves to.
+    it('validates the relation the search path actually resolves, not a namesake', async () => {
+      const other = `${schema}_shadow`;
+      await client.query(`DROP SCHEMA IF EXISTS ${other} CASCADE`);
+      await client.query(`CREATE SCHEMA ${other}`);
+      try {
+        // A valid table in the schema that resolves first.
+        await client.query(`
+          CREATE TABLE schema_migrations (
+            version    TEXT PRIMARY KEY,
+            checksum   TEXT NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            applied_by TEXT NOT NULL,
+            build_id   TEXT NOT NULL
+          )`);
+        // An incompatible namesake later on the path, which must not be consulted.
+        await client.query(`CREATE TABLE ${other}.schema_migrations (id int primary key)`);
+        await client.query(`SET search_path TO ${schema}, ${other}`);
+
+        const files = await loadMigrations(MIGRATIONS_DIR);
+        await expect(
+          migrate(client, files, { appliedBy: 'vitest', buildId: 'b' }),
+        ).resolves.toBeDefined();
+      } finally {
+        await client.query(`SET search_path TO ${schema}`);
+        await client.query(`DROP SCHEMA IF EXISTS ${other} CASCADE`);
+      }
+    });
+
+    it('accepts the table this migrator created', async () => {
+      const files = await loadMigrations(MIGRATIONS_DIR);
+      await migrate(client, files, { appliedBy: 'vitest', buildId: 'b' });
+      await expect(migrate(client, files, { appliedBy: 'vitest', buildId: 'b' })).resolves.toEqual({
+        applied: [],
+        alreadyApplied: files.map((file) => file.version),
+      });
+    });
   });
 
   it('rolls a failing migration back and does not record it as applied', async () => {

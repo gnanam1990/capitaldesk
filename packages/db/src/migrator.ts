@@ -71,6 +71,122 @@ export async function loadMigrations(directory: string): Promise<readonly Migrat
   return files;
 }
 
+/**
+ * A stable advisory lock key for migration runs.
+ *
+ * Derived from a fixed string rather than a random number so every deployment of every build
+ * computes the same value and therefore contends on the same lock.
+ */
+const MIGRATION_LOCK_KEY = 0x0ca9_1de5; // "capitaldesk" abbreviated; any stable constant works.
+
+/**
+ * Validate a pre-existing bookkeeping table before trusting it.
+ *
+ * `CREATE TABLE IF NOT EXISTS` silently accepts an unrelated relation that happens to share
+ * the name, and the migrator would then record against columns that do not mean what it
+ * thinks. Refusing explicitly is better than failing later with a constraint error.
+ */
+/**
+ * Column invariants the runner depends on, not merely names and types.
+ *
+ * A table with the right column names but a nullable checksum, or no default on applied_at,
+ * would be accepted and would then record history that the runner cannot trust: a null
+ * checksum defeats the immutability check, and a missing default writes a null timestamp.
+ */
+interface ColumnRequirement {
+  readonly type: string;
+  readonly notNull: boolean;
+  readonly requiresDefault?: boolean;
+}
+
+const REQUIRED_BOOKKEEPING_COLUMNS: ReadonlyMap<string, ColumnRequirement> = new Map([
+  ['version', { type: 'text', notNull: true }],
+  ['checksum', { type: 'text', notNull: true }],
+  ['applied_at', { type: 'timestamp with time zone', notNull: true, requiresDefault: true }],
+  ['applied_by', { type: 'text', notNull: true }],
+  ['build_id', { type: 'text', notNull: true }],
+]);
+
+export class BookkeepingTableIncompatible extends Error {
+  constructor(problems: readonly string[]) {
+    super(
+      'an existing schema_migrations relation is not the one this migrator manages:\n  - ' +
+        problems.join('\n  - '),
+    );
+    this.name = 'BookkeepingTableIncompatible';
+  }
+}
+
+interface AttributeRow {
+  readonly attname: string;
+  readonly data_type: string;
+  readonly attnotnull: boolean;
+  readonly default_expr: string | null;
+}
+
+/**
+ * Validate the exact relation unqualified SQL will use.
+ *
+ * Resolved once through `to_regclass` and then inspected by OID. Querying
+ * `information_schema` by name instead inspects every `schema_migrations` on the search path:
+ * with two such tables the column rows are mixed together and the primary-key lookup answers
+ * for whichever the name resolves to, so the check can pass on a table the runner will never
+ * touch.
+ */
+async function assertBookkeepingShape(client: Client): Promise<void> {
+  const resolved = await client.query<{ oid: number | null }>(
+    "SELECT to_regclass('schema_migrations')::oid AS oid",
+  );
+  const oid = resolved.rows[0]?.oid ?? null;
+  if (oid === null) return;
+
+  const problems: string[] = [];
+
+  const attributes = await client.query<AttributeRow>(
+    `SELECT a.attname,
+            format_type(a.atttypid, a.atttypmod) AS data_type,
+            a.attnotnull,
+            pg_get_expr(d.adbin, d.adrelid) AS default_expr
+       FROM pg_attribute a
+       LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+      WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped`,
+    [oid],
+  );
+  const found = new Map(attributes.rows.map((row) => [row.attname, row]));
+
+  for (const [name, requirement] of REQUIRED_BOOKKEEPING_COLUMNS) {
+    const column = found.get(name);
+    if (column === undefined) {
+      problems.push(`column ${name} is missing`);
+      continue;
+    }
+    if (column.data_type !== requirement.type) {
+      problems.push(`column ${name} has type ${column.data_type}, expected ${requirement.type}`);
+    }
+    if (requirement.notNull && !column.attnotnull) {
+      problems.push(`column ${name} is nullable, expected NOT NULL`);
+    }
+    if (requirement.requiresDefault === true && column.default_expr === null) {
+      problems.push(`column ${name} has no default, expected one supplying the applied time`);
+    }
+  }
+
+  const primaryKey = await client.query<{ attname: string }>(
+    `SELECT a.attname
+       FROM pg_constraint c
+       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+      WHERE c.conrelid = $1 AND c.contype = 'p'
+      ORDER BY array_position(c.conkey, a.attnum)`,
+    [oid],
+  );
+  const keyColumns = primaryKey.rows.map((row) => row.attname);
+  if (keyColumns.length !== 1 || keyColumns[0] !== 'version') {
+    problems.push(`primary key is (${keyColumns.join(', ') || 'none'}), expected (version)`);
+  }
+
+  if (problems.length > 0) throw new BookkeepingTableIncompatible(problems);
+}
+
 async function ensureBookkeeping(client: Client): Promise<void> {
   await client.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -176,6 +292,8 @@ export async function migrationStatus(
   client: Client,
   files: readonly MigrationFile[],
 ): Promise<StatusReport> {
+  // Read-only, so no lock and no waiting: a reporting command must never block on a deploy.
+  await assertBookkeepingShape(client);
   const exists = await bookkeepingExists(client);
   const applied = exists ? await appliedMigrations(client) : new Map<string, string>();
   const { divergences, appliedNotSupplied } = compareHistory(applied, files);
@@ -229,6 +347,33 @@ export async function migrate(
   files: readonly MigrationFile[],
   context: { readonly appliedBy: string; readonly buildId: string },
 ): Promise<MigrateResult> {
+  // Serialize the whole run, not just the writes.
+  //
+  // Two deploy processes previously read the same pending history and both executed the same
+  // migration; the loser failed on a duplicate relation rather than waiting. Reproduced with
+  // two clients against one schema and a 400ms migration: one succeeded, the other failed on
+  // pg_type_typname_nsp_index in 421ms.
+  //
+  // The lock is taken before the first history read, because reading an uncommitted-but-
+  // in-progress history is exactly the race. It is session-scoped rather than transaction-
+  // scoped so it spans every per-migration transaction, and released in `finally` so a
+  // failure cannot strand it. A waiter blocks here and then observes the completed history,
+  // so it correctly reports everything as already applied.
+  await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+  try {
+    return await runMigrations(client, files, context);
+  } finally {
+    await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]);
+  }
+}
+
+async function runMigrations(
+  client: Client,
+  files: readonly MigrationFile[],
+  context: { readonly appliedBy: string; readonly buildId: string },
+): Promise<MigrateResult> {
+  await assertBookkeepingShape(client);
+
   // Read the existing history before creating anything, so a divergence is refused without
   // this build touching the database at all.
   const existing = await appliedMigrations(client);
