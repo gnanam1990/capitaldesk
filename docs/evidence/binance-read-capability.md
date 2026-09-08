@@ -26,7 +26,45 @@ fetched  2026-09-08
 sha256   49ea6809243fc7fb426e07f2fe662097736c7bb405bd2da5eef637d715427999
 ```
 
-Enumerations were read from `enums.md` in the same repository.
+Enumerations were read from `enums.md` and filter semantics from `filters.md` in the same
+repository:
+
+```text
+source   https://raw.githubusercontent.com/binance/binance-spot-api-docs/master/filters.md
+fetched  2026-09-08
+sha256   4b5a8f0f5d15bcf68fd7ac2059ba6c88da641c06fd7885e642330c5ac8124dd3
+```
+
+### Filter semantics that changed a decision
+
+`filters.md` states for `PRICE_FILTER`: "Any of the above variables can be set to 0, which
+disables that rule in the price filter", and lists `minPrice`, `maxPrice` and `tickSize` each
+as "disabled on ... == 0". A zero is therefore a meaningful value from the venue, not a
+malformed one — and equally not an active bound, since a tick of zero read as an interval is a
+zero divisor. The decoder represents a present zero as `null`, meaning that part is disabled,
+and compares the minimum against the maximum only when both are enabled. A _missing_ part
+remains `SOURCE_SCHEMA_UNRECOGNIZED`.
+
+`LOT_SIZE` documents no such disable rule, so its `stepSize` stays strictly positive. The two
+filters are deliberately not treated alike, because the source does not treat them alike.
+
+`NOTIONAL` is documented as a _range_ — "the acceptable notional range allowed for an order" —
+and its `/exchangeInfo` shape carries `minNotional`, `applyMinToMarket`, `maxNotional`,
+`applyMaxToMarket` and `avgPriceMins`. No part is documented as optional and no
+missing-means-disabled rule is stated, so every part is required and an absent `maxNotional` is
+a schema failure rather than "no maximum".
+
+`MIN_NOTIONAL` is a separate first-class filter with its own fields (`minNotional`,
+`applyToMarket`, `avgPriceMins`) and its own rule: "An order will pass this filter evaluation
+if: `price` * `quantity` >= `minNotional`". It binds a LIMIT order unconditionally —
+`applyToMarket` only decides whether MARKET orders are covered as well — so a symbol carrying
+it cannot have a legal LIMIT IOC validated without it. Both filters are decoded, kept distinct,
+and a symbol may declare both; when it does, both are minimums an order must satisfy, so the
+binding constraint is the larger.
+
+**Not observed live.** BTCUSDT on the testnet host carries `NOTIONAL`, not `MIN_NOTIONAL`, so
+the `MIN_NOTIONAL` decoding is built from the documented shape above and exercised against
+fixtures. It has no live sample in this evidence file.
 
 ## Live public reads
 

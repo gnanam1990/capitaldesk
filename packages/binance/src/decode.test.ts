@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { ReadFailure } from './failures.js';
 import {
   KNOWN_ORDER_STATUSES,
+  bindingMinNotionalAtoms,
+  parseNonNegativeAtoms,
+  parsePositiveAtoms,
   SUPPORTED_ORDER_STATUSES,
   decodeAccount,
   decodeExchangeInfo,
@@ -51,7 +54,9 @@ describe('parseScaledAtoms', () => {
     }
   });
 
-  it('handles a negative value exactly, without float error', () => {
+  it('handles a negative value exactly, because a delta may carry one', () => {
+    // The signed primitive exists for genuine delta event types. No account balance, quantity,
+    // quote amount, commission or filter bound is one of those.
     expect(parseScaledAtoms('-0.00000001', 8)).toBe(-1n);
   });
 
@@ -66,6 +71,32 @@ describe('parseScaledAtoms', () => {
     expect(parseScaledAtoms('123456789012345678.12345678', 8)).toBe(
       12_345_678_901_234_567_812_345_678n,
     );
+  });
+});
+
+/**
+ * A negative economic source field is a contradiction, not a value to carry forward.
+ *
+ * The venue does not send negative balances or quantities. One arriving means the source or
+ * the transport is wrong, and normalizing it would place a negative claim into the accounting
+ * path where every downstream invariant assumes it cannot be there.
+ */
+describe('bounded quantity primitives', () => {
+  it('accepts zero and positive values as non-negative quantities', () => {
+    expect(parseNonNegativeAtoms('0', 8, 'q')).toBe(0n);
+    expect(parseNonNegativeAtoms('0.00000001', 8, 'q')).toBe(1n);
+  });
+
+  it('refuses a negative quantity, naming the field', () => {
+    expect(() => parseNonNegativeAtoms('-0.00000001', 8, 'BTC free balance')).toThrow(
+      /BTC free balance is negative/,
+    );
+  });
+
+  it('requires a strictly positive value where zero is not a legal bound', () => {
+    expect(parsePositiveAtoms('0.00000001', 8, 'tickSize')).toBe(1n);
+    expect(() => parsePositiveAtoms('0', 8, 'tickSize')).toThrow(/tickSize must be positive/);
+    expect(() => parsePositiveAtoms('-1', 8, 'tickSize')).toThrow(/must be positive/);
   });
 });
 
@@ -151,8 +182,12 @@ describe('decodeAccount', () => {
     uid: 354_937_868,
   };
 
+  // Every asset in the response must have a proven scale. There is no default: applying one
+  // invented scale across an account-wide list is a guess repeated once per asset.
+  const SCALES = { BTC: 8, USDT: 8 };
+
   it('reads the stable account id, the balances and the venue clock', () => {
-    const account = decodeAccount(JSON.stringify(ACCOUNT), 8);
+    const account = decodeAccount(JSON.stringify(ACCOUNT), SCALES);
     expect(account.stableAccountId).toBe('354937868');
     expect(account.accountType).toBe('SPOT');
     expect(account.updateTime).toBe(1_788_867_356_144);
@@ -165,14 +200,56 @@ describe('decodeAccount', () => {
   it('keeps unknown extra fields out of the decoded value without failing', () => {
     // The venue adds fields. Refusing them would break on every upstream release; adopting
     // them would smuggle undecoded data into the accounting path.
-    const account = decodeAccount(JSON.stringify({ ...ACCOUNT, somethingNew: true }), 8);
+    const account = decodeAccount(JSON.stringify({ ...ACCOUNT, somethingNew: true }), SCALES);
     expect(account).not.toHaveProperty('somethingNew');
     expect(account.stableAccountId).toBe('354937868');
   });
 
+  it('scales each asset by its own declared precision, not by one shared guess', () => {
+    // The counterexample the shared-scale version could not distinguish: the same decimal
+    // string is a different number of atoms in each asset.
+    const mixed = {
+      ...ACCOUNT,
+      balances: [
+        { asset: 'BTC', free: '1.00000000', locked: '0' },
+        { asset: 'JPYC', free: '1.00', locked: '0' },
+      ],
+    };
+    const account = decodeAccount(JSON.stringify(mixed), { BTC: 8, JPYC: 2 });
+    expect(account.balances).toEqual([
+      { asset: 'BTC', freeAtoms: 100_000_000n, lockedAtoms: 0n },
+      { asset: 'JPYC', freeAtoms: 100n, lockedAtoms: 0n },
+    ]);
+  });
+
+  it('refuses an asset whose scale was never proven, naming it', () => {
+    // A balance that cannot be scaled has no safe fallback: the scale decides the magnitude,
+    // and the wrong one is wrong by orders of magnitude while looking entirely normal.
+    const error = (() => {
+      try {
+        decodeAccount(JSON.stringify(ACCOUNT), { BTC: 8 });
+        return null;
+      } catch (thrown) {
+        return thrown as ReadFailure;
+      }
+    })();
+    expect(error).toBeInstanceOf(ReadFailure);
+    expect(error?.reason).toBe('SOURCE_SCHEMA_UNRECOGNIZED');
+    expect(error?.message).toContain('USDT');
+  });
+
+  it('refuses a negative balance rather than normalizing it into a claim', () => {
+    const negative = {
+      ...ACCOUNT,
+      balances: [{ asset: 'BTC', free: '-1.00000000', locked: '0' }],
+    };
+    expect(() => decodeAccount(JSON.stringify(negative), SCALES)).toThrow(ReadFailure);
+    expect(() => decodeAccount(JSON.stringify(negative), SCALES)).toThrow(/negative/);
+  });
+
   it('refuses a response with no uid, because that is the account identity', () => {
     const { uid: _uid, ...noUid } = ACCOUNT;
-    expect(() => decodeAccount(JSON.stringify(noUid), 8)).toThrow(ReadFailure);
+    expect(() => decodeAccount(JSON.stringify(noUid), SCALES)).toThrow(ReadFailure);
   });
 
   it('refuses malformed JSON as a schema failure, never as an empty account', () => {
@@ -181,7 +258,7 @@ describe('decodeAccount', () => {
     for (const body of ['', '{', 'null', '[]', '"a string"']) {
       const error = (() => {
         try {
-          decodeAccount(body, 8);
+          decodeAccount(body, SCALES);
           return null;
         } catch (thrown) {
           return thrown;
@@ -194,7 +271,7 @@ describe('decodeAccount', () => {
 
   it('refuses a balance whose numbers are not exact decimals', () => {
     const broken = { ...ACCOUNT, balances: [{ asset: 'BTC', free: 4723846.89, locked: '0' }] };
-    expect(() => decodeAccount(JSON.stringify(broken), 8)).toThrow(ReadFailure);
+    expect(() => decodeAccount(JSON.stringify(broken), SCALES)).toThrow(ReadFailure);
   });
 });
 
@@ -227,7 +304,14 @@ describe('decodeExchangeInfo', () => {
             maxQty: '9000.00000000',
             stepSize: '0.00001000',
           },
-          { filterType: 'NOTIONAL', minNotional: '5.00000000', maxNotional: '9000000.00000000' },
+          {
+            filterType: 'NOTIONAL',
+            minNotional: '5.00000000',
+            applyMinToMarket: true,
+            maxNotional: '9000000.00000000',
+            applyMaxToMarket: false,
+            avgPriceMins: 5,
+          },
           { filterType: 'SOME_FUTURE_FILTER', limit: 3 },
         ],
       },
@@ -247,7 +331,13 @@ describe('decodeExchangeInfo', () => {
       tickAtoms: 1_000_000n,
     });
     expect(info.lot).toEqual({ minAtoms: 1_000n, maxAtoms: 900_000_000_000n, stepAtoms: 1_000n });
-    expect(info.notional?.minAtoms).toBe(500_000_000n);
+    expect(info.notional).toEqual({
+      minAtoms: 500_000_000n,
+      maxAtoms: 900_000_000_000_000n,
+      applyMinToMarket: true,
+      applyMaxToMarket: false,
+      avgPriceMins: 5,
+    });
   });
 
   it('keeps every filter raw as well, including one it does not model', () => {
@@ -268,6 +358,280 @@ describe('decodeExchangeInfo', () => {
 
   it('refuses a response with no symbols array', () => {
     expect(() => decodeExchangeInfo('{"serverTime":1}', 'BTCUSDT')).toThrow(ReadFailure);
+  });
+
+  /**
+   * A known filter is either complete and coherent or it is a schema failure.
+   *
+   * The earlier version read each field with `?? 0n`, so a PRICE_FILTER with no tickSize
+   * normalized to a tick of zero — not a disabled filter but an impossible one, which every
+   * downstream price check would then evaluate against.
+   */
+  describe('a modelled filter must be complete and coherent', () => {
+    function withFilter(filter: Record<string, unknown>): string {
+      const symbol = { ...INFO.symbols[0], filters: [filter] };
+      return JSON.stringify({ ...INFO, symbols: [symbol] });
+    }
+
+    it('refuses a PRICE_FILTER missing tickSize rather than inventing a tick of zero', () => {
+      expect(() =>
+        decodeExchangeInfo(
+          withFilter({ filterType: 'PRICE_FILTER', minPrice: '0.01', maxPrice: '1000' }),
+          'BTCUSDT',
+        ),
+      ).toThrow(ReadFailure);
+    });
+
+    /**
+     * `filters.md`: "Any of the above variables can be set to 0, which disables that rule in
+     * the price filter." So a zero is a real value from the venue, not a malformed one — but
+     * it is not an active bound either. A tick of zero read as an interval is a zero divisor.
+     */
+    it('reads a zero PRICE_FILTER part as disabled, not as an active zero bound', () => {
+      const info = decodeExchangeInfo(
+        withFilter({ filterType: 'PRICE_FILTER', minPrice: '0', maxPrice: '0', tickSize: '0' }),
+        'BTCUSDT',
+      );
+      expect(info.price).toEqual({ minAtoms: null, maxAtoms: null, tickAtoms: null });
+    });
+
+    it('disables each PRICE_FILTER part independently', () => {
+      const info = decodeExchangeInfo(
+        withFilter({
+          filterType: 'PRICE_FILTER',
+          minPrice: '0.01',
+          maxPrice: '0',
+          tickSize: '0.01',
+        }),
+        'BTCUSDT',
+      );
+      expect(info.price).toEqual({ minAtoms: 1_000_000n, maxAtoms: null, tickAtoms: 1_000_000n });
+    });
+
+    it('compares min against max only when both parts are enabled', () => {
+      // A disabled maximum is not "a maximum below the minimum".
+      const info = decodeExchangeInfo(
+        withFilter({
+          filterType: 'PRICE_FILTER',
+          minPrice: '1000',
+          maxPrice: '0',
+          tickSize: '0.01',
+        }),
+        'BTCUSDT',
+      );
+      expect(info.price?.maxAtoms).toBeNull();
+    });
+
+    it('still refuses a negative PRICE_FILTER part, since 0 is the documented disable', () => {
+      expect(() =>
+        decodeExchangeInfo(
+          withFilter({
+            filterType: 'PRICE_FILTER',
+            minPrice: '-1',
+            maxPrice: '1000',
+            tickSize: '0.01',
+          }),
+          'BTCUSDT',
+        ),
+      ).toThrow(/negative/);
+    });
+
+    it('refuses a PRICE_FILTER missing any one of its three parts', () => {
+      // A zero is a value; an absent field means the response is not the shape we decoded.
+      for (const missing of ['minPrice', 'maxPrice', 'tickSize']) {
+        const filter: Record<string, unknown> = {
+          filterType: 'PRICE_FILTER',
+          minPrice: '0.01',
+          maxPrice: '1000',
+          tickSize: '0.01',
+        };
+        delete filter[missing];
+        expect(() => decodeExchangeInfo(withFilter(filter), 'BTCUSDT'), missing).toThrow(
+          ReadFailure,
+        );
+      }
+    });
+
+    // LOT_SIZE documents no disable-on-zero rule, so its step stays strictly positive.
+    it('refuses a LOT_SIZE missing stepSize, and one whose stepSize is zero', () => {
+      expect(() =>
+        decodeExchangeInfo(
+          withFilter({ filterType: 'LOT_SIZE', minQty: '0.001', maxQty: '9000' }),
+          'BTCUSDT',
+        ),
+      ).toThrow(ReadFailure);
+      expect(() =>
+        decodeExchangeInfo(
+          withFilter({
+            filterType: 'LOT_SIZE',
+            minQty: '0.001',
+            maxQty: '9000',
+            stepSize: '0.00000000',
+          }),
+          'BTCUSDT',
+        ),
+      ).toThrow(/stepSize must be positive/);
+    });
+
+    it('refuses a negative bound and an inverted range', () => {
+      expect(() =>
+        decodeExchangeInfo(
+          withFilter({
+            filterType: 'LOT_SIZE',
+            minQty: '-1',
+            maxQty: '9000',
+            stepSize: '0.001',
+          }),
+          'BTCUSDT',
+        ),
+      ).toThrow(/negative/);
+      expect(() =>
+        decodeExchangeInfo(
+          withFilter({
+            filterType: 'PRICE_FILTER',
+            minPrice: '1000',
+            maxPrice: '10',
+            tickSize: '0.01',
+          }),
+          'BTCUSDT',
+        ),
+      ).toThrow(/below its minimum/);
+    });
+
+    /**
+     * `filters.md` documents NOTIONAL as a range whose `/exchangeInfo` shape carries
+     * `maxNotional`, and states no missing-means-disabled rule — unlike PRICE_FILTER. An
+     * earlier version treated the maximum as optional, which was this build inventing a
+     * semantic the venue does not define.
+     */
+    it('refuses a NOTIONAL missing any documented part', () => {
+      const complete = {
+        filterType: 'NOTIONAL',
+        minNotional: '5.00000000',
+        applyMinToMarket: true,
+        maxNotional: '9000000.00000000',
+        applyMaxToMarket: false,
+        avgPriceMins: 5,
+      };
+      for (const missing of [
+        'minNotional',
+        'maxNotional',
+        'applyMinToMarket',
+        'applyMaxToMarket',
+        'avgPriceMins',
+      ]) {
+        const filter: Record<string, unknown> = { ...complete };
+        delete filter[missing];
+        expect(() => decodeExchangeInfo(withFilter(filter), 'BTCUSDT'), missing).toThrow(
+          ReadFailure,
+        );
+      }
+    });
+
+    /**
+     * MIN_NOTIONAL is a first-class filter, not a subset of NOTIONAL. Its rule is
+     * `price * quantity >= minNotional`, which binds a LIMIT order unconditionally — so a
+     * symbol carrying it cannot have a legal LIMIT IOC validated without it.
+     */
+    it('decodes MIN_NOTIONAL with its own documented fields', () => {
+      const info = decodeExchangeInfo(
+        withFilter({
+          filterType: 'MIN_NOTIONAL',
+          minNotional: '0.00100000',
+          applyToMarket: true,
+          avgPriceMins: 5,
+        }),
+        'BTCUSDT',
+      );
+      expect(info.minNotional).toEqual({
+        minAtoms: 100_000n,
+        applyToMarket: true,
+        avgPriceMins: 5,
+      });
+      // And it is not confused with the range filter.
+      expect(info.notional).toBeNull();
+    });
+
+    it('refuses a MIN_NOTIONAL missing any documented part', () => {
+      for (const missing of ['minNotional', 'applyToMarket', 'avgPriceMins']) {
+        const filter: Record<string, unknown> = {
+          filterType: 'MIN_NOTIONAL',
+          minNotional: '0.001',
+          applyToMarket: true,
+          avgPriceMins: 5,
+        };
+        delete filter[missing];
+        expect(() => decodeExchangeInfo(withFilter(filter), 'BTCUSDT'), missing).toThrow(
+          ReadFailure,
+        );
+      }
+    });
+
+    it('keeps both filters distinct when a symbol declares both', () => {
+      // The venue does not forbid it, and they are not alternatives.
+      const symbol = {
+        ...INFO.symbols[0],
+        filters: [
+          {
+            filterType: 'NOTIONAL',
+            minNotional: '5.00000000',
+            applyMinToMarket: true,
+            maxNotional: '9000000.00000000',
+            applyMaxToMarket: false,
+            avgPriceMins: 5,
+          },
+          {
+            filterType: 'MIN_NOTIONAL',
+            minNotional: '10.00000000',
+            applyToMarket: true,
+            avgPriceMins: 5,
+          },
+        ],
+      };
+      const info = decodeExchangeInfo(JSON.stringify({ ...INFO, symbols: [symbol] }), 'BTCUSDT');
+      expect(info.notional?.minAtoms).toBe(500_000_000n);
+      expect(info.minNotional?.minAtoms).toBe(1_000_000_000n);
+      // Both are minimums and an order must pass every filter, so the binding one is the
+      // larger. That is arithmetic on two stated facts, not a choice between them.
+      expect(bindingMinNotionalAtoms(info)).toBe(1_000_000_000n);
+    });
+
+    it('reports the binding minimum from whichever filter the symbol carries', () => {
+      const only = (filter: Record<string, unknown>): bigint | null =>
+        bindingMinNotionalAtoms(decodeExchangeInfo(withFilter(filter), 'BTCUSDT'));
+      expect(
+        only({
+          filterType: 'NOTIONAL',
+          minNotional: '5.00000000',
+          applyMinToMarket: true,
+          maxNotional: '9000000.00000000',
+          applyMaxToMarket: false,
+          avgPriceMins: 5,
+        }),
+      ).toBe(500_000_000n);
+      expect(
+        only({
+          filterType: 'MIN_NOTIONAL',
+          minNotional: '0.00100000',
+          applyToMarket: true,
+          avgPriceMins: 5,
+        }),
+      ).toBe(100_000n);
+      // Neither declared is null, not zero: "no stated minimum" and "a minimum of zero" are
+      // different facts.
+      expect(only({ filterType: 'ICEBERG_PARTS', limit: 10 })).toBeNull();
+    });
+
+    it('ignores an unmodelled filter type while still preserving it raw', () => {
+      // Refusing every upstream addition would break on release day for a filter this build
+      // never consults; dropping it would lose it from the evidence.
+      const info = decodeExchangeInfo(
+        withFilter({ filterType: 'A_FILTER_FROM_THE_FUTURE', someBound: '3' }),
+        'BTCUSDT',
+      );
+      expect(info.price).toBeNull();
+      expect(info.rawFilters).toEqual([{ filterType: 'A_FILTER_FROM_THE_FUTURE', someBound: '3' }]);
+    });
   });
 });
 
@@ -290,6 +654,33 @@ describe('decodeOrder and decodeOpenOrders', () => {
     isWorking: true,
     selfTradePreventionMode: 'NONE',
   };
+
+  it('refuses a negative executed or cumulative quote quantity', () => {
+    for (const [field, value] of [
+      ['executedQty', '-0.00050000'],
+      ['cummulativeQuoteQty', '-15.00000000'],
+    ] as const) {
+      expect(
+        () => decodeOrder(JSON.stringify({ ...ORDER, [field]: value }), { base: 8, quote: 8 }),
+        field,
+      ).toThrow(/negative/);
+    }
+  });
+
+  it('accepts an order with nothing executed yet', () => {
+    // The positive control for the bound above: zero is a normal state for a NEW order.
+    const order = decodeOrder(
+      JSON.stringify({
+        ...ORDER,
+        status: 'NEW',
+        executedQty: '0.00000000',
+        cummulativeQuoteQty: '0.00000000',
+      }),
+      { base: 8, quote: 8 },
+    );
+    expect(order.executedBaseAtoms).toBe(0n);
+    expect(order.cumulativeQuoteAtoms).toBe(0n);
+  });
 
   it('reads identity, status and exact cumulative quantities', () => {
     const order = decodeOrder(JSON.stringify(ORDER), { base: 8, quote: 8 });
@@ -432,5 +823,27 @@ describe('decodeTrades', () => {
   it('refuses a trade missing its commission asset instead of defaulting one', () => {
     const { commissionAsset: _drop, ...noAsset } = TRADE;
     expect(() => decodeTrades(JSON.stringify([noAsset]), SCALES)).toThrow(ReadFailure);
+  });
+
+  it('refuses a negative quantity, quote amount or commission', () => {
+    // The venue does not send these. One arriving is a contradiction in the source, and
+    // normalizing it would place a negative quantity into the accounting path.
+    for (const [field, value] of [
+      ['qty', '-0.00050000'],
+      ['quoteQty', '-15.00000000'],
+      ['commission', '-0.00001500'],
+    ] as const) {
+      expect(
+        () => decodeTrades(JSON.stringify([{ ...TRADE, [field]: value }]), SCALES),
+        field,
+      ).toThrow(/negative/);
+    }
+  });
+
+  it('accepts a zero commission, which a maker rebate schedule really produces', () => {
+    // The positive control: zero is not negative, and refusing it would reject a legitimate
+    // fee-free fill.
+    const [trade] = decodeTrades(JSON.stringify([{ ...TRADE, commission: '0.00000000' }]), SCALES);
+    expect(trade?.commissionAtoms).toBe(0n);
   });
 });

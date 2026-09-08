@@ -8,4 +8,5 @@
 export * from './decode.js';
 export * from './endpoints.js';
 export * from './failures.js';
+export * from './transport.js';
 export * from './redaction.js';

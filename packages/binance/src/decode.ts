@@ -75,12 +75,19 @@ export function mapOrderStatus(raw: string): MappedStatus {
 const EXACT_DECIMAL = /^-?\d+(\.\d+)?$/;
 
 /**
- * A decimal string as integer atoms at the given scale, exactly.
+ * A **signed** decimal string as integer atoms at the given scale, exactly.
  *
  * Refuses anything that is not an exact decimal, including `1e8`, `NaN`, `Infinity`, `0x10`
  * and a thousands separator. Refuses more precision than the scale rather than rounding: the
  * venue told us its scale, so a longer fraction is a contradiction, and rounding it away
  * silently discards money.
+ *
+ * This primitive accepts a sign because some venue facts legitimately carry one — a balance
+ * *delta* on an event stream, for instance. No account balance, order quantity, trade
+ * quantity, quote amount, commission or positive filter bound is one of those, so those all
+ * go through {@link parseNonNegativeAtoms} or {@link parsePositiveAtoms} instead. Reaching for
+ * this function directly on an economic source field is how a negative quantity flows into a
+ * normalized fact and out the other side as a claim.
  */
 export function parseScaledAtoms(value: string, scale: number): bigint {
   if (!Number.isInteger(scale) || scale < 0 || scale > 30) {
@@ -100,6 +107,26 @@ export function parseScaledAtoms(value: string, scale: number): bigint {
   }
   const atoms = BigInt(whole + fraction.padEnd(scale, '0'));
   return negative ? -atoms : atoms;
+}
+
+/**
+ * A quantity that cannot be negative: a balance, a filled quantity, a fee.
+ *
+ * The venue does not send negative balances, so one arriving is a contradiction in the source,
+ * not a value to carry forward. Normalizing it silently would put a negative claim into the
+ * accounting path, where every downstream invariant is written assuming it cannot be there.
+ */
+export function parseNonNegativeAtoms(value: string, scale: number, what: string): bigint {
+  const atoms = parseScaledAtoms(value, scale);
+  if (atoms < 0n) throw new RangeError(`${what} is negative ("${value}")`);
+  return atoms;
+}
+
+/** A bound that must be strictly positive: a tick size, a step size. */
+export function parsePositiveAtoms(value: string, scale: number, what: string): bigint {
+  const atoms = parseScaledAtoms(value, scale);
+  if (atoms <= 0n) throw new RangeError(`${what} must be positive ("${value}")`);
+  return atoms;
 }
 
 /**
@@ -182,6 +209,17 @@ export interface AccountBalance {
   readonly lockedAtoms: bigint;
 }
 
+/**
+ * The declared scale of every asset this decode may normalize.
+ *
+ * There is no default. Applying one invented scale across an account-wide balance list is a
+ * guess repeated once per asset: the venue publishes precision per symbol, and an asset whose
+ * precision this build has not fetched has no proven scale at all. Refusing names the asset,
+ * which is actionable; guessing produces a balance that is wrong by orders of magnitude and
+ * looks entirely normal.
+ */
+export type AssetScales = Readonly<Record<string, number>>;
+
 export interface AccountSnapshot {
   /** The venue's `uid`, as a string: the stable authenticated account identity. */
   readonly stableAccountId: string;
@@ -192,18 +230,39 @@ export interface AccountSnapshot {
   readonly canTrade: boolean | null;
 }
 
-export function decodeAccount(body: string, defaultScale: number): AccountSnapshot {
+/**
+ * An account snapshot, normalized only for assets whose scale is proven.
+ *
+ * `assetScales` must name every asset in the response. A balance the caller cannot scale is
+ * refused rather than normalized, because there is no safe fallback: the scale decides the
+ * magnitude, and the wrong one produces a number that is wrong by orders of magnitude and
+ * looks entirely normal.
+ */
+export function decodeAccount(body: string, assetScales: AssetScales): AccountSnapshot {
   return decoded('account', () => {
     const raw = accountSchema.parse(parseJson('account', body));
     return {
       stableAccountId: identityOf(raw.uid, 'account'),
       accountType: raw.accountType,
       updateTime: raw.updateTime,
-      balances: raw.balances.map((balance) => ({
-        asset: balance.asset,
-        freeAtoms: parseScaledAtoms(balance.free, defaultScale),
-        lockedAtoms: parseScaledAtoms(balance.locked, defaultScale),
-      })),
+      balances: raw.balances.map((balance) => {
+        const scale = assetScales[balance.asset];
+        if (scale === undefined) {
+          throw schemaUnrecognized(
+            'account',
+            `no declared scale for asset ${balance.asset}; its balance cannot be normalized`,
+          );
+        }
+        return {
+          asset: balance.asset,
+          freeAtoms: parseNonNegativeAtoms(balance.free, scale, `${balance.asset} free balance`),
+          lockedAtoms: parseNonNegativeAtoms(
+            balance.locked,
+            scale,
+            `${balance.asset} locked balance`,
+          ),
+        };
+      }),
       permissions: raw.permissions ?? [],
       canTrade: raw.canTrade ?? null,
     };
@@ -231,19 +290,59 @@ const exchangeInfoSchema = z.object({
   symbols: z.array(symbolSchema),
 });
 
+/**
+ * The price rules for a symbol, with each part separately enabled.
+ *
+ * `filters.md` states it explicitly: "Any of the above variables can be set to 0, which
+ * disables that rule in the price filter." So a zero is a real, meaningful value from the
+ * venue and must not be refused — but it must not be carried as an active bound either. A
+ * tick of zero read as an active interval is a zero divisor; read as `null` it is what the
+ * venue said, which is that there is no tick rule.
+ *
+ * A *missing* field is different and remains a schema failure: the venue always sends all
+ * three, so an absent one means the response is not the shape this build decoded.
+ */
 export interface PriceFilter {
-  readonly minAtoms: bigint;
-  readonly maxAtoms: bigint;
-  readonly tickAtoms: bigint;
+  /** null when the venue disabled this rule by sending an explicit 0. */
+  readonly minAtoms: bigint | null;
+  readonly maxAtoms: bigint | null;
+  readonly tickAtoms: bigint | null;
 }
 export interface LotFilter {
   readonly minAtoms: bigint;
   readonly maxAtoms: bigint;
   readonly stepAtoms: bigint;
 }
+/**
+ * The `NOTIONAL` filter: an acceptable notional *range*.
+ *
+ * `filters.md` documents it as a range and its `/exchangeInfo` shape carries `minNotional`,
+ * `applyMinToMarket`, `maxNotional`, `applyMaxToMarket` and `avgPriceMins`. It states no
+ * missing-means-disabled rule, unlike `PRICE_FILTER`, so every part is required: treating an
+ * absent `maxNotional` as "no maximum" would be this build inventing a semantic the venue
+ * does not define.
+ */
 export interface NotionalFilter {
   readonly minAtoms: bigint;
-  readonly maxAtoms: bigint | null;
+  readonly maxAtoms: bigint;
+  readonly applyMinToMarket: boolean;
+  readonly applyMaxToMarket: boolean;
+  readonly avgPriceMins: number;
+}
+
+/**
+ * The `MIN_NOTIONAL` filter: a distinct, first-class filter, not a subset of `NOTIONAL`.
+ *
+ * "An order will pass this filter evaluation if: `price` * `quantity` >= `minNotional`". It
+ * applies to a LIMIT order unconditionally; `applyToMarket` only decides whether MARKET orders
+ * are covered too. Since this product submits LIMIT IOC, a symbol carrying this filter cannot
+ * have a legal order validated without it — preserving it only as unmodelled raw data would
+ * leave the market context unable to say whether an order is legal.
+ */
+export interface MinNotionalFilter {
+  readonly minAtoms: bigint;
+  readonly applyToMarket: boolean;
+  readonly avgPriceMins: number;
 }
 
 export interface SymbolContext {
@@ -259,6 +358,8 @@ export interface SymbolContext {
   readonly price: PriceFilter | null;
   readonly lot: LotFilter | null;
   readonly notional: NotionalFilter | null;
+  /** The separate `MIN_NOTIONAL` filter, when the symbol carries one. */
+  readonly minNotional: MinNotionalFilter | null;
   /**
    * Every filter exactly as sent, including ones this build does not model.
    *
@@ -276,13 +377,75 @@ function filterOf(
   return filters.find((filter) => filter['filterType'] === type);
 }
 
-function atomsField(
-  filter: Readonly<Record<string, unknown>> | undefined,
-  field: string,
-  scale: number,
-): bigint | null {
-  const value = filter?.[field];
-  return typeof value === 'string' ? parseScaledAtoms(value, scale) : null;
+/**
+ * Exact schemas for the filters this build actually models.
+ *
+ * An earlier version read each field with `?? 0n`, so a PRICE_FILTER that arrived without a
+ * `tickSize` normalized to a tick of zero — a filter that is not disabled but impossible, and
+ * one that every downstream price check would then evaluate against. A known filter is either
+ * complete and coherent or it is `SOURCE_SCHEMA_UNRECOGNIZED`. There is no third answer, and
+ * certainly not a fabricated bound.
+ *
+ * A filter type this build does *not* model is a different matter: it is preserved in
+ * `rawFilters` and ignored, because refusing every upstream addition would break on release
+ * day for a filter the product never consults.
+ */
+const priceFilterSchema = z.object({
+  minPrice: z.string(),
+  maxPrice: z.string(),
+  tickSize: z.string(),
+});
+const lotFilterSchema = z.object({
+  minQty: z.string(),
+  maxQty: z.string(),
+  stepSize: z.string(),
+});
+const notionalFilterSchema = z.object({
+  minNotional: z.string(),
+  maxNotional: z.string(),
+  applyMinToMarket: z.boolean(),
+  applyMaxToMarket: z.boolean(),
+  avgPriceMins: z.number().int().min(0),
+});
+const minNotionalFilterSchema = z.object({
+  minNotional: z.string(),
+  applyToMarket: z.boolean(),
+  avgPriceMins: z.number().int().min(0),
+});
+
+function assertOrderedBounds(what: string, min: bigint, max: bigint): void {
+  if (max < min) {
+    throw new RangeError(`${what} maximum ${String(max)} is below its minimum ${String(min)}`);
+  }
+}
+
+/**
+ * A price-filter part: null when the venue disabled it with an explicit 0.
+ *
+ * Negative is still refused — the venue documents 0 as "disabled", not "-1 as disabled".
+ */
+function enabledBound(value: string, scale: number, what: string): bigint | null {
+  const atoms = parseNonNegativeAtoms(value, scale, what);
+  return atoms === 0n ? null : atoms;
+}
+
+/**
+ * The smallest notional a LIMIT order on this symbol may carry, in quote atoms.
+ *
+ * `NOTIONAL` and `MIN_NOTIONAL` are separate filters and the venue does not forbid a symbol
+ * carrying both. They do not contradict each other — both are minimums, and an order must
+ * pass every filter — so the binding constraint is simply the larger. That is arithmetic on
+ * two stated facts, not a guess between them, which is why it is computed here rather than
+ * left for each caller to reinvent.
+ *
+ * Null when the symbol declares neither.
+ */
+export function bindingMinNotionalAtoms(context: SymbolContext): bigint | null {
+  const bounds = [context.notional?.minAtoms, context.minNotional?.minAtoms].filter(
+    (value): value is bigint => value !== undefined,
+  );
+  if (bounds.length === 0) return null;
+  return bounds.reduce((largest, value) => (value > largest ? value : largest));
 }
 
 export function decodeExchangeInfo(body: string, symbol: string): SymbolContext {
@@ -294,14 +457,65 @@ export function decodeExchangeInfo(body: string, symbol: string): SymbolContext 
       throw schemaUnrecognized('exchangeInfo', `the response does not contain symbol ${symbol}`);
     }
     const filters = found.filters as Readonly<Record<string, unknown>>[];
-    const price = filterOf(filters, 'PRICE_FILTER');
-    const lot = filterOf(filters, 'LOT_SIZE');
-    const notional = filterOf(filters, 'NOTIONAL');
     const quote = found.quoteAssetPrecision;
     const base = found.baseAssetPrecision;
-    const minPrice = atomsField(price, 'minPrice', quote);
-    const minQty = atomsField(lot, 'minQty', base);
-    const minNotional = atomsField(notional, 'minNotional', quote);
+
+    const rawPrice = filterOf(filters, 'PRICE_FILTER');
+    let price: PriceFilter | null = null;
+    if (rawPrice !== undefined) {
+      const parsed = priceFilterSchema.parse(rawPrice);
+      // Present-and-zero means the venue disabled that part; present-and-positive is a bound.
+      // Absent is neither, and is refused by the schema above.
+      price = {
+        minAtoms: enabledBound(parsed.minPrice, quote, 'PRICE_FILTER minPrice'),
+        maxAtoms: enabledBound(parsed.maxPrice, quote, 'PRICE_FILTER maxPrice'),
+        tickAtoms: enabledBound(parsed.tickSize, quote, 'PRICE_FILTER tickSize'),
+      };
+      // Only meaningful when both ends are actually enabled.
+      if (price.minAtoms !== null && price.maxAtoms !== null) {
+        assertOrderedBounds('PRICE_FILTER', price.minAtoms, price.maxAtoms);
+      }
+    }
+
+    const rawLot = filterOf(filters, 'LOT_SIZE');
+    let lot: LotFilter | null = null;
+    if (rawLot !== undefined) {
+      const parsed = lotFilterSchema.parse(rawLot);
+      lot = {
+        minAtoms: parseNonNegativeAtoms(parsed.minQty, base, 'LOT_SIZE minQty'),
+        maxAtoms: parseNonNegativeAtoms(parsed.maxQty, base, 'LOT_SIZE maxQty'),
+        stepAtoms: parsePositiveAtoms(parsed.stepSize, base, 'LOT_SIZE stepSize'),
+      };
+      assertOrderedBounds('LOT_SIZE', lot.minAtoms, lot.maxAtoms);
+    }
+
+    const rawNotional = filterOf(filters, 'NOTIONAL');
+    let notional: NotionalFilter | null = null;
+    if (rawNotional !== undefined) {
+      const parsed = notionalFilterSchema.parse(rawNotional);
+      const minAtoms = parseNonNegativeAtoms(parsed.minNotional, quote, 'NOTIONAL minNotional');
+      const maxAtoms = parseNonNegativeAtoms(parsed.maxNotional, quote, 'NOTIONAL maxNotional');
+      assertOrderedBounds('NOTIONAL', minAtoms, maxAtoms);
+      notional = {
+        minAtoms,
+        maxAtoms,
+        applyMinToMarket: parsed.applyMinToMarket,
+        applyMaxToMarket: parsed.applyMaxToMarket,
+        avgPriceMins: parsed.avgPriceMins,
+      };
+    }
+
+    const rawMinNotional = filterOf(filters, 'MIN_NOTIONAL');
+    let minNotional: MinNotionalFilter | null = null;
+    if (rawMinNotional !== undefined) {
+      const parsed = minNotionalFilterSchema.parse(rawMinNotional);
+      minNotional = {
+        minAtoms: parseNonNegativeAtoms(parsed.minNotional, quote, 'MIN_NOTIONAL minNotional'),
+        applyToMarket: parsed.applyToMarket,
+        avgPriceMins: parsed.avgPriceMins,
+      };
+    }
+
     return {
       symbol: found.symbol,
       status: found.status,
@@ -312,26 +526,10 @@ export function decodeExchangeInfo(body: string, symbol: string): SymbolContext 
       baseCommissionPrecision: found.baseCommissionPrecision ?? null,
       quoteCommissionPrecision: found.quoteCommissionPrecision ?? null,
       orderTypes: found.orderTypes,
-      price:
-        minPrice === null
-          ? null
-          : {
-              minAtoms: minPrice,
-              maxAtoms: atomsField(price, 'maxPrice', quote) ?? 0n,
-              tickAtoms: atomsField(price, 'tickSize', quote) ?? 0n,
-            },
-      lot:
-        minQty === null
-          ? null
-          : {
-              minAtoms: minQty,
-              maxAtoms: atomsField(lot, 'maxQty', base) ?? 0n,
-              stepAtoms: atomsField(lot, 'stepSize', base) ?? 0n,
-            },
-      notional:
-        minNotional === null
-          ? null
-          : { minAtoms: minNotional, maxAtoms: atomsField(notional, 'maxNotional', quote) },
+      price,
+      lot,
+      notional,
+      minNotional,
       rawFilters: filters,
       serverTime: raw.serverTime ?? null,
     };
@@ -394,8 +592,12 @@ function orderFrom(value: unknown, scales: Scales): VenueOrderObservation {
       raw.clientOrderId === undefined || raw.clientOrderId === '' ? null : raw.clientOrderId,
     status: status.mapped,
     rawStatus: status.raw,
-    executedBaseAtoms: parseScaledAtoms(raw.executedQty, scales.base),
-    cumulativeQuoteAtoms: parseScaledAtoms(raw.cummulativeQuoteQty, scales.quote),
+    executedBaseAtoms: parseNonNegativeAtoms(raw.executedQty, scales.base, 'executedQty'),
+    cumulativeQuoteAtoms: parseNonNegativeAtoms(
+      raw.cummulativeQuoteQty,
+      scales.quote,
+      'cummulativeQuoteQty',
+    ),
     timeInForce: raw.timeInForce ?? null,
     orderType: raw.type ?? null,
     side: raw.side ?? null,
@@ -504,10 +706,14 @@ export function decodeTrades(body: string, scales: Scales): readonly VenueTradeO
         symbol: raw.symbol,
         venueTradeId: identityOf(raw.id, 'trade'),
         venueOrderId: identityOf(raw.orderId, 'order'),
-        baseAtoms: parseScaledAtoms(raw.qty, scales.base),
-        quoteAtoms: parseScaledAtoms(raw.quoteQty, scales.quote),
+        baseAtoms: parseNonNegativeAtoms(raw.qty, scales.base, 'trade qty'),
+        quoteAtoms: parseNonNegativeAtoms(raw.quoteQty, scales.quote, 'trade quoteQty'),
         commissionAsset: raw.commissionAsset,
-        commissionAtoms: parseScaledAtoms(raw.commission, commissionScale),
+        commissionAtoms: parseNonNegativeAtoms(
+          raw.commission,
+          commissionScale,
+          `${raw.commissionAsset} commission`,
+        ),
         tradedAt: raw.time,
         isBuyer: raw.isBuyer,
         isMaker: raw.isMaker,

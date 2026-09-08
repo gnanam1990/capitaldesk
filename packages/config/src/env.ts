@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import type { Environment, ProcessRole } from '@capitaldesk/contracts';
+import {
+  APPROVED_VENUE_ORIGINS,
+  DEPLOYMENT_ENVIRONMENTS,
+  LIVE_VENUE_ORIGINS,
+  type DeploymentEnvironment,
+  type Environment,
+  type ProcessRole,
+} from '@capitaldesk/contracts';
 
 /**
  * Environment contracts.
@@ -21,21 +28,16 @@ export class ConfigurationError extends Error {
 }
 
 /**
- * Deployment environments. `production-read-only` is a distinct environment from
- * `production`: it observes a live account and can never hold write capability.
+ * Deployment environments and the venue host allowlist.
+ *
+ * Both now come from `@capitaldesk/contracts`, because the read transport enforces the same
+ * table at construction and two copies would eventually differ — a difference that would be
+ * discovered as a signed request sent to whoever owned the other host.
  */
-export const DEPLOYMENT_ENVIRONMENTS = ['local', 'testnet', 'production-read-only'] as const;
-export type DeploymentEnvironment = (typeof DEPLOYMENT_ENVIRONMENTS)[number];
+export { DEPLOYMENT_ENVIRONMENTS, type DeploymentEnvironment };
 
-/** Venue host allowlist. A host outside this table is refused; there is no free-form URL. */
-const VENUE_HOSTS: Readonly<Record<DeploymentEnvironment, readonly string[]>> = Object.freeze({
-  local: ['http://127.0.0.1:9443', 'http://localhost:9443'],
-  testnet: ['https://testnet.binance.vision'],
-  'production-read-only': ['https://api.binance.com'],
-});
-
-/** Hosts that route to real money. Never permitted for a non-production environment. */
-const LIVE_HOSTS: ReadonlySet<string> = new Set(['https://api.binance.com']);
+const VENUE_HOSTS = APPROVED_VENUE_ORIGINS;
+const LIVE_HOSTS = LIVE_VENUE_ORIGINS;
 
 export function economicEnvironmentOf(deployment: DeploymentEnvironment): Environment {
   switch (deployment) {
