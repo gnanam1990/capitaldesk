@@ -987,3 +987,250 @@ describeIfDatabase('7. economic references cannot cross workspace, pool or epoch
     ).rejects.toMatchObject({ code: '23503' });
   });
 });
+
+describeIfDatabase('8. a reservation cannot be released beyond what it still holds', () => {
+  const harness = new JournalHarness();
+  let ledger: LedgerRepository;
+  let dispatch: DispatchRepository;
+
+  beforeAll(async () => {
+    await harness.open();
+  });
+  afterAll(async () => {
+    await harness.close();
+  });
+  beforeEach(async () => {
+    await harness.reset();
+    await harness.seedPool();
+    ledger = new LedgerRepository(harness.pool);
+    dispatch = new DispatchRepository(harness.pool);
+    await ledger.postTransaction({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      epoch: 1,
+      ledgerTxnId: 'txn-bootstrap',
+      source: { kind: 'bootstrap', ref: 'b' },
+      description: 'baseline',
+      entries: [
+        {
+          accountKind: 'ASSET_CONTROL',
+          owner: 'ASSET_CONTROL',
+          claimState: 'CONTROL',
+          asset: USDT,
+          deltaAtoms: 20_000n,
+        },
+        {
+          accountKind: 'STRATEGY',
+          owner: 'strategy-a',
+          claimState: 'AVAILABLE',
+          asset: USDT,
+          deltaAtoms: 20_000n,
+        },
+      ],
+    });
+    await dispatch.sealPlan({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      epoch: 1,
+      planId: 'plan-1',
+      payload: {},
+      payloadDigest: 'd',
+      state: 'DISPATCH_PENDING',
+    });
+    await ledger.reserve({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      epoch: 1,
+      reservationId: 'res-1',
+      strategyId: 'strategy-a',
+      planId: 'plan-1',
+      asset: USDT,
+      atoms: 15_000n,
+    });
+  });
+  afterEach(async () => {
+    await harness.cleanup();
+  });
+
+  /** A fill consuming part of the reservation, as the executor's reconciliation would post it. */
+  const consume = (atoms: bigint) =>
+    ledger.postTransaction({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      epoch: 1,
+      ledgerTxnId: `txn-fill-${atoms}`,
+      source: { kind: 'fill', ref: `fill-${atoms}` },
+      description: 'fill',
+      entries: [
+        {
+          accountKind: 'ASSET_CONTROL',
+          owner: 'ASSET_CONTROL',
+          claimState: 'CONTROL',
+          asset: USDT,
+          deltaAtoms: -atoms,
+        },
+        {
+          accountKind: 'STRATEGY',
+          owner: 'strategy-a',
+          claimState: 'RESERVED',
+          asset: USDT,
+          deltaAtoms: -atoms,
+          reservationId: 'res-1',
+        },
+      ],
+    });
+
+  it('refuses a release larger than the remainder after a fill consumed part of it', async () => {
+    // The exact reproduction: reserve 15,000, let a fill consume 14,000, then release the
+    // full 15,000. It returned ok, leaving AVAILABLE at 20,000 and RESERVED at -14,000, and
+    // only the projection rebuild noticed - afterwards.
+    expect(await consume(14_000n)).toMatchObject({ ok: true });
+    expect(
+      await ledger.remainingOf({ workspaceId: WORKSPACE, poolId: POOL, reservationId: 'res-1' }),
+    ).toBe(1_000n);
+
+    expect(
+      await ledger.release({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        reservationId: 'res-1',
+        atoms: 15_000n,
+        source: { kind: 'release', ref: 'res-1' },
+      }),
+    ).toEqual({ ok: false, reason: 'EXCEEDS_REMAINING', remainingAtoms: 1_000n });
+
+    // Nothing moved, and the claims are exactly where the postings put them.
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    expect(balances).toContainEqual({
+      owner: 'strategy-a',
+      asset: USDT,
+      availableAtoms: 5_000n,
+      reservedAtoms: 1_000n,
+      quarantinedAtoms: 0n,
+    });
+    expect(
+      (await harness.admin.query(`SELECT 1 FROM reservations WHERE state = 'HELD'`)).rowCount,
+    ).toBe(1);
+  });
+
+  it('releases exactly the proven remainder, and refuses a second release', async () => {
+    expect(await consume(14_000n)).toMatchObject({ ok: true });
+    expect(
+      await ledger.release({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        reservationId: 'res-1',
+        atoms: 1_000n,
+        source: { kind: 'release', ref: 'res-1' },
+      }),
+    ).toMatchObject({ ok: true });
+
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    expect(balances).toContainEqual({
+      owner: 'strategy-a',
+      asset: USDT,
+      availableAtoms: 6_000n,
+      reservedAtoms: 0n,
+      quarantinedAtoms: 0n,
+    });
+    expect(
+      await ledger.remainingOf({ workspaceId: WORKSPACE, poolId: POOL, reservationId: 'res-1' }),
+    ).toBe(0n);
+    // The reservation is closed, so a second release is refused on its state.
+    expect(
+      await ledger.release({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        reservationId: 'res-1',
+        atoms: 1n,
+        source: { kind: 'release', ref: 'res-1-again' },
+      }),
+    ).toEqual({ ok: false, reason: 'NOT_HELD', state: 'RELEASED' });
+  });
+
+  it('refuses a fill that would consume more than the reservation holds', async () => {
+    await expect(consume(15_001n)).rejects.toMatchObject({ code: '23000' });
+    expect(
+      await ledger.remainingOf({ workspaceId: WORKSPACE, poolId: POOL, reservationId: 'res-1' }),
+    ).toBe(15_000n);
+  });
+
+  it('refuses a balanced posting that would drive any claim aggregate negative', async () => {
+    // Balancing per asset is not the same guarantee: this posting balances and still leaves a
+    // claim below zero. Direct postTransaction callers are held to it too, at COMMIT.
+    await expect(
+      ledger.postTransaction({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        epoch: 1,
+        ledgerTxnId: 'txn-negative',
+        source: { kind: 'adjust', ref: 'n1' },
+        description: 'quarantine more than is held',
+        entries: [
+          {
+            accountKind: 'STRATEGY',
+            owner: 'strategy-b',
+            claimState: 'AVAILABLE',
+            asset: USDT,
+            deltaAtoms: -1n,
+          },
+          {
+            accountKind: 'STRATEGY',
+            owner: 'strategy-b',
+            claimState: 'QUARANTINED',
+            asset: USDT,
+            deltaAtoms: 1n,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: '23000' });
+
+    // And the raw path, which is how the defect was first demonstrated. A fill has consumed
+    // 14,000 of the 15,000 reserved, so releasing another 14,000 by hand takes the
+    // reservation - and the strategy's RESERVED claim - below zero.
+    expect(await consume(14_000n)).toMatchObject({ ok: true });
+    let refusal = 'accepted';
+    try {
+      await harness.admin.query('BEGIN');
+      await harness.admin.query(
+        `INSERT INTO ledger_transactions (workspace_id, pool_id, epoch, ledger_txn_id, revision, source_kind, source_ref, description)
+         VALUES ($1, $2, 1, 'txn-raw', 99, 'adjust', 'raw', 'x')`,
+        [WORKSPACE, POOL],
+      );
+      await harness.admin.query(
+        `INSERT INTO ledger_entries VALUES ($1,$2,'txn-raw',1,'STRATEGY','strategy-a','RESERVED','USDT','v1',-14000,'res-1')`,
+        [WORKSPACE, POOL],
+      );
+      await harness.admin.query(
+        `INSERT INTO ledger_entries VALUES ($1,$2,'txn-raw',2,'STRATEGY','strategy-a','AVAILABLE','USDT','v1',14000,NULL)`,
+        [WORKSPACE, POOL],
+      );
+      await harness.admin.query('COMMIT');
+    } catch (error) {
+      refusal = sqlState(error);
+      await harness.admin.query('ROLLBACK').catch(() => undefined);
+    }
+    expect(refusal).toBe('23000');
+  });
+
+  it('requires a RESERVED movement to name its reservation, and only a RESERVED one', async () => {
+    let unattributed = 'accepted';
+    try {
+      await harness.admin.query('BEGIN');
+      await harness.admin.query(
+        `INSERT INTO ledger_transactions (workspace_id, pool_id, epoch, ledger_txn_id, revision, source_kind, source_ref, description)
+         VALUES ($1, $2, 1, 'txn-anon', 98, 'adjust', 'anon', 'x')`,
+        [WORKSPACE, POOL],
+      );
+      await harness.admin.query(
+        `INSERT INTO ledger_entries VALUES ($1,$2,'txn-anon',1,'STRATEGY','strategy-a','RESERVED','USDT','v1',-1,NULL)`,
+        [WORKSPACE, POOL],
+      );
+      await harness.admin.query('COMMIT');
+    } catch (error) {
+      unattributed = sqlState(error);
+      await harness.admin.query('ROLLBACK').catch(() => undefined);
+    }
+    expect(unattributed).toBe('23514');
+  });
+});
