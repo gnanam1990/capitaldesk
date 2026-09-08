@@ -92,10 +92,13 @@ export function markApprovedPlan(input: {
   readonly signer: BinanceLimitIocSigner;
   readonly venueClockOffsetMs: number;
   readonly transmissionLatencyBudgetMs: number;
-  readonly now: () => Date;
 }): Promise<MarkOutcome> {
   return input.repository.markAuthorized(input.mark, async (context) => {
-    const now = input.now();
+    const clock = await context.client.query<{ db_now: Date }>(
+      'SELECT clock_timestamp() AS db_now',
+    );
+    const now = clock.rows[0]?.db_now;
+    if (now === undefined) return { ok: false, detail: 'DATABASE_CLOCK_UNAVAILABLE' };
     const eligibility = await ApprovalRepository.eligibilityOn(context.client, {
       workspaceId: input.mark.workspaceId,
       poolId: input.mark.poolId,
