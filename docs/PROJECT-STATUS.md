@@ -12,7 +12,7 @@ is not a claim.
 - **Previous milestone:** M0 was reviewed and **merged** as
   [#1](https://github.com/gnanam1990/capitaldesk/pull/1) at `338ab0afb3f64cc1cdb0422ad8644e0396953ede`.
 - **Module 03:** complete — see [docs/handoffs/03.md](handoffs/03.md).
-- **Module 04:** not started.
+- **Module 04:** complete — see [docs/handoffs/04.md](handoffs/04.md).
 
 ## What this milestone is, and is not
 
@@ -43,7 +43,7 @@ there is no integration proof and none is claimed.
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/` |
 | Identity, sessions, agent credentials    | Implemented (module 03)          | `packages/domain`, `apps/api/src/auth`, 60 unit + 88 integration cases    |
 | Same-origin console routing              | Implemented, proxy verified      | `apps/web/src/app/api-routing.ts`, 6 unit cases                           |
-| Transactional journal (module 04)        | Not started                      | —                                                                         |
+| Transactional journal (module 04)        | Implemented (module 04)          | `packages/db/src/journal`, 46 integration cases on real PostgreSQL        |
 | CI                                       | Fresh checkout + real PostgreSQL | `.github/workflows/ci.yml`                                                |
 | Economic core (M1-M3)                    | Not started                      | —                                                                         |
 | Venue integration                        | **Blocked**, see below           | —                                                                         |
@@ -60,17 +60,17 @@ pnpm run verify
 CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm run test:integration
 ```
 
-| Command                     | Result                                            |
-| --------------------------- | ------------------------------------------------- |
-| `pnpm run format:check`     | pass                                              |
-| `pnpm run typecheck`        | pass                                              |
-| `pnpm run lint`             | pass                                              |
-| `pnpm run check:layering`   | pass — 9 packages, 43 crossings checked           |
-| `pnpm run check:secrets`    | pass — 210 files scanned                          |
-| `pnpm run test:unit`        | **507 passed**, 0 skipped, 31 files               |
-| `pnpm run test:property`    | **13 passed**, seed 20260908                      |
-| `pnpm run test:integration` | **135 passed**, 9 files, against PostgreSQL 17.10 |
-| `pnpm run build`            | pass — all packages and apps                      |
+| Command                     | Result                                             |
+| --------------------------- | -------------------------------------------------- |
+| `pnpm run format:check`     | pass                                               |
+| `pnpm run typecheck`        | pass                                               |
+| `pnpm run lint`             | pass                                               |
+| `pnpm run check:layering`   | pass — 9 packages, 45 crossings checked            |
+| `pnpm run check:secrets`    | pass — 232 files scanned                           |
+| `pnpm run test:unit`        | **507 passed**, 0 skipped, 31 files                |
+| `pnpm run test:property`    | **13 passed**, seed 20260908                       |
+| `pnpm run test:integration` | **181 passed**, 17 files, against PostgreSQL 17.10 |
+| `pnpm run build`            | pass — all packages and apps                       |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
@@ -78,10 +78,11 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 | ----------- | ----- | --------------------------------------------------------------------------------------------------------------- |
 | unit        | 507   | contracts 284, web 63, tools 37, api 36, config 35, domain 29, observability 23 (by package, from the reporter) |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                                  |
-| integration | 135   | auth 56, migrations 30, identity scope 11, CLI 18, worker/executor 12, API 8                                    |
+| integration | 181   | auth 56, journal 46, migrations 30, CLI 18, worker/executor 12, identity scope 11, API 8                        |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 88
-integration cases listed in [docs/handoffs/03.md](handoffs/03.md), not the workspace figures.
+integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 46
+integration cases in [docs/handoffs/04.md](handoffs/04.md) — not the workspace figures.
 
 Toolchain: Node 22.23.1, pnpm 11.10.0, TypeScript 5.9.3, Fastify 5.12.3, Next 16.3.4,
 React 19.2.8, Vitest 4.1.11, zod 4.5.4, PostgreSQL 17.10 (Homebrew, local).
@@ -100,6 +101,6 @@ proof**, which is why the code reports execution as unavailable rather than assu
 
 ## Next action
 
-Module 04 — the transactional journal — on the same branch. Migration `0003_journal.sql` is
-reserved for it and no other module. The M1 pull request is opened only after module 04 is
-complete, the full gate has been run from a fresh checkout, and the branch is clean.
+Run the full gate from a fresh checkout of the branch head, push, and open the M1 pull
+request for independent maintainer review. Not merged by the implementer. Modules 05, 06 and
+07 are unblocked by this milestone.
