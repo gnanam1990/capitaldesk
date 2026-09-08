@@ -1,6 +1,7 @@
 import { assertMayMount } from '@capitaldesk/contracts';
 import { loadExecutorConfig } from '@capitaldesk/config';
 import { createLogger } from '@capitaldesk/observability';
+import { runUntilShutdown } from './lifetime.js';
 
 /**
  * Executor process entry point.
@@ -35,8 +36,8 @@ log.info(
   'executor started; no dispatch path is implemented at this milestone',
 );
 
-await new Promise<void>((resolve) => {
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.once(signal, () => resolve());
-  }
-});
+// Blocks on a real referenced handle until SIGINT or SIGTERM. A pending promise alone does
+// not keep Node alive: the process would exit with status 13 the moment logging flushed.
+await runUntilShutdown(log);
+
+log.info('shutdown complete');
