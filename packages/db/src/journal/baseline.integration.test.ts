@@ -13,6 +13,7 @@ import {
   ACCOUNT,
   DATABASE_URL,
   JournalHarness,
+  OTHER_WORKSPACE,
   POOL,
   WORKSPACE,
   sqlRefusal,
@@ -31,7 +32,9 @@ const describeIfDatabase = DATABASE_URL === undefined ? describe.skip : describe
 const USDT = { code: 'USDT', scaleVersion: 'v1' } as const;
 const BTC = { code: 'BTC', scaleVersion: 'v1' } as const;
 const SUPPORTED = supportedAssets({ base: BTC, quote: USDT, feeAssets: [] });
-const OWNER = { role: 'owner', credentialClass: 'OWNER_SESSION' } as const;
+const OWNER = { kind: 'owner-session', role: 'owner', subjectId: 'user-owner' } as const;
+const SESSION = 'f'.repeat(64);
+const OTHER_SESSION = 'e'.repeat(64);
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 
 describeIfDatabase('account baseline and owner allocation', () => {
@@ -50,8 +53,61 @@ describeIfDatabase('account baseline and owner allocation', () => {
     await harness.seedPool();
     baselines = new BaselineRepository(harness.pool);
     ledger = new LedgerRepository(harness.pool);
+    await seedOwnerSession(SESSION, 'user-owner', 'owner');
+    await seedOwnerSession(OTHER_SESSION, 'user-owner', 'owner');
     await seedCompleteCut('cut-1');
   });
+
+  /**
+   * A real owner, a real membership and a real live session.
+   *
+   * The allocation binds to the stored session rather than to a role the caller typed, so the
+   * fixtures have to establish one the same way authentication does.
+   */
+  async function seedOwnerSession(
+    sessionHash: string,
+    userId: string,
+    role: 'owner' | 'operator' | 'viewer',
+    options: {
+      workspaceId?: string;
+      revoked?: boolean;
+      expired?: boolean;
+      userDisabled?: boolean;
+    } = {},
+  ): Promise<void> {
+    const workspaceId = options.workspaceId ?? WORKSPACE;
+    await harness.admin.query(
+      `INSERT INTO users (user_id, login_name, disabled_at)
+       VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING`,
+      [
+        userId,
+        userId.replace(/[^a-z0-9]/g, '-'),
+        options.userDisabled === true ? new Date() : null,
+      ],
+    );
+    await harness.admin.query(
+      `INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, $3)
+       ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+      [workspaceId, userId, role],
+    );
+    const expired = options.expired === true;
+    await harness.admin.query(
+      `INSERT INTO owner_sessions
+         (session_id_hash, workspace_id, user_id, created_at, last_seen_at,
+          absolute_expires_at, idle_expires_at, revoked_at, revoked_reason)
+       VALUES ($1, $2, $3, now() - interval '1 hour', now(),
+               now() + interval '11 hours', $4, $5, $6)
+       ON CONFLICT (session_id_hash) DO NOTHING`,
+      [
+        sessionHash,
+        workspaceId,
+        userId,
+        expired ? new Date(Date.now() - 60_000) : new Date(Date.now() + 1_800_000),
+        options.revoked === true ? new Date() : null,
+        options.revoked === true ? 'revoked for the test' : null,
+      ],
+    );
+  }
   afterEach(async () => {
     await harness.cleanup();
   });
@@ -505,6 +561,188 @@ describeIfDatabase('account baseline and owner allocation', () => {
         expect(refusal.constraint).toBe('account_baselines_one_per_epoch');
       });
 
+      /**
+       * The service enforces all of this. These prove the database does too, because a direct
+       * writer bypasses the service and these records are what every later claim descends
+       * from.
+       */
+      describe('the database refuses an unsupported baseline row', () => {
+        async function insertBaseline(overrides: Record<string, unknown> = {}): Promise<void> {
+          await harness.admin.query(
+            `INSERT INTO account_baselines
+               (workspace_id, pool_id, epoch, baseline_id, stable_account_id, environment,
+                cut_id, ledger_txn_id, supported_assets, excluded_assets, cost_basis_known)
+             VALUES ($1,$2,1,$3,$4,$5,$6,$7,'[]'::jsonb,'[]'::jsonb,$8)`,
+            [
+              WORKSPACE,
+              POOL,
+              overrides['baselineId'] ?? 'forged',
+              ACCOUNT.stableAccountId,
+              ACCOUNT.environment,
+              overrides['cutId'] ?? 'cut-1',
+              overrides['ledgerTxnId'] === undefined ? null : overrides['ledgerTxnId'],
+              overrides['costBasisKnown'] ?? false,
+            ],
+          );
+        }
+
+        it('refuses a row citing a cut whose coverage was never complete', async () => {
+          await seedCompleteCut('cut-bad', 1, {
+            coverageState: 'INCOMPLETE',
+            detectionScope: 'NET_BALANCE_CHANGES_ONLY',
+            unmet: '["a source observation is outside its freshness class"]',
+          });
+          await expect(insertBaseline({ cutId: 'cut-bad' })).rejects.toMatchObject({
+            code: '23001',
+          });
+        });
+
+        it('refuses a row claiming no postings when its snapshot is not empty', async () => {
+          // cut-1's closing snapshot holds 1000. "No postings" contradicts it.
+          await expect(insertBaseline()).rejects.toMatchObject({ code: '23001' });
+        });
+
+        it('accepts no postings when the snapshot really is empty', async () => {
+          await seedCompleteCut('cut-zero', 1, { balances: [] });
+          await expect(insertBaseline({ cutId: 'cut-zero' })).resolves.toBeUndefined();
+        });
+
+        it('refuses a row citing another baseline’s transaction', async () => {
+          await bootstrap();
+          await seedCompleteCut('cut-2', 1, {
+            balances: [{ asset: 'USDT@v1', freeAtoms: '1000', lockedAtoms: '0' }],
+          });
+          // A second baseline row is refused by the one-per-epoch key first, so this proves
+          // the source binding on a row that clears it: a different pool epoch is not
+          // available, so the assertion is that the two guards together leave no opening.
+          await expect(
+            insertBaseline({ cutId: 'cut-2', ledgerTxnId: 'baseline-baseline-1' }),
+          ).rejects.toBeTruthy();
+        });
+
+        it('refuses cost_basis_known = true until a proven basis exists', async () => {
+          await seedCompleteCut('cut-zero', 1, { balances: [] });
+          let refusal = { state: 'accepted', constraint: 'accepted' };
+          try {
+            await insertBaseline({ cutId: 'cut-zero', costBasisKnown: true });
+          } catch (error) {
+            refusal = sqlRefusal(error);
+          }
+          // A direct writer could otherwise make unknown history look tax- and P&L-ready.
+          expect(refusal.constraint).toBe('account_baselines_cost_basis_unproven');
+        });
+      });
+
+      describe('the database refuses an unsupported allocation row', () => {
+        it('refuses an allocation before any baseline exists for the epoch', async () => {
+          // Claims cannot be moved before an opening establishes them.
+          //
+          // Reaching this rule takes some care, because the guards beneath it are real: a
+          // transaction with no entries is refused at commit, and an allocation out of a HOUSE
+          // that holds nothing drives a claim negative. So HOUSE is given a balance by a
+          // posting that is *not* a baseline, and the allocation is then otherwise valid —
+          // leaving the missing baseline as the only thing wrong with it.
+          const seeded = await ledger.postTransaction({
+            workspaceId: WORKSPACE,
+            poolId: POOL,
+            epoch: 1,
+            ledgerTxnId: 'txn-unbaselined',
+            source: { kind: 'operator', ref: 'unbaselined' },
+            description: 'a credit with no opening behind it',
+            entries: [
+              {
+                accountKind: 'ASSET_CONTROL',
+                owner: 'ASSET_CONTROL',
+                claimState: 'CONTROL',
+                asset: { code: 'USDT', scale: 'v1' },
+                deltaAtoms: 1_000n,
+              },
+              {
+                accountKind: 'HOUSE',
+                owner: 'HOUSE',
+                claimState: 'AVAILABLE',
+                asset: { code: 'USDT', scale: 'v1' },
+                deltaAtoms: 1_000n,
+              },
+            ],
+          });
+          expect(seeded).toMatchObject({ ok: true });
+
+          await ledger.postTransaction({
+            workspaceId: WORKSPACE,
+            poolId: POOL,
+            epoch: 1,
+            ledgerTxnId: 'allocation-early',
+            source: { kind: 'owner-allocation', ref: 'early' },
+            description: 'internal budget allocation HOUSE to strategy-a',
+            entries: [
+              {
+                accountKind: 'HOUSE',
+                owner: 'HOUSE',
+                claimState: 'AVAILABLE',
+                asset: { code: 'USDT', scale: 'v1' },
+                deltaAtoms: -1n,
+              },
+              {
+                accountKind: 'STRATEGY',
+                owner: 'strategy-a',
+                claimState: 'AVAILABLE',
+                asset: { code: 'USDT', scale: 'v1' },
+                deltaAtoms: 1n,
+              },
+            ],
+          });
+          let refusal = 'accepted';
+          try {
+            await harness.admin.query(
+              `INSERT INTO owner_allocations
+                 (workspace_id, pool_id, epoch, allocation_id, revision, from_owner, to_owner,
+                  asset_code, asset_scale, atoms, authorized_by, ledger_txn_id)
+               VALUES ($1,$2,1,'early',1,'HOUSE','strategy-a','USDT','v1',1,$3,
+                       'allocation-early')`,
+              [WORKSPACE, POOL, SESSION],
+            );
+          } catch (error) {
+            refusal = sqlRefusal(error).state;
+          }
+          expect(refusal).toBe('23001');
+          expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(0);
+        });
+
+        it('refuses a row citing another allocation’s transaction', async () => {
+          await bootstrap();
+          const first = await baselines.allocate({
+            workspaceId: WORKSPACE,
+            poolId: POOL,
+            epoch: 1,
+            allocationId: 'alloc-1',
+            actor: OWNER,
+            sessionIdHash: SESSION,
+            from: 'HOUSE',
+            to: 'strategy-a',
+            asset: USDT,
+            atoms: 500n,
+          });
+          expect(first).toMatchObject({ ok: true });
+
+          // A second authorisation record pointing at one movement reads afterwards as two
+          // movements.
+          let refusal = 'accepted';
+          try {
+            await harness.admin.query(
+              `INSERT INTO owner_allocations
+                 (workspace_id, pool_id, epoch, allocation_id, revision, from_owner, to_owner,
+                  asset_code, asset_scale, atoms, authorized_by, ledger_txn_id)
+               VALUES ($1,$2,1,'forged',99,'HOUSE','strategy-a','USDT','v1',1,$3,$4)`,
+              [WORKSPACE, POOL, SESSION, (first as { ledgerTxnId: string }).ledgerTxnId],
+            );
+          } catch (error) {
+            refusal = sqlRefusal(error).state;
+          }
+          expect(refusal).toBe('23001');
+        });
+      });
+
       it('refuses a baseline attributed to an account the pool does not govern', async () => {
         let refusal = 'accepted';
         try {
@@ -568,7 +806,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
           epoch: 2,
           allocationId: 'alloc-across',
           actor: OWNER,
-          authorizedBy: 'session-1',
+          sessionIdHash: SESSION,
           from: 'HOUSE',
           to: 'strategy-a',
           asset: USDT,
@@ -590,7 +828,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
           epoch: 2,
           allocationId: 'alloc-ok',
           actor: OWNER,
-          authorizedBy: 'session-1',
+          sessionIdHash: SESSION,
           from: 'HOUSE',
           to: 'strategy-a',
           asset: USDT,
@@ -607,7 +845,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
         epoch: 1,
         allocationId: 'alloc-old',
         actor: OWNER,
-        authorizedBy: 'session-1',
+        sessionIdHash: SESSION,
         from: 'HOUSE',
         to: 'strategy-a',
         asset: USDT,
@@ -670,7 +908,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
         epoch: 1,
         allocationId: 'alloc-1',
         actor: OWNER,
-        authorizedBy: 'session-1',
+        sessionIdHash: SESSION,
         from: 'HOUSE',
         to: 'strategy-a',
         asset: USDT,
@@ -754,9 +992,110 @@ describeIfDatabase('account baseline and owner allocation', () => {
 
     it('refuses an agent credential', async () => {
       expect(
-        await allocate({ actor: { role: 'agent', credentialClass: 'AGENT_PROPOSAL' } }),
+        await allocate({
+          actor: { kind: 'agent-credential', role: 'agent', subjectId: 'user-owner' },
+        }),
       ).toEqual({ ok: false, reason: 'UNAUTHORIZED', detail: 'ACTOR_MAY_NOT_ALLOCATE' });
       expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(0);
+    });
+
+    /**
+     * A principal is a value a caller can construct. What it may not construct is the session
+     * row it claims to have authenticated against, so that is what the write binds to.
+     */
+    describe('the authorising session must be real, live and an owner’s', () => {
+      it('refuses a session that was never issued', async () => {
+        expect(await allocate({ sessionIdHash: 'a'.repeat(64) })).toEqual({
+          ok: false,
+          reason: 'UNAUTHORIZED',
+          detail: 'SESSION_UNKNOWN',
+        });
+        expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(0);
+      });
+
+      it('refuses a revoked session', async () => {
+        const revoked = 'b'.repeat(64);
+        await seedOwnerSession(revoked, 'user-owner', 'owner', { revoked: true });
+        expect(await allocate({ sessionIdHash: revoked })).toMatchObject({
+          reason: 'UNAUTHORIZED',
+          detail: 'SESSION_REVOKED',
+        });
+      });
+
+      it('refuses an expired session', async () => {
+        const expired = 'c'.repeat(64);
+        await seedOwnerSession(expired, 'user-owner', 'owner', { expired: true });
+        expect(await allocate({ sessionIdHash: expired })).toMatchObject({
+          reason: 'UNAUTHORIZED',
+          detail: 'SESSION_EXPIRED',
+        });
+      });
+
+      it('refuses a session belonging to another workspace', async () => {
+        const foreign = 'd'.repeat(64);
+        await seedOwnerSession(foreign, 'user-elsewhere', 'owner', {
+          workspaceId: OTHER_WORKSPACE,
+        });
+        expect(
+          await allocate({
+            sessionIdHash: foreign,
+            actor: { kind: 'owner-session', role: 'owner', subjectId: 'user-elsewhere' },
+          }),
+        ).toMatchObject({ reason: 'UNAUTHORIZED', detail: 'SESSION_WRONG_WORKSPACE' });
+      });
+
+      it('refuses a real owner session presented with somebody else’s principal', async () => {
+        // The session authenticated one user; the principal claims another.
+        await seedOwnerSession('9'.repeat(64), 'user-other', 'operator');
+        expect(
+          await allocate({
+            actor: { kind: 'owner-session', role: 'owner', subjectId: 'user-other' },
+          }),
+        ).toMatchObject({ reason: 'UNAUTHORIZED', detail: 'SESSION_SUBJECT_MISMATCH' });
+      });
+
+      it('refuses a live session whose membership is not owner', async () => {
+        const operator = '1'.repeat(64);
+        await seedOwnerSession(operator, 'user-operator', 'operator');
+        expect(
+          await allocate({
+            sessionIdHash: operator,
+            actor: { kind: 'owner-session', role: 'owner', subjectId: 'user-operator' },
+          }),
+        ).toMatchObject({ reason: 'UNAUTHORIZED', detail: 'MEMBERSHIP_NOT_OWNER' });
+      });
+
+      it('refuses a session whose user has been disabled', async () => {
+        // One owner per workspace, so this disables the owner that exists rather than adding
+        // a second one the schema would refuse.
+        await harness.admin.query(`UPDATE users SET disabled_at = now() WHERE user_id = $1`, [
+          'user-owner',
+        ]);
+        expect(await allocate()).toMatchObject({
+          reason: 'UNAUTHORIZED',
+          detail: 'USER_DISABLED',
+        });
+      });
+
+      it('refuses a direct write naming a session that does not exist', async () => {
+        // The database keeps the column referential even when a service is bypassed. The row
+        // cites a real allocation transaction so the session reference is what fails.
+        const real = await allocate();
+        expect(real).toMatchObject({ ok: true });
+        let refusal = { state: 'accepted', constraint: 'accepted' };
+        try {
+          await harness.admin.query(
+            `INSERT INTO owner_allocations
+               (workspace_id, pool_id, epoch, allocation_id, revision, from_owner, to_owner,
+                asset_code, asset_scale, atoms, authorized_by, ledger_txn_id)
+             VALUES ($1,$2,1,'forged',99,'HOUSE','strategy-a','USDT','v1',1,$3,$4)`,
+            [WORKSPACE, POOL, '0'.repeat(64), (real as { ledgerTxnId: string }).ledgerTxnId],
+          );
+        } catch (error) {
+          refusal = sqlRefusal(error);
+        }
+        expect(refusal.constraint).toBe('owner_allocations_authorized_by_session');
+      });
     });
 
     it('refuses an archived strategy', async () => {
@@ -787,7 +1126,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
         { from: 'strategy-a', to: 'HOUSE' },
         { asset: BTC },
         // The authorising session is part of the decision, not metadata alongside it.
-        { authorizedBy: 'session-2' },
+        { sessionIdHash: OTHER_SESSION },
       ]) {
         const label = Object.keys(changed).join(',');
         expect(await allocate(changed), label).toEqual({
@@ -839,7 +1178,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
           epoch: 1,
           allocationId: id,
           actor: OWNER,
-          authorizedBy: 'session-1',
+          sessionIdHash: SESSION,
           from: 'HOUSE',
           to,
           asset: USDT,
@@ -879,7 +1218,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
           epoch: 1,
           allocationId: 'alloc-bad-id-!!',
           actor: OWNER,
-          authorizedBy: 'session-1',
+          sessionIdHash: SESSION,
           from: 'HOUSE',
           to: 'strategy-a',
           asset: USDT,
@@ -905,7 +1244,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
       const stored = await harness.admin.query<{ authorized_by: string; ledger_txn_id: string }>(
         'SELECT authorized_by, ledger_txn_id FROM owner_allocations',
       );
-      expect(stored.rows[0]?.authorized_by).toBe('session-1');
+      expect(stored.rows[0]?.authorized_by).toBe(SESSION);
       // Its postings are claim transfers only: ASSET_CONTROL is untouched, which is what
       // distinguishes an internal allocation from a venue movement.
       const control = await harness.admin.query<{ count: string }>(

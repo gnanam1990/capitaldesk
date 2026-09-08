@@ -72,9 +72,21 @@ export interface AllocationInput {
   readonly poolId: string;
   readonly epoch: number;
   readonly allocationId: string;
+  /**
+   * The authenticated principal, as the API resolved it from stored columns.
+   *
+   * Checked against the session below rather than trusted: a principal is a value a caller can
+   * construct, and the first version of this accepted one with no owner session in the
+   * database at all.
+   */
   readonly actor: AllocationActor;
-  /** The owner session that authorised it, for provenance. */
-  readonly authorizedBy: string;
+  /**
+   * The SHA-256 of the owner session this was authorised under.
+   *
+   * The session id itself never reaches the database — module 03 stores only its digest — so
+   * this is the same value that authenticated the request.
+   */
+  readonly sessionIdHash: string;
   readonly from: string;
   readonly to: string;
   readonly asset: AssetKey;
@@ -92,6 +104,16 @@ export type AllocationOutcome =
   | { readonly ok: false; readonly reason: 'UNAUTHORIZED'; readonly detail: string }
   | { readonly ok: false; readonly reason: 'ALLOCATION_CONFLICT' }
   | { readonly ok: false; readonly reason: 'NO_BASELINE' };
+
+/** Why a session could not authorise an allocation. */
+type SessionRefusal =
+  | 'SESSION_UNKNOWN'
+  | 'SESSION_REVOKED'
+  | 'SESSION_EXPIRED'
+  | 'SESSION_WRONG_WORKSPACE'
+  | 'SESSION_SUBJECT_MISMATCH'
+  | 'MEMBERSHIP_NOT_OWNER'
+  | 'USER_DISABLED';
 
 export class BaselineRepository {
   constructor(private readonly pool: Pool) {}
@@ -270,7 +292,7 @@ export class BaselineRepository {
           BigInt(stored.atoms) === input.atoms &&
           // The authorising session is part of what was decided. A replay under a different
           // authorisation is a different decision wearing the same id.
-          stored.authorized_by === input.authorizedBy;
+          stored.authorized_by === input.sessionIdHash;
         // Same id, same facts is a replay. Same id, different facts is a caller contradicting
         // itself, and the recorded decision does not change.
         return same
@@ -303,6 +325,13 @@ export class BaselineRepository {
         availableOf(client, input, 'HOUSE'),
         availableOf(client, input, strategyId),
       ]);
+
+      // What only the database can answer: that the session is real, live, belongs to this
+      // workspace, authenticated the user the principal names, and that user is an owner.
+      const session = await resolveOwnerSession(client, input);
+      if (session !== null) {
+        return { ok: false, reason: 'UNAUTHORIZED', detail: session };
+      }
 
       const authorization = authorizeAllocation({
         actor: input.actor,
@@ -362,7 +391,7 @@ export class BaselineRepository {
           input.asset.code,
           input.asset.scaleVersion,
           input.atoms.toString(),
-          input.authorizedBy,
+          input.sessionIdHash,
           ledgerTxnId,
         ],
       );
@@ -579,4 +608,51 @@ function readinessFrom(
     observedAssets: opening.map((position) => position.asset),
     alreadyBootstrapped: evidence.alreadyBootstrapped,
   };
+}
+
+/**
+ * The reason this session may not authorise an allocation, or null when it may.
+ *
+ * Every clause is a way a caller could otherwise present authority it does not hold: a session
+ * that never existed, one an owner revoked, one that has expired, one belonging to another
+ * workspace, one that authenticated a different user than the principal claims, or one whose
+ * user is not an owner of this workspace. `now()` is the database clock throughout, because a
+ * caller-supplied instant would decide its own expiry.
+ */
+async function resolveOwnerSession(
+  client: Queryable,
+  input: AllocationInput,
+): Promise<SessionRefusal | null> {
+  const result = await client.query<{
+    workspace_id: string;
+    user_id: string;
+    revoked: boolean;
+    expired: boolean;
+    role: string | null;
+    user_disabled: boolean;
+  }>(
+    `SELECT s.workspace_id,
+            s.user_id,
+            s.revoked_at IS NOT NULL                                   AS revoked,
+            (s.absolute_expires_at <= now() OR s.idle_expires_at <= now()) AS expired,
+            m.role,
+            u.disabled_at IS NOT NULL                                  AS user_disabled
+       FROM owner_sessions s
+       LEFT JOIN memberships m
+              ON m.workspace_id = s.workspace_id AND m.user_id = s.user_id
+       LEFT JOIN users u ON u.user_id = s.user_id
+      WHERE s.session_id_hash = $1`,
+    [input.sessionIdHash],
+  );
+  const row = result.rows[0];
+  if (row === undefined) return 'SESSION_UNKNOWN';
+  if (row.revoked) return 'SESSION_REVOKED';
+  if (row.expired) return 'SESSION_EXPIRED';
+  if (row.workspace_id !== input.workspaceId) return 'SESSION_WRONG_WORKSPACE';
+  // The principal must be the user this session actually authenticated. Without this a real
+  // owner session could be presented alongside somebody else's principal.
+  if (row.user_id !== input.actor.subjectId) return 'SESSION_SUBJECT_MISMATCH';
+  if (row.user_disabled) return 'USER_DISABLED';
+  if (row.role !== 'owner') return 'MEMBERSHIP_NOT_OWNER';
+  return null;
 }

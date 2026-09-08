@@ -7,7 +7,7 @@ import { authorizeAllocation, type AllocationRequest } from './allocation.js';
  * It does not move funds at the venue. Every rule below exists so that it cannot be mistaken
  * for one, or used to give a strategy something HOUSE does not have.
  */
-const OWNER = { role: 'owner', credentialClass: 'OWNER_SESSION' } as const;
+const OWNER = { kind: 'owner-session', role: 'owner', subjectId: 'user-1' } as const;
 
 const REQUEST: AllocationRequest = {
   actor: OWNER,
@@ -41,7 +41,7 @@ describe('allocation authorization', () => {
       expect(
         authorizeAllocation({
           ...REQUEST,
-          actor: { role: 'agent', credentialClass: 'AGENT_PROPOSAL' },
+          actor: { kind: 'agent-credential', role: 'agent', subjectId: 'cred-1' },
         }),
       ).toEqual({ ok: false, reason: 'ACTOR_MAY_NOT_ALLOCATE' });
     });
@@ -49,18 +49,21 @@ describe('allocation authorization', () => {
     it('refuses an operator and a viewer', () => {
       for (const role of ['operator', 'viewer'] as const) {
         expect(
-          authorizeAllocation({ ...REQUEST, actor: { role, credentialClass: 'OWNER_SESSION' } }),
+          authorizeAllocation({
+            ...REQUEST,
+            actor: { kind: 'owner-session', role, subjectId: 'user-1' },
+          }),
           role,
         ).toEqual({ ok: false, reason: 'ACTOR_MAY_NOT_ALLOCATE' });
       }
     });
 
-    it('refuses an owner role presented on a non-session credential', () => {
-      // The role alone is a claim; the credential class is what carries it.
+    it('refuses an owner role presented on an agent credential', () => {
+      // The role alone is a claim; the credential it arrived on is what carries it.
       expect(
         authorizeAllocation({
           ...REQUEST,
-          actor: { role: 'owner', credentialClass: 'AGENT_PROPOSAL' },
+          actor: { kind: 'agent-credential', role: 'owner', subjectId: 'cred-1' },
         }),
       ).toEqual({ ok: false, reason: 'ACTOR_MAY_NOT_ALLOCATE' });
     });
@@ -148,7 +151,7 @@ describe('allocation authorization', () => {
     // sees progress rather than a different complaint each time.
     const broken = authorizeAllocation({
       ...REQUEST,
-      actor: { role: 'agent', credentialClass: 'AGENT_PROPOSAL' },
+      actor: { kind: 'agent-credential', role: 'agent', subjectId: 'cred-1' },
       from: 'strategy-a',
       to: 'strategy-b',
       atoms: -1n,

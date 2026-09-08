@@ -16,7 +16,7 @@ import { verifyConservation, type AssetPosition, type OwnerClaim } from './conse
 const SEED = 20260908;
 fc.configureGlobal({ seed: SEED, numRuns: 500 });
 
-const OWNER: AllocationActor = { role: 'owner', credentialClass: 'OWNER_SESSION' };
+const OWNER: AllocationActor = { kind: 'owner-session', role: 'owner', subjectId: 'user-1' };
 const ASSET = { code: 'USDT', scaleVersion: 'v1' } as const;
 
 /** A non-negative claim, which is the only kind the ledger may produce. */
@@ -167,7 +167,7 @@ describe('allocation sequences, over generated moves', () => {
     fc.assert(
       fc.property(fc.bigInt({ min: 1n, max: 10n ** 6n }), (atoms) => {
         const authorization = authorizeAllocation({
-          actor: { role: 'agent', credentialClass: 'AGENT_PROPOSAL' },
+          actor: { kind: 'agent-credential', role: 'agent', subjectId: 'cred-1' },
           from: 'HOUSE',
           to: 'strategy-a',
           asset: ASSET,

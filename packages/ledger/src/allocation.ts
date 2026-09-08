@@ -1,4 +1,4 @@
-import type { AssetKey, CredentialClass } from '@capitaldesk/contracts';
+import type { AssetKey } from '@capitaldesk/contracts';
 
 /**
  * Owner internal allocation (TDD section 6; prompt 06 task 3).
@@ -11,18 +11,25 @@ import type { AssetKey, CredentialClass } from '@capitaldesk/contracts';
  * request sees progress rather than a different complaint each time.
  */
 
-export type AllocationActorRole = 'owner' | 'operator' | 'agent' | 'viewer';
-
+/**
+ * The authority an allocation was decided under.
+ *
+ * Not a role string and not a credential-class label. Both are things a caller can type, and
+ * the first version of this accepted `{ role: 'owner', credentialClass: 'OWNER_SESSION' }` from
+ * anyone who wrote it — with no owner session in the database at all. What this carries is the
+ * outcome of an authorization the caller has already had to obtain: a `Principal` built from
+ * stored columns, and the session it was resolved from.
+ *
+ * The pure rules below still refuse an actor that is not an owner-session principal, because a
+ * predicate that trusted its input would be decoration. The service adds what only the
+ * database can answer: that the session is real, live and belongs to an owner of this
+ * workspace.
+ */
 export interface AllocationActor {
-  readonly role: AllocationActorRole;
-  /**
-   * The credential the role arrived on.
-   *
-   * Checked as well as the role, because a role is a claim and the credential class is what
-   * carries it. An agent credential presenting `owner` is exactly the escalation ADR-0007
-   * separates the classes to prevent.
-   */
-  readonly credentialClass: CredentialClass;
+  readonly kind: 'owner-session' | 'agent-credential';
+  readonly role: 'owner' | 'operator' | 'agent' | 'viewer';
+  /** The user this principal authenticated as. */
+  readonly subjectId: string;
 }
 
 /** `HOUSE`, or a strategy id. `ASSET_CONTROL` is not an owner and is refused. */
@@ -62,9 +69,11 @@ const HOUSE = 'HOUSE';
 const ASSET_CONTROL = 'ASSET_CONTROL';
 
 export function authorizeAllocation(request: AllocationRequest): AllocationAuthorization {
-  // Only the owner. An agent proposes; giving it budget authority would let a proposal fund
-  // itself, and an operator's authority stops short of moving the owner's capital.
-  if (request.actor.role !== 'owner' || request.actor.credentialClass !== 'OWNER_SESSION') {
+  // Only an owner, and only on an owner session. An agent proposes; giving it budget authority
+  // would let a proposal fund itself, and an operator's authority stops short of moving the
+  // owner's capital. The kind is checked as well as the role because a role is a claim and the
+  // credential it arrived on is what carries it.
+  if (request.actor.role !== 'owner' || request.actor.kind !== 'owner-session') {
     return { ok: false, reason: 'ACTOR_MAY_NOT_ALLOCATE' };
   }
 
