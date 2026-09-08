@@ -209,6 +209,18 @@ statement silently. The digests are compared; an exact repeat deduplicates, and 
 records an `evidence_conflicts` row holding both the stored and the incoming evidence, for
 the incident path in module 15. The stored evidence is still never overwritten.
 
+A fill is the same case with money in it. `recordFill` used `ON CONFLICT DO NOTHING`, so a
+second statement about one scoped trade id was reported as a duplicate even when it carried
+different quantities, a different commission asset or amount, a different time, or different
+source evidence. That is contradictory immutable economic evidence, and the fill allocator is
+built directly on it. Every field is compared now: an exact repeat dedupes, and any difference
+records a conflict naming the changed fields, with the stored fill untouched.
+
+Correlation is the third. A venue order already correlated to one dispatch attempt, observed
+again naming a different one, was silently kept as the first because the update used
+`coalesce` — on both the duplicate and the progressed path. One venue order cannot belong to
+two local attempts; a differing correlation is a conflict, and only an absent one is filled in.
+
 The same applies to order status. `ON CONFLICT DO NOTHING` meant every observation after the
 first was a no-op, so an order seen as `NEW` stayed `NEW` through `PARTIALLY_FILLED` and
 `FILLED` — status, version and last-observed time all frozen. The policy is now explicit:
