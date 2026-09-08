@@ -8,7 +8,7 @@
 ## Context
 
 The review accepts the controlled-rounding approach and is precise about what the evidence
-does *not* cover: an independently enumerated 5x2 oracle for T-055 supports the chosen
+does _not_ cover: an independently enumerated 5x2 oracle for T-055 supports the chosen
 method, but does not prove the general circulation construction, arbitrary combined fee
 subcaps, or every permitted exchange fill partition.
 
@@ -16,35 +16,55 @@ It also names a concrete hazard. Binance documents BNB commission falling back t
 received asset when the BNB balance is insufficient, so a BNB-only reservation assumption can
 be incomplete: the debited asset can change mid-order.
 
-The hard boundary is already acknowledged in the pack: an observed *rate* does not establish
-a conservative cumulative *debit bound* across all partial fills with native rounding.
+The hard boundary is already acknowledged in the pack: an observed _rate_ does not establish
+a conservative cumulative _debit bound_ across all partial fills with native rounding.
 
 ## Decision
 
-### 1. A fee policy is a capability, and it can be disabled
+### 1. A fee policy is a capability, and today none of them authorizes a real dispatch
 
-Every policy declares whether a conservative cumulative debit bound has been proven for every
-permitted partial fill. `cumulativeBoundProven: false` means dispatch is refused with
-`FEE_BOUND_UNPROVEN`. There is no "assume the rate" path.
+Every policy carries a `boundStatus` of `PROVEN`, `UNVERIFIED` or `REFUTED`. `REFUTED` means
+a bound was sought and shown not to exist — a demonstrated impossibility. No policy carries
+it, because we have no such proof for any of them; claiming one would be as inaccurate as
+claiming a bound we do not have. Only `PROVEN`
+may dispatch, and even then the gate additionally requires a `FeeBoundEvidence` record
+supplied at call time: the derivation's maximum fill count, the evidenced minimum fill size
+that makes that count finite, and a digest of the derivation. A policy constant can therefore
+never authorize dispatch on its own — flipping a status to `PROVEN` without producing a
+derivation still refuses.
 
-### 2. The one initially enabled policy: `STANDARD_NO_BNB_V1`
+### 2. `STANDARD_NO_BNB_V1` is UNVERIFIED, not proven
 
-- Commission is taken in the **received asset**: base on a BUY, quote on a SELL, at the
-  verified per-symbol rate. This matches Binance's standard schedule.
-- Per-fill ceiling is `ceil(rate x fillQuantity)` in that asset. The cumulative bound is the
-  sum of per-fill ceilings, which terminates because IOC execution cannot exceed the
-  requested quantity.
-- Requires the account's BNB fee payment to be **verified disabled**. If that setting cannot
-  be read — plausible on testnet — the capability is `UNVERIFIED` and any observed BNB
-  commission quarantines rather than being absorbed.
-- Consequence to state plainly in the UI: a fully filled BUY leaves net base below target by
-  the base commission, and no second order is created automatically.
+An earlier version of this decision declared it proven, reasoning that the cumulative bound
+is the sum of per-fill ceilings. Maintainer review was right to reject that: summing per-fill
+ceilings describes the **realized** fee once the fills are known. It is not an a-priori
+bound, because nothing there bounds the _number_ of fills. A conservative pre-trade bound
+needs an evidenced minimum fill size and a supported partition granularity, and deriving
+those is module 14's work against real venue evidence.
 
-### 3. `BNB_DISCOUNT_UNPROVEN` is defined and disabled
+Until that derivation exists, this policy refuses dispatch. What is settled about it:
 
-Defined so the code can name and refuse it, disabled because the documented insufficiency
-fallback has no proven bound. Enabling it later requires proving the fallback bound, not
-relaxing this decision.
+- Commission is taken in the **received asset** — base on a BUY, quote on a SELL — at the
+  verified per-symbol rate, matching Binance's standard schedule.
+- The per-fill ceiling is `ceil(rate x fillQuantity)` in that asset.
+- It requires the account's BNB fee payment to be **verified disabled**. If that setting
+  cannot be read, any observed BNB commission quarantines rather than being absorbed.
+- A fully filled BUY leaves net base below target by the base commission, and no second order
+  is created automatically. The UI must state this.
+
+### 2a. `QUOTE_FEE_FIXTURE_V1` is PROVEN only because the fixture fixes the partition
+
+The deterministic scenario states exactly which fills occur, so the fill count is known
+rather than bounded. That is precisely why the policy is refused outside `local`.
+
+### 3. `BNB_DISCOUNT_UNPROVEN` is defined, disabled and UNVERIFIED
+
+Defined so the code can name and refuse it. Its documented insufficiency fallback lets the
+debited asset change mid-order, and no pre-trade bound has been derived for that.
+
+It is `UNVERIFIED`, not `REFUTED`. We have an absent derivation, not a proof that no bound
+exists — a bound may well exist once the fallback condition is itself bounded. Enabling it
+later requires deriving that bound, not relaxing this decision.
 
 ### 4. `QUOTE_FEE_FIXTURE_V1` is fixture-only
 
@@ -75,6 +95,12 @@ than attempted under an assumed schedule.
 
 ## Tests
 
-Fee charged in quote, base and BNB; unsupported or unowned fee asset; a fee above the approved
-bound; fee-asset change within one child order; infeasible combined caps; the fixture policy
-refused outside `local`. Extends T-016, T-017, T-018, T-055, T-057, T-058.
+`STANDARD_NO_BNB_V1` refusing dispatch even with evidence supplied; a `PROVEN` policy
+refusing when no derivation is supplied, when the derivation names a different policy, when
+the fill count is not a finite positive integer, or when the minimum fill size is not
+positive; BNB routing refused regardless of evidence, and its status asserted to be UNVERIFIED with a
+rationale that does not claim impossibility; the fixture policy refused outside
+`local`; and an assertion that no shipped policy can authorize a real dispatch today. Then
+the accounting scenarios: fee charged in quote, base and BNB; unsupported or unowned fee
+asset; a fee above the approved bound; fee-asset change within one child order; infeasible
+combined caps. Extends T-016, T-017, T-018, T-055, T-057, T-058; new scenario T-070.
