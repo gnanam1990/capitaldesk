@@ -16,7 +16,9 @@ candidate was rejected as invalid. Two probes of my own were wrong and are recor
 | Proof      | The committed test that fails without the fix        |
 
 Commits: `085a4b5` process lifetime, `ab5b709` logging, `a2232f2` tooling, `03b3078`
-scanner tests, `a97cf03` contracts, `a6a5e72` database.
+scanner tests, `a97cf03` contracts, `a6a5e72` database, `57d6404` config credentials,
+`ccdd36b` API health probe, `dd9b689` console readiness, `134ae42` cap tables and the
+coverage condition count, and this document.
 
 ## P1 — confirmed and fixed
 
@@ -42,31 +44,31 @@ scanner tests, `a97cf03` contracts, `a6a5e72` database.
 
 ## P2 — confirmed and fixed
 
-| #   | ID         | Reproduced                                                | Resolution                                                        | Proof                             |
-| --- | ---------- | --------------------------------------------------------- | ----------------------------------------------------------------- | --------------------------------- |
-| 16  | 3954485700 | `kind` overridable through the spread                     | `kind` assigned last                                              | `marked-value.test.ts`            |
-| 17  | 3954485705 | Terminal states returned INVALIDATE                       | Only an open sealed plan invalidates                              | `lifecycle.test.ts`               |
-| 18  | 3954485708 | 200k-char price parsed before bounds (24ms)               | Length checked first                                              | `price.test.ts`                   |
-| 19  | 3954485719 | Fixture route mislabelled                                 | Documented as fixture-only, local-environment gated               | `fee-policy.test.ts`              |
-| 21  | 3954485729 | Negative estimate and non-date accepted                   | Validated                                                         | `marked-value.test.ts`            |
-| 22  | 3954485735 | Unreadable directory silently skipped                     | Only ENOENT ignored                                               | `check-layering.test.ts`          |
-| 23  | 3954485744 | `.js` sources unscanned                                   | JS extensions included                                            | Same file                         |
-| 25  | 3954485761 | Timezone-less deadline resolved in host zone              | Strict UTC parser                                                 | `time.test.ts`                    |
-| 26  | 3954485765 | Raw `BINANCE_*` accepted in the executor, its owning role | Raw value names split from reference names; refused in every role | `packages/config/src/env.test.ts` |
-| 27  | 3954485769 | Same-asset spend not netted (500 vs 400)                  | Spend subtracted                                                  | `risk.test.ts`                    |
-| 28  | 3954485775 | `parseAtoms(1000)` returned `1000n`                       | Non-strings refused                                               | `money.test.ts`                   |
-| 29  | 3954485779 | `20000` and `20000.00` differed                           | Prices canonicalised                                              | `price.test.ts`                   |
-| 30  | 3954485791 | `venue: "made-up-venue"` accepted                         | Allowlists enforced at runtime                                    | `identity.test.ts`                |
-| 31  | 3954485797 | Only connection had a timeout                             | Query timeout added                                               | `server.integration.test.ts`      |
-| 32  | 3954485803 | Two clients both applied one migration                    | Session advisory lock across the whole run                        | `migrator.integration.test.ts`    |
-| 33  | 3954485807 | Web config shown as API metadata                          | API report rendered when reachable                                | `apps/web`                        |
-| 34  | 3954485810 | Malformed JSON threw during render                        | Response validated at runtime                                     | `apps/web`                        |
-| 35  | 3954485819 | Trailing slash produced `//health/ready`                  | Base URL normalised                                               | `apps/web`                        |
-| 36  | 3954485824 | `2026-02-30` normalised into the digest                   | Strict parser round-trips components                              | `time.test.ts`                    |
-| 37  | 3954485826 | Namesake table trusted                                    | Relation resolved by OID; invariants enforced                     | `migrator.integration.test.ts`    |
-| 38  | 3954485831 | ADR said six conditions, TDD said five                    | Documents reconciled                                              | `docs/adr/0002`                   |
-| 39  | 3954485838 | Duplicate fee asset reordered the digest                  | Duplicates rejected                                               | `plan-digest.test.ts`             |
-| 40  | 3954485849 | `new URL().pathname` breaks on Windows                    | `fileURLToPath`                                                   | `apps/web/src/app/tokens.test.ts` |
+| #   | ID         | Reproduced                                                                             | Resolution                                                                                       | Proof                                            |
+| --- | ---------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| 16  | 3954485700 | `kind` overridable through the spread                                                  | `kind` assigned last                                                                             | `marked-value.test.ts`                           |
+| 17  | 3954485705 | Terminal states returned INVALIDATE                                                    | Only an open sealed plan invalidates                                                             | `lifecycle.test.ts`                              |
+| 18  | 3954485708 | 200k-char price parsed before bounds (24ms)                                            | Length checked first                                                                             | `price.test.ts`                                  |
+| 19  | 3954485719 | Fixture route mislabelled as RECEIVED_ASSET while it charges quote commission on a BUY | Route is now `QUOTE_ALWAYS`, matching what it charges; still refused outside `local`             | `packages/contracts/src/fee-policy.test.ts`      |
+| 21  | 3954485729 | Negative estimate and non-date accepted                                                | Validated                                                                                        | `marked-value.test.ts`                           |
+| 22  | 3954485735 | Unreadable directory silently skipped                                                  | Only ENOENT ignored                                                                              | `check-layering.test.ts`                         |
+| 23  | 3954485744 | `.js` sources unscanned                                                                | JS extensions included                                                                           | Same file                                        |
+| 25  | 3954485761 | Timezone-less deadline resolved in host zone                                           | Strict UTC parser                                                                                | `time.test.ts`                                   |
+| 26  | 3954485765 | Raw `BINANCE_*` accepted in the executor, its owning role                              | Raw value names split from reference names; refused in every role                                | `packages/config/src/env.test.ts`                |
+| 27  | 3954485769 | Same-asset spend not netted (500 vs 400)                                               | Spend subtracted                                                                                 | `risk.test.ts`                                   |
+| 28  | 3954485775 | `parseAtoms(1000)` returned `1000n`                                                    | Non-strings refused                                                                              | `money.test.ts`                                  |
+| 29  | 3954485779 | `20000` and `20000.00` differed                                                        | Prices canonicalised                                                                             | `price.test.ts`                                  |
+| 30  | 3954485791 | `venue: "made-up-venue"` accepted                                                      | Allowlists enforced at runtime                                                                   | `identity.test.ts`                               |
+| 31  | 3954485797 | Only the connection had a timeout                                                      | Driver-level connection, query and statement timeouts, plus bounded teardown                     | `apps/api/src/server.integration.test.ts`        |
+| 32  | 3954485803 | Two clients both applied one migration                                                 | Session advisory lock across the whole run                                                       | `migrator.integration.test.ts`                   |
+| 33  | 3954485807 | Web config shown as API metadata                                                       | API report rendered when reachable; configuration labelled as such when not; mismatches surfaced | `apps/web/src/app/readiness.test.ts`             |
+| 34  | 3954485810 | Malformed JSON threw during render                                                     | Payload validated against the contract, not merely its shape                                     | `apps/web/src/app/readiness.test.ts`             |
+| 35  | 3954485819 | Trailing slash produced `//health/ready`                                               | Base URL normalised                                                                              | `apps/web/src/app/readiness.test.ts`             |
+| 36  | 3954485824 | `2026-02-30` normalised into the digest                                                | Strict parser round-trips components                                                             | `time.test.ts`                                   |
+| 37  | 3954485826 | Namesake table trusted                                                                 | Relation resolved by OID; invariants enforced                                                    | `migrator.integration.test.ts`                   |
+| 38  | 3954485831 | ADR said six conditions, TDD and the index said five                                   | All three now state six, including the universe proof                                            | `specs/capitaldesk/TDD.md`, `docs/adr/README.md` |
+| 39  | 3954485838 | Duplicate fee asset reordered the digest                                               | Duplicates refused; comparator made total                                                        | `packages/contracts/src/plan-digest.test.ts`     |
+| 40  | 3954485849 | `new URL().pathname` breaks on Windows                                                 | `fileURLToPath`                                                                                  | `apps/web/src/app/tokens.test.ts`                |
 
 ## Confirmed, deliberately scoped
 
