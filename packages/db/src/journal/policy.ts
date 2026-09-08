@@ -329,11 +329,10 @@ export class PolicyRepository {
     return transactional(this.pool, async (client) => {
       const pool = await client.query<{
         active_policy_version: string | null;
-        ledger_revision: string;
         quote_asset_code: string | null;
         quote_asset_scale: string | null;
       }>(
-        `SELECT active_policy_version::text,ledger_revision::text,quote_asset_code,quote_asset_scale
+        `SELECT active_policy_version::text,quote_asset_code,quote_asset_scale
            FROM pools WHERE workspace_id=$1 AND pool_id=$2 FOR UPDATE`,
         [input.workspaceId, input.poolId],
       );
@@ -393,18 +392,18 @@ export class PolicyRepository {
         return { ok: false, reason: 'POLICY_BUDGET_EXCEEDED' } as const;
       }
       const claims = await client.query<{ available: string }>(
-        `SELECT coalesce(max(available_atoms) FILTER (WHERE ledger_revision=$6),0)::text AS available
-           FROM claim_balances
+        `SELECT coalesce(sum(delta_atoms),0)::text AS available
+           FROM ledger_entries
           WHERE workspace_id=$1 AND pool_id=$2 AND epoch=(SELECT epoch FROM baseline_epochs
                  WHERE workspace_id=$1 AND pool_id=$2 AND closed_at IS NULL)
-            AND account_owner=$3 AND asset_code=$4 AND asset_scale=$5`,
+            AND account_owner=$3 AND claim_state='AVAILABLE'
+            AND asset_code=$4 AND asset_scale=$5`,
         [
           input.workspaceId,
           input.poolId,
           input.strategyId,
           poolRow.quote_asset_code,
           poolRow.quote_asset_scale,
-          poolRow.ledger_revision,
         ],
       );
       const outstanding = BigInt(totals?.strategy_used ?? '0');

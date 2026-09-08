@@ -22,8 +22,9 @@ is not a claim.
 - **Module 07:** PARTIAL — all owned target acceptance and lifecycle paths are complete;
   planner-owned T-004/T-005 and the generated-child portion of T-010 need module 09. See
   [docs/handoffs/07.md](handoffs/07.md).
-- **Module 08:** PARTIAL — owner mandate, immutable policy journal and budget-hold paths are
-  implemented; PostgreSQL execution is pending CI. See [docs/handoffs/08.md](handoffs/08.md).
+- **Module 08:** complete for owned paths — owner mandate, immutable policy journal and
+  budget-hold paths are implemented and focused PostgreSQL tests pass. See
+  [docs/handoffs/08.md](handoffs/08.md).
 
 ## What this milestone is, and is not
 
@@ -67,7 +68,7 @@ BLOCKED and is named as such rather than claimed.
 | Worker ingest catch-up                   | Implemented                      | `apps/worker`, 31 integration cases on real PostgreSQL                         |
 | Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 61 unit + 6 property; migration 0005, 65 integration cases   |
 | Strategy targets (module 07)             | Implemented                      | 10 unit, 12 real-PostgreSQL route/repository cases; migration 0006             |
-| Capital mandates (module 08)             | Implemented; DB run pending CI   | 11 unit cases; 5 PostgreSQL cases authored; migration 0007                     |
+| Capital mandates (module 08)             | Implemented                      | 11 unit cases; 5 policy PostgreSQL cases plus intent regression suite          |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
@@ -104,11 +105,11 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 
 Module 08 targeted results:
 
-| Command                             | Result                                                  |
-| ----------------------------------- | ------------------------------------------------------- |
-| `pnpm typecheck`                    | pass                                                    |
-| mandate unit file                   | 11 passed                                               |
-| policy and intent integration files | skipped — no test database URL in this task environment |
+| Command                             | Result                              |
+| ----------------------------------- | ----------------------------------- |
+| `pnpm typecheck`                    | pass                                |
+| mandate unit file                   | 11 passed                           |
+| policy and intent integration files | 15 passed on local PostgreSQL 17.10 |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 

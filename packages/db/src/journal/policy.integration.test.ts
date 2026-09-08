@@ -3,7 +3,7 @@ import { ContractViolation } from '@capitaldesk/contracts';
 import { principal, type MandatePolicyWire } from '@capitaldesk/domain';
 import { LedgerRepository } from './ledger.js';
 import { PolicyRepository } from './policy.js';
-import { DATABASE_URL, JournalHarness, POOL, USDT, WORKSPACE, sqlState } from './test-harness.js';
+import { DATABASE_URL, JournalHarness, POOL, USDT, WORKSPACE } from './test-harness.js';
 
 const describeIfDatabase = DATABASE_URL === undefined ? describe.skip : describe;
 const OWNER = principal({
@@ -116,7 +116,7 @@ describeIfDatabase('owner mandate journal', () => {
     ).toMatchObject({ policyVersion: '2', selectedSymbol: 'BTCUSDT' });
     await expect(
       harness.admin.query(`UPDATE policy_versions SET risk_increase_halted=true`),
-    ).rejects.toSatisfy((error: unknown) => sqlState(error) === '23000');
+    ).rejects.toThrow(/append-only table policy_versions/);
   });
 
   it('refuses agent-authored policy changes regardless of prompt content', async () => {
