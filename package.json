@@ -22,7 +22,8 @@
     "test": "vitest run",
     "db:migrate": "tsx --env-file-if-exists=.env packages/db/src/cli.ts migrate",
     "db:status": "tsx --env-file-if-exists=.env packages/db/src/cli.ts status",
-    "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run check:layering && pnpm run check:secrets && pnpm run test && pnpm run build"
+    "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run check:layering && pnpm run check:secrets && pnpm run test:unit && pnpm run test:property && pnpm run build",
+    "test:integration": "vitest run --project integration"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",
