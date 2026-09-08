@@ -13,9 +13,13 @@
   "dependencies": {
     "@capitaldesk/config": "workspace:*",
     "@capitaldesk/contracts": "workspace:*",
-    "@capitaldesk/observability": "workspace:*"
+    "@capitaldesk/observability": "workspace:*",
+    "@capitaldesk/binance": "workspace:*",
+    "@capitaldesk/db": "workspace:*",
+    "pg": "catalog:"
   },
   "devDependencies": {
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "@types/pg": "catalog:"
   }
 }

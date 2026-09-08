@@ -12,6 +12,7 @@ export * from './money.js';
 export * from './price.js';
 export * from './marked-value.js';
 export * from './identity.js';
+export * from './venue-hosts.js';
 export * from './states.js';
 export * from './canonical.js';
 export * from './plan-digest.js';

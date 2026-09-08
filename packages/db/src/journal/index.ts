@@ -7,3 +7,4 @@ export * from './outbox.js';
 export * from './leases.js';
 export * from './idempotency.js';
 export * from './restore.js';
+export * from './venue-read.js';

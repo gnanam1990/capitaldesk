@@ -230,15 +230,40 @@ importers:
 
   apps/worker:
     dependencies:
+      '@capitaldesk/binance':
+        specifier: workspace:*
+        version: link:../../packages/binance
       '@capitaldesk/config':
         specifier: workspace:*
         version: link:../../packages/config
       '@capitaldesk/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@capitaldesk/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@capitaldesk/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      pg:
+        specifier: 'catalog:'
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: 'catalog:'
+        version: 8.15.6
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/binance:
+    dependencies:
+      '@capitaldesk/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      zod:
+        specifier: 'catalog:'
+        version: 4.5.4
     devDependencies:
       typescript:
         specifier: 'catalog:'
