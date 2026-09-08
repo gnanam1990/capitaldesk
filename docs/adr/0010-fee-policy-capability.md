@@ -33,6 +33,18 @@ that makes that count finite, and a digest of the derivation. A policy constant 
 never authorize dispatch on its own — flipping a status to `PROVEN` without producing a
 derivation still refuses.
 
+**The digest check is structural, not an authenticity check.** The gate verifies that
+`derivedAt` is a real UTC instant and that `derivationDigest` is a well-formed sha256
+reference. It does not verify that the derivation the digest names exists, or that it says
+what the record claims: a syntactically perfect digest of all zeros passes, and a committed
+test asserts exactly that limit rather than leaving it implied.
+
+Closing it belongs to module 14, which owns the producer. Before any non-fixture dispatch,
+that module must canonicalise the derivation payload, persist it, and resolve it at this gate
+instead of accepting a digest on trust. The exposure is bounded until then only because no
+real policy is `PROVEN`: the local deterministic fixture is the only one, and only because its
+scenario fixes the fill partition.
+
 ### 2. `STANDARD_NO_BNB_V1` is UNVERIFIED, not proven
 
 An earlier version of this decision declared it proven, reasoning that the cumulative bound

@@ -4,7 +4,7 @@
 Review text was treated as untrusted input: nothing was applied because it was suggested, and
 nothing was rejected because it was inconvenient.
 
-**Outcome: 40 addressed — 38 confirmed and fixed, 2 confirmed and deliberately scoped.** No
+**Outcome: 40 addressed — 37 confirmed and fixed, 3 confirmed and deliberately scoped.** No
 candidate was rejected as invalid. Two probes of my own were wrong and are recorded as such.
 
 ## How to read this
@@ -22,25 +22,25 @@ coverage condition count, and this document.
 
 ## P1 — confirmed and fixed
 
-| #   | ID         | Area                   | Reproduced                                                              | Resolution                                                                             | Proof                                            |
-| --- | ---------- | ---------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| 2   | 3954485579 | worker lifetime        | exit 13 in ~0.1s, "unsettled top-level await"                           | Referenced keep-alive handle; clean shutdown                                           | `apps/worker/src/lifetime.integration.test.ts`   |
-| 24  | 3954485754 | executor lifetime      | Same                                                                    | Same                                                                                   | `apps/executor/src/lifetime.integration.test.ts` |
-| 10  | 3954485655 | Pino redaction         | Message, interpolation, child and base bindings all leaked              | Three layers: logMethod hook, formatters plus wrapped `child()`, scrubbing destination | `packages/observability/src/logger.test.ts`      |
-| 7   | 3954485636 | URL aliases            | `access_token`, `refreshToken`, `client_secret`, `api-key` all survived | Parameter names matched by sensitive fragment                                          | Same file                                        |
-| 4   | 3954485614 | scanner exemption      | Key under `docs/` accepted, exit 0                                      | Documentation carve-out removed                                                        | `tools/check-secret-boundary.test.ts`            |
-| 5   | 3954485623 | import parser          | Side-effect import swallowed by the `from` matcher                      | Replaced regex with the TypeScript AST                                                 | `tools/check-layering.test.ts`                   |
-| 14  | 3954485684 | scanner self-exclusion | Key in the scanner's own source accepted                                | Self-exclusion removed                                                                 | `tools/check-secret-boundary.test.ts`            |
-| 15  | 3954485692 | prefix bounding        | `apps/executor-evil/` inherited the allowlist                           | Component-bounded prefixes                                                             | Same file                                        |
-| 20  | 3954485725 | file coverage          | `.pem` and `Dockerfile` never read                                      | Reads every non-binary file, from `git ls-files`                                       | Same file                                        |
-| 1   | 3954485575 | coverage certificate   | Certificate for the year 2020 satisfied a 2026 window; COMPLETE         | Certificate must cover the actual gap                                                  | `packages/contracts/src/observation.test.ts`     |
-| 3   | 3954485609 | fee evidence           | `derivedAt: "not-a-date"` and empty digest accepted                     | Both validated; strict UTC instant                                                     | `packages/contracts/src/fee-policy.test.ts`      |
-| 8   | 3954485643 | account settings       | `requiredAccountSettings` never enforced                                | Verified settings passed in and checked                                                | Same file                                        |
-| 9   | 3954485651 | lifecycle marker       | `MANUAL_REVIEW` assumed in flight                                       | Explicit dispatch phase, not a state inference                                         | `packages/contracts/src/lifecycle.test.ts`       |
-| 11  | 3954485660 | credential identity    | Two empty ids compared equal                                            | Missing, whitespace and malformed ids refused                                          | `packages/contracts/src/credentials.test.ts`     |
-| 13  | 3954485674 | release path           | `NOT_SENT_PROVEN` could never release                                   | Release contract takes the dispatch state                                              | `packages/contracts/src/states.test.ts`          |
-| 6   | 3954485632 | write capability       | See scoped note below                                                   | Scoped, not fixed                                                                      | —                                                |
-| 12  | 3954485670 | envelope capability    | See scoped note below                                                   | Partly fixed, remainder deferred                                                       | —                                                |
+| #   | ID         | Area                   | Reproduced                                                              | Resolution                                                                                             | Proof                                            |
+| --- | ---------- | ---------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| 2   | 3954485579 | worker lifetime        | exit 13 in ~0.1s, "unsettled top-level await"                           | Referenced keep-alive handle; clean shutdown                                                           | `apps/worker/src/lifetime.integration.test.ts`   |
+| 24  | 3954485754 | executor lifetime      | Same                                                                    | Same                                                                                                   | `apps/executor/src/lifetime.integration.test.ts` |
+| 10  | 3954485655 | Pino redaction         | Message, interpolation, child and base bindings all leaked              | Three layers: logMethod hook, formatters plus wrapped `child()`, scrubbing destination                 | `packages/observability/src/logger.test.ts`      |
+| 7   | 3954485636 | URL aliases            | `access_token`, `refreshToken`, `client_secret`, `api-key` all survived | Parameter names matched by sensitive fragment                                                          | Same file                                        |
+| 4   | 3954485614 | scanner exemption      | Key under `docs/` accepted, exit 0                                      | Documentation carve-out removed                                                                        | `tools/check-secret-boundary.test.ts`            |
+| 5   | 3954485623 | import parser          | Side-effect import swallowed by the `from` matcher                      | Replaced regex with the TypeScript AST                                                                 | `tools/check-layering.test.ts`                   |
+| 14  | 3954485684 | scanner self-exclusion | Key in the scanner's own source accepted                                | Self-exclusion removed                                                                                 | `tools/check-secret-boundary.test.ts`            |
+| 15  | 3954485692 | prefix bounding        | `apps/executor-evil/` inherited the allowlist                           | Component-bounded prefixes                                                                             | Same file                                        |
+| 20  | 3954485725 | file coverage          | `.pem` and `Dockerfile` never read                                      | Reads every non-binary file, from `git ls-files`                                                       | Same file                                        |
+| 1   | 3954485575 | coverage certificate   | Certificate for the year 2020 satisfied a 2026 window; COMPLETE         | Certificate must cover the actual gap                                                                  | `packages/contracts/src/observation.test.ts`     |
+| 3   | 3954485609 | fee evidence           | `derivedAt: "not-a-date"` and empty digest accepted                     | Structural validation fixed (strict UTC instant, sha256 digest shape); authenticity scoped — see below | `packages/contracts/src/fee-policy.test.ts`      |
+| 8   | 3954485643 | account settings       | `requiredAccountSettings` never enforced                                | Verified settings passed in and checked                                                                | Same file                                        |
+| 9   | 3954485651 | lifecycle marker       | `MANUAL_REVIEW` assumed in flight                                       | Explicit dispatch phase, not a state inference                                                         | `packages/contracts/src/lifecycle.test.ts`       |
+| 11  | 3954485660 | credential identity    | Two empty ids compared equal                                            | Missing, whitespace and malformed ids refused                                                          | `packages/contracts/src/credentials.test.ts`     |
+| 13  | 3954485674 | release path           | `NOT_SENT_PROVEN` could never release                                   | Release contract takes the dispatch state                                                              | `packages/contracts/src/states.test.ts`          |
+| 6   | 3954485632 | write capability       | See scoped note below                                                   | Scoped, not fixed                                                                                      | —                                                |
+| 12  | 3954485670 | envelope capability    | See scoped note below                                                   | Partly fixed, remainder deferred                                                                       | —                                                |
 
 ## P2 — confirmed and fixed
 
@@ -72,14 +72,37 @@ coverage condition count, and this document.
 
 ## Confirmed, deliberately scoped
 
-Two are real and deliberately not fully fixed. Fixing them would mean building module 12 or
-13 functionality inside M0, which would be fabricating a runtime that does not exist.
+Three are real and deliberately not fully fixed. Completing them would mean building module
+12, 13 or 14 functionality inside M0, which would be fabricating a runtime that does not exist.
 
-I initially scoped a third, #26, on the grounds that refusing raw secrets needed a reference
+Two of the three are partly fixed, and the partial half is stated rather than allowed to stand
+for the whole: #3's structural validation and #12's timing envelope both landed, while the
+authenticity and capability halves did not. Counting either as a fixed finding would overstate
+the evidence, which is the failure mode this document exists to prevent.
+
+I initially scoped a fourth, #26, on the grounds that refusing raw secrets needed a reference
 resolver. That was wrong — separating raw value names from reference names needs no resolver —
 and it is now fixed: `BINANCE_API_SECRET`, `BINANCE_SECRET_KEY` and `BINANCE_READ_API_SECRET`
 are refused in every role including their owning one, and only the matching
 `CAPITALDESK_*_CREDENTIAL_REF` is accepted, in its owning role alone.
+
+**#3 — the fee derivation is validated structurally, not authenticated.** Reproduced:
+`derivedAt: "not-a-date"` and an empty `derivationDigest` were both accepted.
+
+Both are now validated — `derivedAt` must be a real UTC instant, and `derivationDigest` must
+be a well-formed sha256 reference. What is _not_ established is that the derivation the digest
+names exists or says what it claims. A committed test asserts exactly this limit: a
+syntactically perfect digest of all zeros, naming nothing, still passes.
+
+That is a shape check, and calling it a fixed finding would overstate it. Authenticating a
+derivation requires a canonical derivation payload to hash, somewhere durable to resolve it
+from, and a producer to write it — all of which belong to module 14.
+
+The practical consequence today is bounded rather than open: no real policy is `PROVEN`. Only
+the local deterministic fixture is, and only because that scenario fixes the fill partition,
+which is why it is refused outside the `local` environment. Before any non-fixture dispatch,
+module 14 must canonicalise the derivation, persist it, and resolve it at the gate rather than
+accepting a digest on trust.
 
 **#6 — local may enable write capability.** Reproduced: `CAPITALDESK_ENV=local` with
 `CAPITALDESK_WRITE_CAPABILITY=enabled` loads. The review asks that enabled writes be
