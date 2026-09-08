@@ -9,4 +9,5 @@ export * from './assets.js';
 export * from './allocation.js';
 export * from './baseline.js';
 export * from './conservation.js';
+export * from './fill-allocation.js';
 export * from './snapshot.js';

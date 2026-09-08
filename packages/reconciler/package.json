@@ -1,9 +1,9 @@
 {
-  "name": "@capitaldesk/db",
+  "name": "@capitaldesk/reconciler",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "PostgreSQL migration lifecycle and connection handling. Layer 2.",
+  "description": "Pure financial-finality, drift containment and recovery gates.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -17,14 +17,9 @@
     "typecheck": "tsc -b --pretty"
   },
   "dependencies": {
-    "@capitaldesk/contracts": "workspace:*",
-    "@capitaldesk/domain": "workspace:*",
-    "@capitaldesk/reconciler": "workspace:*",
-    "pg": "catalog:",
-    "@capitaldesk/ledger": "workspace:*"
+    "@capitaldesk/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@types/pg": "catalog:",
     "typescript": "catalog:"
   }
 }

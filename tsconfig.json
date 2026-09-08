@@ -23,6 +23,9 @@
       "path": "./packages/planner"
     },
     {
+      "path": "./packages/reconciler"
+    },
+    {
       "path": "./packages/db"
     },
     {

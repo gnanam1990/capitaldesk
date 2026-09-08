@@ -302,6 +302,9 @@ importers:
       '@capitaldesk/ledger':
         specifier: workspace:*
         version: link:../ledger
+      '@capitaldesk/reconciler':
+        specifier: workspace:*
+        version: link:../reconciler
       pg:
         specifier: 'catalog:'
         version: 8.23.0
@@ -347,6 +350,16 @@ importers:
         version: 5.9.3
 
   packages/planner:
+    dependencies:
+      '@capitaldesk/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/reconciler:
     dependencies:
       '@capitaldesk/contracts':
         specifier: workspace:*

@@ -12,7 +12,13 @@
       "path": "../contracts"
     },
     {
+      "path": "../domain"
+    },
+    {
       "path": "../ledger"
+    },
+    {
+      "path": "../reconciler"
     }
   ]
 }
