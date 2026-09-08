@@ -281,3 +281,19 @@ export async function withDeadline<T>(work: Promise<T>, ms: number, what: string
 export function sqlState(error: unknown): string {
   return (error as { code?: string })?.code ?? 'no-sqlstate';
 }
+
+/**
+ * The SQLSTATE and the constraint that produced it.
+ *
+ * A test that asserts only "something refused this" passes for the wrong reason. One INSERT
+ * regression here was satisfied by `dispatch_attempts_marked_has_evidence` rejecting a row
+ * that simply had no marker fields, so it never exercised the guard it was named after, and a
+ * fully populated row went straight in. Naming the constraint makes that impossible.
+ */
+export function sqlRefusal(error: unknown): { state: string; constraint: string } {
+  const failure = error as { code?: string; constraint?: string } | null;
+  return {
+    state: failure?.code ?? 'no-sqlstate',
+    constraint: failure?.constraint ?? 'no-constraint',
+  };
+}

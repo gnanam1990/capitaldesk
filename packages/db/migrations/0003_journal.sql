@@ -270,6 +270,23 @@ CREATE TABLE dispatch_attempts (
   CONSTRAINT dispatch_attempts_state_known CHECK (state IN
     ('PREPARED', 'DISPATCH_MARKED', 'SEND_ATTEMPTED', 'ACKNOWLEDGED', 'REJECTED', 'UNKNOWN',
      'NOT_SENT_PROVEN', 'IRRECOVERABLE_UNCERTAINTY')),
+  -- NOT_SENT_PROVEN is a state of the domain, named above, and unreachable in this schema
+  -- version. It is the one dispatch outcome that releases a held reservation, and nothing
+  -- here records the evidence ADR-0001 requires to justify one: a fenced sender, an
+  -- account-wide open-order scan and trade backfill covering the whole uncertainty window
+  -- with no record of the client order id, and COMPLETE coverage over that window. The
+  -- reconciler that produces those observations is module 15.
+  --
+  -- The transition trigger below refuses every UPDATE into this state, but a trigger cannot
+  -- see a row that arrives already in it. An INSERT that supplied a fabricated signed
+  -- request, marked_at, resolved_at and marker host fields satisfied every other constraint
+  -- and was accepted, which put a released-capital state into the table with no transition
+  -- and no evidence at all. This constraint is what closes that: it is declarative, so it
+  -- covers INSERT and UPDATE alike and holds even where triggers are disabled.
+  --
+  -- Module 15's forward migration drops this constraint in the same migration that adds the
+  -- columns referencing the durable evidence rows, and not before.
+  CONSTRAINT dispatch_attempts_not_sent_unreachable CHECK (state <> 'NOT_SENT_PROVEN'),
   CONSTRAINT dispatch_attempts_marked_has_time
     CHECK (state = 'PREPARED' OR marked_at IS NOT NULL),
   CONSTRAINT dispatch_attempts_send_has_time

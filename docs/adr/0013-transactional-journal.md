@@ -266,14 +266,31 @@ The resolution is fail-closed:
 - `DispatchRepository.resolve` refuses it with `NOT_SENT_PROVEN_UNAVAILABLE` before reading
   the row, and takes no evidence argument at all.
 - `refuse_dispatch_regression` refuses every transition into it, so a raw `UPDATE` from any
-  writer fails with `restrict_violation`. The marked-state CHECK refuses an `INSERT` that
-  starts there.
+  writer fails with `restrict_violation`.
+- `dispatch_attempts_not_sent_unreachable`, a table CHECK, makes the state impossible to
+  store at all.
 
-Module 15 must add a forward migration binding an attempt to the authoritative evidence rows
-before re-enabling the transition, and must reinstate the rule that an attempt which recorded
-`SEND_ATTEMPTED` can never be proven unsent — including through
-`SEND_ATTEMPTED -> UNKNOWN -> NOT_SENT_PROVEN`. T-059 and T-060 remain **not implemented**
-until then.
+**Amended again by the same round.** The bullet above previously said the marked-state CHECK
+refused an `INSERT` that started in the state. It did not, and the regression that claimed to
+prove it supplied no signed request and no marker fields, so
+`dispatch_attempts_marked_has_evidence` rejected the row for having no marker at all and the
+case passed without ever reaching a fail-closed guard. An `INSERT` that supplied a fabricated
+`signed_request`, `marked_at`, `resolved_at` and all three marker host fields satisfied every
+constraint and was accepted, putting a released-capital state into the table with no
+transition and no evidence.
+
+A trigger cannot see a row that arrives already in the state, so the guarantee is declarative:
+the CHECK covers `INSERT` and `UPDATE` alike and holds even where triggers are disabled. The
+trigger is the diagnostic that names why an `UPDATE` was refused; the constraint is the
+guarantee. The regression now supplies every otherwise-required field and asserts the
+refusing constraint by name, and a positive control asserts that a row with no marker
+evidence is still refused by the marker constraint rather than this one.
+
+Module 15 must add a forward migration binding an attempt to the authoritative evidence rows,
+dropping `dispatch_attempts_not_sent_unreachable` in that same migration and not before, and
+must reinstate the rule that an attempt which recorded `SEND_ATTEMPTED` can never be proven
+unsent — including through `SEND_ATTEMPTED -> UNKNOWN -> NOT_SENT_PROVEN`. T-059 and T-060
+remain **not implemented** until then.
 
 The marker also persists the marking process's start time. Boot id and pid do not identify a
 process, because pids are reused without a reboot, so the host record on its own was not

@@ -69,7 +69,7 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run check:secrets`                      | pass — 240 files scanned                                    |
 | `pnpm run test:unit`                          | **513 passed**, 0 skipped, 32 files                         |
 | `pnpm run test:property`                      | **13 passed**, seed 20260908                                |
-| `pnpm run test:integration`                   | **259 passed**, 21 files, against PostgreSQL 17.10          |
+| `pnpm run test:integration`                   | **261 passed**, 21 files, against PostgreSQL 17.10          |
 | `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
 | `pnpm run build`                              | pass — all packages and apps                                |
 
@@ -79,10 +79,10 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 | ----------- | ----- | --------------------------------------------------------------------------------------------------------------- |
 | unit        | 513   | contracts 284, web 65, tools 39, api 38, config 35, domain 29, observability 23 (by package, from the reporter) |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                                  |
-| integration | 259   | journal 117, auth 60, migrations 30, CLI 20, worker/executor 12, identity scope 11, API 9                       |
+| integration | 261   | journal 119, auth 60, migrations 30, CLI 20, worker/executor 12, identity scope 11, API 9                       |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 91
-integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 117
+integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 119
 integration cases in [docs/handoffs/04.md](handoffs/04.md) — not the workspace figures.
 
 Toolchain: Node 22.23.1, pnpm 11.10.0, TypeScript 5.9.3, Fastify 5.12.3, Next 16.3.4,
