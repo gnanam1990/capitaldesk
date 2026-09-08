@@ -43,7 +43,28 @@ export const DEFAULT_SESSION_LIFETIMES: SessionLifetimes = {
 
 export type IssueCredentialOutcome =
   | { readonly ok: true }
-  | { readonly ok: false; readonly reason: 'UNKNOWN_STRATEGY' | 'UNKNOWN_CREDENTIAL' };
+  | { readonly ok: false; readonly reason: 'UNKNOWN_STRATEGY' | 'UNKNOWN_CREDENTIAL' }
+  /**
+   * A first issue while a key is already live. The id is returned so an owner whose issuance
+   * response was lost can find the credential they cannot otherwise name, and rotate it.
+   */
+  | {
+      readonly ok: false;
+      readonly reason: 'ACTIVE_CREDENTIAL_EXISTS';
+      readonly activeCredentialId: string;
+    };
+
+/** What the owner may see about a credential. Never the digest, never a secret. */
+export interface AgentCredentialMetadata {
+  readonly credentialId: string;
+  readonly label: string;
+  readonly createdAt: Date;
+  readonly revealedAt: Date | null;
+  readonly lastUsedAt: Date | null;
+  readonly rotatedFrom: string | null;
+  readonly revokedAt: Date | null;
+  readonly revokedReason: string | null;
+}
 
 export interface OwnerSessionRow {
   readonly workspaceId: string;
@@ -439,6 +460,27 @@ export class IdentityRepository {
       );
       if (strategy.rowCount !== 1) return { ok: false, reason: 'UNKNOWN_STRATEGY' };
 
+      if (input.rotatedFrom === null) {
+        // A first issue against a strategy that already has a live key is a decision, not a
+        // unique-violation to be caught. The realistic way here is a lost issuance response:
+        // the owner never saw the credential id, so they cannot rotate it, and the partial
+        // unique index answered their retry with a 500. Name the live key instead.
+        const active = await tx.db.query<{ credential_id: string }>(
+          `SELECT credential_id FROM agent_credentials
+            WHERE workspace_id = $1 AND pool_id = $2 AND strategy_id = $3 AND revoked_at IS NULL
+              FOR UPDATE`,
+          [input.workspaceId, input.poolId, input.strategyId],
+        );
+        const live = active.rows[0];
+        if (live !== undefined) {
+          return {
+            ok: false,
+            reason: 'ACTIVE_CREDENTIAL_EXISTS',
+            activeCredentialId: live.credential_id,
+          };
+        }
+      }
+
       if (input.rotatedFrom !== null) {
         const revoked = await tx.db.query(
           `UPDATE agent_credentials
@@ -483,6 +525,47 @@ export class IdentityRepository {
 
       return { ok: true };
     });
+  }
+
+  /**
+   * The credentials of one strategy, as the owner may see them.
+   *
+   * Metadata only. This is the recovery path for a lost issuance response: the owner can find
+   * the live credential's id here and rotate it. What cannot be recovered is the secret, and
+   * no column here could carry it.
+   */
+  async listAgentCredentials(scope: {
+    readonly workspaceId: string;
+    readonly poolId: string;
+    readonly strategyId: string;
+  }): Promise<readonly AgentCredentialMetadata[]> {
+    const result = await this.db.query<{
+      credential_id: string;
+      label: string;
+      created_at: Date;
+      revealed_at: Date | null;
+      last_used_at: Date | null;
+      rotated_from: string | null;
+      revoked_at: Date | null;
+      revoked_reason: string | null;
+    }>(
+      `SELECT credential_id, label, created_at, revealed_at, last_used_at, rotated_from,
+              revoked_at, revoked_reason
+         FROM agent_credentials
+        WHERE workspace_id = $1 AND pool_id = $2 AND strategy_id = $3
+        ORDER BY created_at DESC, credential_id`,
+      [scope.workspaceId, scope.poolId, scope.strategyId],
+    );
+    return result.rows.map((row) => ({
+      credentialId: row.credential_id,
+      label: row.label,
+      createdAt: row.created_at,
+      revealedAt: row.revealed_at,
+      lastUsedAt: row.last_used_at,
+      rotatedFrom: row.rotated_from,
+      revokedAt: row.revoked_at,
+      revokedReason: row.revoked_reason,
+    }));
   }
 
   /**
@@ -542,13 +625,6 @@ export class IdentityRepository {
 
   // --- audit -----------------------------------------------------------------------------
 
-  /**
-   * Append an audit record.
-   *
-   * `detail` passes through the closed schema in `audit-detail.ts` before it reaches the
-   * column. The logger's redaction never sees this write — it goes straight to PostgreSQL —
-   * so the boundary has to be here.
-   */
   /**
    * Append an audit record.
    *

@@ -1167,6 +1167,214 @@ describeIfDatabase('identity and access', () => {
   });
 
   // ------------------------------------------------------------------------------------
+  describe('cookie attributes are stated, not defaulted', () => {
+    const setCookies = (headers: Record<string, unknown>): string[] => {
+      const raw = headers['set-cookie'];
+      return Array.isArray(raw) ? (raw as string[]) : typeof raw === 'string' ? [raw] : [];
+    };
+    const attributes = (setCookie: string): Record<string, string | true> => {
+      const out: Record<string, string | true> = {};
+      for (const part of setCookie.split(';').slice(1)) {
+        const [name, value] = part.trim().split('=');
+        out[(name ?? '').toLowerCase()] = value ?? true;
+      }
+      return out;
+    };
+
+    it('sets the CSRF cookie with path, HttpOnly, SameSite=Strict and a signature, locally', async () => {
+      const cookie = await login('owner');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/csrf-token`,
+        headers: { cookie },
+      });
+      const csrf = response.cookies.find((c) => c.name === 'capitaldesk-csrf');
+      expect(csrf, 'csrf cookie').toBeDefined();
+      const raw = setCookies(response.headers).find((h) => h.startsWith('capitaldesk-csrf='))!;
+      const flags = attributes(raw);
+      expect(flags['path']).toBe('/');
+      expect(flags['httponly']).toBe(true);
+      expect(flags['samesite']).toBe('Strict');
+      expect(flags['secure']).toBeUndefined();
+      // Signed: the value carries a signature after a dot.
+      expect(csrf!.value).toContain('.');
+    });
+
+    it('sets both cookies __Host- prefixed and Secure outside local', async () => {
+      // A testnet deployment is served over HTTPS; the strongest cookie form is required and
+      // the same code path must produce it, not a separately remembered exception.
+      const testnet = buildServer(
+        loadApiConfig({
+          CAPITALDESK_ENV: 'testnet',
+          CAPITALDESK_VENUE: 'binance-spot',
+          CAPITALDESK_VENUE_BASE_URL: 'https://testnet.binance.vision',
+          CAPITALDESK_ACCOUNT_ALIAS: 'capitaldesk-testnet',
+          CAPITALDESK_BASELINE_EPOCH: '1',
+          CAPITALDESK_LOG_LEVEL: 'fatal',
+          CAPITALDESK_BUILD_ID: 'auth-test',
+          CAPITALDESK_API_PORT: '3000',
+          CAPITALDESK_OWNER_SESSION_SECRET_REF: secretRef,
+          DATABASE_URL,
+        }),
+        { identityPool: pool },
+      );
+      extraApps.push(testnet);
+      await testnet.ready();
+
+      const loggedIn = await testnet.inject({
+        method: 'POST',
+        url: `/v1/workspaces/${WORKSPACE}/sessions`,
+        payload: { loginName: 'owner', password: OWNER_PASSWORD },
+      });
+      expect(loggedIn.statusCode).toBe(201);
+      const session = setCookies(loggedIn.headers).find((h) =>
+        h.startsWith('__Host-capitaldesk-session='),
+      )!;
+      expect(session, 'session cookie').toBeDefined();
+      const sessionFlags = attributes(session);
+      expect(sessionFlags).toMatchObject({
+        path: '/',
+        httponly: true,
+        samesite: 'Strict',
+        secure: true,
+      });
+
+      const sessionCookie = loggedIn.cookies.find((c) => c.name === '__Host-capitaldesk-session')!;
+      const csrfResponse = await testnet.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/csrf-token`,
+        headers: { cookie: `${sessionCookie.name}=${sessionCookie.value}` },
+      });
+      expect(csrfResponse.statusCode).toBe(200);
+      const csrf = setCookies(csrfResponse.headers).find((h) =>
+        h.startsWith('__Host-capitaldesk-csrf='),
+      )!;
+      expect(csrf, 'csrf cookie').toBeDefined();
+      expect(attributes(csrf)).toMatchObject({
+        path: '/',
+        httponly: true,
+        samesite: 'Strict',
+        secure: true,
+      });
+    });
+  });
+
+  // ------------------------------------------------------------------------------------
+  describe('login timing equalisation is ready before the server is', () => {
+    it('has the equalisation digest precomputed once the server is ready', () => {
+      // Computed at plugin registration, which `ready()` awaits. A lazily computed digest made
+      // the first unknown-login request on a cold process do one hash more than a wrong
+      // password - the signal the digest exists to remove.
+      expect(app.timingEqualisationDigest.startsWith('$argon2id$')).toBe(true);
+    });
+  });
+
+  // ------------------------------------------------------------------------------------
+  describe('a lost issuance response is recoverable', () => {
+    async function ownerWithCsrf(): Promise<{ cookie: string; csrf: string }> {
+      const cookie = await login('owner');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/csrf-token`,
+        headers: { cookie },
+      });
+      const csrfCookie = response.cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+      return { cookie: `${cookie}; ${csrfCookie}`, csrf: response.json<{ token: string }>().token };
+    }
+
+    it('names the live credential on a duplicate issue and lets the owner rotate it', async () => {
+      const { cookie, csrf } = await ownerWithCsrf();
+      const issued = await app.inject({
+        method: 'POST',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${OTHER_STRATEGY}/credentials`,
+        headers: { cookie, 'x-csrf-token': csrf },
+        payload: { label: 'agent B' },
+      });
+      expect(issued.statusCode).toBe(201);
+      const original = issued.json<{ credentialId: string; token: string }>();
+      // The response is now lost. The owner does not know `original.credentialId`.
+
+      // Retrying the issue is a decision, not a 500, and it names the key they cannot see.
+      const retried = await app.inject({
+        method: 'POST',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${OTHER_STRATEGY}/credentials`,
+        headers: { cookie, 'x-csrf-token': csrf },
+        payload: { label: 'agent B again' },
+      });
+      expect(retried.statusCode).toBe(409);
+      expect(retried.json()).toMatchObject({
+        code: 'CREDENTIAL_ALREADY_ACTIVE',
+        retryable: false,
+        activeCredentialId: original.credentialId,
+      });
+      expect(JSON.stringify(retried.json())).not.toContain(original.token.slice(-43));
+
+      // The list shows the live key and nothing secret.
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${OTHER_STRATEGY}/credentials`,
+        headers: { cookie },
+      });
+      expect(listed.statusCode).toBe(200);
+      const body = listed.json<{
+        credentials: Array<Record<string, unknown>>;
+        secretRecoverable: boolean;
+      }>();
+      expect(body.secretRecoverable).toBe(false);
+      expect(body.credentials).toHaveLength(1);
+      expect(body.credentials[0]).toMatchObject({
+        credentialId: original.credentialId,
+        label: 'agent B',
+        active: true,
+      });
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toContain(original.token.slice(-43));
+      expect(serialized).not.toContain('$argon2id$');
+      expect(serialized).not.toContain('secret_hash');
+
+      // Rotation with the recovered id mints a new secret; the old one stops working.
+      const rotated = await app.inject({
+        method: 'POST',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${OTHER_STRATEGY}/credentials/${original.credentialId}/rotations`,
+        headers: { cookie, 'x-csrf-token': csrf },
+        payload: { label: 'agent B recovered' },
+      });
+      expect(rotated.statusCode).toBe(201);
+      const replacement = rotated.json<{ credentialId: string; token: string }>();
+      expect(replacement.credentialId).not.toBe(original.credentialId);
+
+      const oldToken = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/principal`,
+        headers: { authorization: `Bearer ${original.token}` },
+      });
+      expect(oldToken.statusCode).toBe(401);
+      const newToken = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/principal`,
+        headers: { authorization: `Bearer ${replacement.token}` },
+      });
+      expect(newToken.statusCode).toBe(200);
+    });
+
+    it('does not list credentials for a caller without credential.issue', async () => {
+      const cookie = await login('operator');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${STRATEGY}/credentials`,
+        headers: { cookie },
+      });
+      expect(response.statusCode).toBe(404);
+      const asAgent = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${STRATEGY}/credentials`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+      expect(asAgent.statusCode).toBe(404);
+    });
+  });
+
+  // ------------------------------------------------------------------------------------
   describe('secrets never reach audit records or responses', () => {
     it('records the denial without the credential material', async () => {
       await app.inject({

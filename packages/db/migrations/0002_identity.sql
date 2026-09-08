@@ -173,10 +173,11 @@ CREATE TABLE agent_credentials (
   -- predecessor from the same workspace, pool and strategy, so a chain cannot be used to
   -- inherit provenance from a credential for different authority.
   rotated_from   TEXT,
-  -- When the server *sent* the secret in a response. It records that the single display was
-  -- attempted, so a second attempt is refused; it is not evidence the holder received it. A
-  -- response can be lost after COMMIT, and nothing in the database can tell the difference.
-  -- Recovery from a lost display is rotation or reissue, never re-reading this row.
+  -- When the secret was written into a response body. That is all it records: the single
+  -- reveal was produced, so a second is refused. It is not evidence that anyone received it -
+  -- the response can be lost after COMMIT, and nothing in the database can tell. The secret
+  -- itself is never stored, so recovery from a lost response is rotation, which mints a new
+  -- one; this row is never re-read for it.
   revealed_at    TIMESTAMPTZ,
   -- The complete scope tuple. Binding only (workspace_id, strategy_id) let a credential name
   -- pool B while its strategy belonged to pool A: both identifiers valid, the pair incoherent.

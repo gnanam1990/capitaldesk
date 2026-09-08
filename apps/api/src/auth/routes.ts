@@ -71,7 +71,9 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRouteOptio
       const password = String(request.body.password);
 
       const member = await repository.findMemberByLogin(workspaceId, loginName);
-      const verified = await verifyOwnerPassword(member?.passwordHash ?? null, password);
+      const verified = await verifyOwnerPassword(member?.passwordHash ?? null, password, {
+        equalisationDigest: app.timingEqualisationDigest,
+      });
 
       if (member === null || !verified) {
         // A no-op when the workspace does not exist, so an unknown workspace and a wrong
@@ -211,6 +213,42 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRouteOptio
   );
 
   /**
+   * The credentials of a strategy, metadata only.
+   *
+   * The recovery path for a lost issuance response: the owner finds the live credential's id
+   * here and rotates it. Gated on credential.issue rather than a read capability, because
+   * seeing which keys exist is administration of the strategy's authority, not observation of
+   * its economics. No field here is or could be a secret; the response says so explicitly so a
+   * client cannot mistake this for a place to fetch one.
+   */
+  app.get<{ Params: { workspaceId: string; poolId: string; strategyId: string } }>(
+    '/v1/workspaces/:workspaceId/pools/:poolId/strategies/:strategyId/credentials',
+    { onRequest: app.requireCapability('credential.issue') },
+    async (request, reply) => {
+      const { workspaceId, poolId, strategyId } = request.params;
+      const credentials = await repository.listAgentCredentials({
+        workspaceId,
+        poolId,
+        strategyId,
+      });
+      return reply.send({
+        credentials: credentials.map((credential) => ({
+          credentialId: credential.credentialId,
+          label: credential.label,
+          createdAt: credential.createdAt.toISOString(),
+          revealedAt: credential.revealedAt?.toISOString() ?? null,
+          lastUsedAt: credential.lastUsedAt?.toISOString() ?? null,
+          rotatedFrom: credential.rotatedFrom,
+          revokedAt: credential.revokedAt?.toISOString() ?? null,
+          revokedReason: credential.revokedReason,
+          active: credential.revokedAt === null,
+        })),
+        secretRecoverable: false,
+      });
+    },
+  );
+
+  /**
    * Rotate an agent credential.
    *
    * A separate route and a separate capability. Rotation revokes a working key, which is a
@@ -298,11 +336,13 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRouteOptio
   );
 
   /**
-   * Perform a credential write and reveal its secret exactly once.
+   * Perform a credential write and include its secret in exactly one response.
    *
    * The repository call is one transaction: the replaced key's revocation, the new row and the
-   * audit record commit together or not at all. Only then is the token formatted, so a failure
-   * cannot leave a live credential whose secret was never delivered.
+   * audit record commit together or not at all. What that does not cover is the response. It
+   * is formatted after COMMIT and can be lost in transit, and then a live credential exists
+   * whose secret nobody holds. That outcome is real and recoverable: the credential list names
+   * the live key, and rotation mints a new secret for it.
    */
   async function completeCredentialWrite(
     request: FastifyRequest<{
@@ -336,6 +376,20 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRouteOptio
     });
 
     if (!outcome.ok) {
+      if (outcome.reason === 'ACTIVE_CREDENTIAL_EXISTS') {
+        // A typed decision, not a unique-violation surfacing as 500. The caller has already
+        // proven credential.issue on this strategy, so naming its live key reveals nothing they
+        // could not list; it is exactly what an owner whose issuance response was lost needs in
+        // order to rotate.
+        return reply.code(409).send({
+          code: 'CREDENTIAL_ALREADY_ACTIVE',
+          message:
+            'this strategy already has an active credential; rotate it to obtain a new secret',
+          correlationId: request.id,
+          retryable: false,
+          activeCredentialId: outcome.activeCredentialId,
+        });
+      }
       // 404 for both an unknown strategy and an unknown credential: distinguishing them would
       // confirm which identifiers exist inside a scope the caller may not be able to read.
       return reply.code(404).send({

@@ -80,6 +80,9 @@ export const REASON_CODES = [
   // --- authority and transport ------------------------------------------------------
   'AUTHZ_SCOPE_DENIED',
   'AUTHZ_CREDENTIAL_CLASS_DENIED',
+  // A first issue against a strategy whose key is already live. Carries the live id, so an
+  // owner whose issuance response was lost can name and rotate the credential.
+  'CREDENTIAL_ALREADY_ACTIVE',
   'IDEMPOTENCY_BODY_CONFLICT',
   'UNSUPPORTED_ACTION',
   'CAPABILITY_UNVERIFIED',

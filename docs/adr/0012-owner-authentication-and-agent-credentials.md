@@ -55,6 +55,15 @@ Session identifiers are 32 random bytes and are stored as a plain SHA-256 digest
 256-bit random value buys nothing against a search of that space, and it would put an Argon2id
 computation on every authenticated request.
 
+### 3a. Login timing is equalised before the server listens
+
+An unknown login is verified against a precomputed Argon2id digest, so a missing user and a
+wrong password perform exactly one verification each. The digest is computed at plugin
+registration, before the server is ready; computing it lazily on first use had meant the first
+unknown login on a cold process performed a hash _and_ a verify — the timing signal the
+digest exists to remove, present once per process start. A process that cannot compute it
+does not start.
+
 ### 4. Sessions are server-side rows, not signed claims
 
 12 hours absolute, 30 minutes idle. The cookie carries an identifier; the state lives in
@@ -83,6 +92,11 @@ read the mounted secret at all.
 Cookies are signed on write and signature-verified on every read. Registering a secret does
 not make `request.cookies` trustworthy: it returns whatever arrived. `request.unsignCookie()`
 is the check, and every read of the session cookie goes through it.
+
+Every cookie attribute is stated explicitly for both the session and the CSRF cookie —
+`Path=/`, signed, `HttpOnly`, `SameSite=Strict`, `Secure` outside local, `__Host-` prefixed
+when secure. `@fastify/csrf-protection` replaces its defaults wholesale when any `cookieOpts`
+are supplied, so an earlier `{ signed: true }` had silently dropped the rest.
 
 `SameSite=Strict` means the console must be same-origin with the API. Next proxies `/api/*` to
 the API rather than the cookie being relaxed to `Lax` or CORS being opened with credentials:
@@ -113,9 +127,16 @@ on one checked-out connection.
 
 **Limitation, stated plainly.** That transaction covers the database and nothing else. Whether
 the one-time response reached its recipient is not a property a COMMIT can establish, so a
-committed credential whose secret nobody received is a possible outcome by construction. The
-recovery is rotation; there is no route that returns a secret again, and `revealed_at` records
-that a display was attempted, not that it arrived.
+committed credential whose secret nobody received is a possible outcome by construction. There
+is no route that returns a secret again, and `revealed_at` records that the secret was written
+into a response, not that it arrived.
+
+**Recovery, bounded and owner-visible.** A lost issuance response also loses the credential
+id, which rotation needs. So: a first issue against a strategy whose key is already live is a
+typed `409 CREDENTIAL_ALREADY_ACTIVE` carrying the live id — not the unique-violation 500 it
+was — and `GET …/credentials` lists each credential's metadata (id, label, timestamps,
+rotation chain, revocation) with `secretRecoverable: false`. The owner rotates the named key
+and receives a new secret. Both are gated on `credential.issue`.
 
 ### 8. Authorization checks capability and scope independently
 

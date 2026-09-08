@@ -41,7 +41,7 @@ there is no integration proof and none is claimed.
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                  |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                            |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/` |
-| Identity, sessions, agent credentials    | Implemented (module 03)          | `packages/domain`, `apps/api/src/auth`, 58 unit + 83 integration cases    |
+| Identity, sessions, agent credentials    | Implemented (module 03)          | `packages/domain`, `apps/api/src/auth`, 60 unit + 88 integration cases    |
 | Same-origin console routing              | Implemented, proxy verified      | `apps/web/src/app/api-routing.ts`, 6 unit cases                           |
 | Transactional journal (module 04)        | Not started                      | —                                                                         |
 | CI                                       | Fresh checkout + real PostgreSQL | `.github/workflows/ci.yml`                                                |
@@ -66,21 +66,21 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run typecheck`        | pass                                              |
 | `pnpm run lint`             | pass                                              |
 | `pnpm run check:layering`   | pass — 9 packages, 43 crossings checked           |
-| `pnpm run check:secrets`    | pass — 205 files scanned                          |
-| `pnpm run test:unit`        | **492 passed**, 0 skipped, 28 files               |
+| `pnpm run check:secrets`    | pass — 209 files scanned                          |
+| `pnpm run test:unit`        | **501 passed**, 0 skipped, 30 files               |
 | `pnpm run test:property`    | **13 passed**, seed 20260908                      |
-| `pnpm run test:integration` | **130 passed**, 9 files, against PostgreSQL 17.10 |
+| `pnpm run test:integration` | **135 passed**, 9 files, against PostgreSQL 17.10 |
 | `pnpm run build`            | pass — all packages and apps                      |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
 | Suite       | Count | Where                                                                                                |
 | ----------- | ----- | ---------------------------------------------------------------------------------------------------- |
-| unit        | 492   | contracts 186, domain 57, config 20, web 23, api auth/cli 28, observability 8, tools 8, api 5, other |
+| unit        | 501   | contracts 186, domain 57, config 20, web 30, api auth/cli 31, observability 8, tools 8, api 5, other |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                       |
-| integration | 130   | auth 51, migrations 30, identity scope 11, CLI 18, worker/executor 12, API 8                         |
+| integration | 135   | auth 56, migrations 30, identity scope 11, CLI 18, worker/executor 12, API 8                         |
 
-No area's evidence is the workspace total. Module 03's own evidence is the 58 unit and 83
+No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 88
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), not the workspace figures.
 
 Toolchain: Node 22.23.1, pnpm 11.10.0, TypeScript 5.9.3, Fastify 5.12.3, Next 16.3.4,

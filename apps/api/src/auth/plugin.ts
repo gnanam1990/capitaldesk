@@ -4,7 +4,11 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import type { Capability, Principal } from '@capitaldesk/domain';
-import { authenticateRequest, requestedScopeFrom } from './authenticate.js';
+import {
+  authenticateRequest,
+  prepareTimingEqualisation,
+  requestedScopeFrom,
+} from './authenticate.js';
 import { authorize } from '@capitaldesk/domain';
 import { IdentityRepository } from './repository.js';
 
@@ -55,6 +59,26 @@ export function sessionCookieName(secure: boolean): string {
   return secure ? SESSION_COOKIE_SECURE : SESSION_COOKIE_PLAIN;
 }
 
+export const CSRF_COOKIE_SECURE = '__Host-capitaldesk-csrf';
+export const CSRF_COOKIE_PLAIN = 'capitaldesk-csrf';
+
+/** Same rule as the session cookie: the prefix follows the Secure flag, which follows HTTPS. */
+export function csrfCookieName(secure: boolean): string {
+  return secure ? CSRF_COOKIE_SECURE : CSRF_COOKIE_PLAIN;
+}
+
+export function csrfCookieOptions(secure: boolean): {
+  path: string;
+  signed: true;
+  httpOnly: true;
+  sameSite: 'strict';
+  secure: boolean;
+} {
+  // Identical attributes to the session cookie. The CSRF secret protects the session, so a
+  // weaker cookie for it would be a weaker session.
+  return sessionCookieOptions(secure);
+}
+
 export function sessionCookieOptions(secure: boolean): {
   path: string;
   signed: true;
@@ -81,7 +105,14 @@ async function authPlugin(app: FastifyInstance, options: AuthPluginOptions): Pro
   const cookieName = sessionCookieName(options.secureCookies);
 
   await app.register(fastifyCookie, { secret: options.sessionSecret });
-  await app.register(fastifyCsrf, { cookieOpts: { signed: true } });
+  // Every cookie attribute is stated. Supplying `cookieOpts` at all replaces the plugin's
+  // defaults rather than extending them, so the earlier `{ signed: true }` silently dropped
+  // path, HttpOnly and SameSite from the CSRF cookie. Same posture as the session cookie:
+  // strict, not readable from script, and __Host- prefixed wherever HTTPS allows it.
+  await app.register(fastifyCsrf, {
+    cookieKey: csrfCookieName(options.secureCookies),
+    cookieOpts: csrfCookieOptions(options.secureCookies),
+  });
   await app.register(fastifyRateLimit, {
     global: false,
     // Keyed by source address. Bounded so a credential-stuffing attempt is slowed without a
@@ -90,6 +121,11 @@ async function authPlugin(app: FastifyInstance, options: AuthPluginOptions): Pro
   });
 
   app.decorateRequest('principal', undefined);
+
+  // Before the server is ready, not on first use. If this throws the plugin fails and the
+  // server never listens, which is the correct outcome for a process that cannot perform its
+  // login timing equalisation.
+  app.decorate('timingEqualisationDigest', await prepareTimingEqualisation());
 
   /**
    * Authenticate every request that reaches a guarded route.
@@ -243,5 +279,7 @@ declare module 'fastify' {
     ) => (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
     requireAuthenticated: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
     requireOwnerSession: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+    /** Precomputed at registration; see prepareTimingEqualisation. */
+    timingEqualisationDigest: string;
   }
 }

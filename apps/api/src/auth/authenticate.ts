@@ -34,15 +34,19 @@ export type AuthenticationResult =
   | { readonly ok: false; readonly failure: AuthenticationFailure };
 
 /**
- * A dummy Argon2id digest, hashed once at startup.
+ * The digest an unknown login is verified against, so a missing user and a wrong password
+ * cost the same and the response time cannot enumerate accounts.
  *
- * Verified against when no user matches, so a missing login and a wrong password cost the
- * same. Without it the response time distinguishes them and the endpoint enumerates accounts.
+ * Computed once, before the server listens (see the auth plugin), and passed in. An earlier
+ * version hashed it lazily on first use, which meant the first unknown-login request on a
+ * cold process performed one hash *and* one verify while a wrong password performed only the
+ * verify — the very timing signal the digest exists to remove, present exactly once per
+ * process start.
  */
-let dummyDigestPromise: Promise<string> | null = null;
-function dummyDigest(): Promise<string> {
-  dummyDigestPromise ??= hashHumanSecret('capitaldesk-timing-equalisation-placeholder');
-  return dummyDigestPromise;
+export const TIMING_EQUALISATION_INPUT = 'capitaldesk-timing-equalisation-placeholder';
+
+export function prepareTimingEqualisation(): Promise<string> {
+  return hashHumanSecret(TIMING_EQUALISATION_INPUT);
 }
 
 export interface AuthenticateOptions {
@@ -120,15 +124,29 @@ export async function authenticateRequest(
  * Always performs one Argon2id verification, even when no member matched, so the endpoint
  * does not reveal which login names exist.
  */
+export interface PasswordVerification {
+  /** The precomputed equalisation digest. Never computed here. */
+  readonly equalisationDigest: string;
+  /** Injectable so a test can count calls; production passes nothing and gets Argon2id. */
+  readonly verify?: (digest: string, presented: string) => Promise<boolean>;
+}
+
+/**
+ * Exactly one verification in every case. With no stored hash the presented password is
+ * verified against the equalisation digest and the answer is false regardless; with one it
+ * is verified against that. Nothing is hashed on this path.
+ */
 export async function verifyOwnerPassword(
   storedHash: string | null,
   presented: string,
+  options: PasswordVerification,
 ): Promise<boolean> {
+  const verify = options.verify ?? verifyHumanSecret;
   if (storedHash === null) {
-    await verifyHumanSecret(await dummyDigest(), presented);
+    await verify(options.equalisationDigest, presented);
     return false;
   }
-  return verifyHumanSecret(storedHash, presented);
+  return verify(storedHash, presented);
 }
 
 export interface ScopeSource {
