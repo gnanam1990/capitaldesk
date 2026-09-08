@@ -4,9 +4,9 @@ The single authoritative record of what is built, what is proven and what is blo
 Updated with every milestone. Where a claim is not backed by a command in this document, it
 is not a claim.
 
-- **Milestone:** M5 — deterministic capital mandates (module 08).
-- **Branch:** `feat/m5-policy-mandates`, branched from `main` at `6d83497`.
-- **Pull request:** pending after the fast local sanity checks recorded below.
+- **Milestone:** M6 — deterministic planning and atomic reservation (modules 09–10).
+- **Branch:** `feat/m6-planning-reservations`, stacked on module 08 pending its required merge.
+- **Pull request:** pending after module 08 merges.
 - **Previous milestones:** M0 merged as
   [#1](https://github.com/gnanam1990/capitaldesk/pull/1); M1 merged as
   [#2](https://github.com/gnanam1990/capitaldesk/pull/2) at `f2f4d59`; M2 merged as
@@ -25,6 +25,8 @@ is not a claim.
 - **Module 08:** complete for owned paths — owner mandate, immutable policy journal and
   budget-hold paths are implemented and focused PostgreSQL tests pass. See
   [docs/handoffs/08.md](handoffs/08.md).
+- **Module 09:** complete for the v1 pure preview path — see [docs/handoffs/09.md](handoffs/09.md).
+- **Module 10:** complete for the v1 sealing transaction — see [docs/handoffs/10.md](handoffs/10.md).
 
 ## What this milestone is, and is not
 
@@ -69,6 +71,8 @@ BLOCKED and is named as such rather than claimed.
 | Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 61 unit + 6 property; migration 0005, 65 integration cases   |
 | Strategy targets (module 07)             | Implemented                      | 10 unit, 12 real-PostgreSQL route/repository cases; migration 0006             |
 | Capital mandates (module 08)             | Implemented                      | 11 unit cases; 5 policy PostgreSQL cases plus intent regression suite          |
+| Deterministic planner (module 09)        | Implemented                      | `packages/planner`; 8 focused unit cases                                       |
+| Atomic plan sealing (module 10)          | Implemented                      | migration 0008; 3 focused real-PostgreSQL cases                                |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
@@ -111,6 +115,13 @@ Module 08 targeted results:
 | mandate unit file                   | 11 passed                           |
 | policy and intent integration files | 15 passed on local PostgreSQL 17.10 |
 
+Modules 09–10 targeted results:
+
+| Command                  | Result                             |
+| ------------------------ | ---------------------------------- |
+| planner unit file        | 8 passed                           |
+| sealing integration file | 3 passed on local PostgreSQL 17.10 |
+
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
 | Suite       | Count | Where                                                                                                   |
@@ -143,7 +154,7 @@ proof**, which is why the code reports execution as unavailable rather than assu
 
 ## Next action
 
-Open module 08's pull request, let required PostgreSQL CI execute the migration and repository
-tests, then merge it. Modules 09 and 10 are unblocked by the target, claim and mandate models.
-A live bootstrap still cannot run because obtaining a COMPLETE observation cut needs the
-`VENUE_READ` credential that does not exist.
+Merge module 08 after its required CI, then open the modules 09–10 pull request. Module 11 can
+add owner approval lifecycle on the immutable sealed payload. A live bootstrap still cannot
+run because obtaining a COMPLETE observation cut needs the `VENUE_READ` credential that does
+not exist.

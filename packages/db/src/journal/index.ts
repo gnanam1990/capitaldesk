@@ -11,3 +11,4 @@ export * from './restore.js';
 export * from './venue-read.js';
 export * from './intents.js';
 export * from './policy.js';
+export * from './sealing.js';

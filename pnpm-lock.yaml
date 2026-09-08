@@ -343,6 +343,16 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/planner:
+    dependencies:
+      '@capitaldesk/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
 packages:
 
   '@babel/helper-string-parser@7.29.7':
