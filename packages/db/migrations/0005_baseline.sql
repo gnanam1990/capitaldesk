@@ -180,3 +180,111 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER owner_allocations_name_a_real_strategy
   BEFORE INSERT ON owner_allocations
   FOR EACH ROW EXECUTE FUNCTION refuse_unknown_allocation_strategy();
+
+-- --------------------------------------------------------------------------------------
+-- Epoch isolation for the claim model (T-032)
+--
+-- An epoch exists so that a venue reset cannot let old funds become current authority. The
+-- ledger recorded the epoch on each transaction but not on its entries, and every economic
+-- read summed entries across the whole pool — so after a rotation a closed epoch's opening
+-- was still spendable, still counted in the projection, and still satisfied conservation.
+-- History must be preserved and queryable; what must not survive is its authority.
+--
+-- The entry gains the epoch of the transaction that created it. Denormalised deliberately:
+-- every economic sum then scopes naturally, and the constraints that guard them can be local
+-- rather than joining on each evaluation.
+
+ALTER TABLE ledger_entries ADD COLUMN epoch INTEGER;
+
+UPDATE ledger_entries e
+   SET epoch = t.epoch
+  FROM ledger_transactions t
+ WHERE t.workspace_id = e.workspace_id AND t.pool_id = e.pool_id
+   AND t.ledger_txn_id = e.ledger_txn_id;
+
+ALTER TABLE ledger_entries ALTER COLUMN epoch SET NOT NULL;
+
+-- The entry's epoch is its transaction's epoch, not an independent claim. A row asserting
+-- otherwise would move a posting between epochs and take its authority with it.
+ALTER TABLE ledger_entries
+  ADD CONSTRAINT ledger_entries_transaction_scope
+  FOREIGN KEY (workspace_id, pool_id, epoch, ledger_txn_id)
+  REFERENCES ledger_transactions (workspace_id, pool_id, epoch, ledger_txn_id);
+
+CREATE INDEX ledger_entries_by_epoch_owner_asset
+  ON ledger_entries (workspace_id, pool_id, epoch, account_owner, asset_code, asset_scale);
+
+-- The projection is per epoch, so a rotation starts a fresh view without deleting the old.
+ALTER TABLE claim_balances ADD COLUMN epoch INTEGER;
+UPDATE claim_balances SET epoch = 1 WHERE epoch IS NULL;
+ALTER TABLE claim_balances ALTER COLUMN epoch SET NOT NULL;
+ALTER TABLE claim_balances DROP CONSTRAINT claim_balances_pkey;
+ALTER TABLE claim_balances
+  ADD CONSTRAINT claim_balances_pkey
+  PRIMARY KEY (workspace_id, pool_id, epoch, account_owner, asset_code, asset_scale);
+
+-- Rebuild, per epoch. Every epoch is rebuilt, so the old view stays queryable and the new
+-- one starts from its own postings alone.
+CREATE OR REPLACE FUNCTION rebuild_claim_balances(p_workspace_id TEXT, p_pool_id TEXT)
+RETURNS BIGINT AS $$
+DECLARE
+  at_revision BIGINT;
+BEGIN
+  SELECT ledger_revision INTO at_revision FROM pools
+   WHERE workspace_id = p_workspace_id AND pool_id = p_pool_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'pool %/% does not exist', p_workspace_id, p_pool_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+
+  PERFORM set_config('capitaldesk.projection_rebuild', 'on', true);
+  DELETE FROM claim_balances WHERE workspace_id = p_workspace_id AND pool_id = p_pool_id;
+  INSERT INTO claim_balances
+    (workspace_id, pool_id, epoch, account_owner, asset_code, asset_scale,
+     available_atoms, reserved_atoms, quarantined_atoms, ledger_revision)
+  SELECT e.workspace_id, e.pool_id, e.epoch, e.account_owner, e.asset_code, e.asset_scale,
+         coalesce(sum(e.delta_atoms) FILTER (WHERE e.claim_state = 'AVAILABLE'), 0),
+         coalesce(sum(e.delta_atoms) FILTER (WHERE e.claim_state = 'RESERVED'), 0),
+         coalesce(sum(e.delta_atoms) FILTER (WHERE e.claim_state = 'QUARANTINED'), 0),
+         at_revision
+    FROM ledger_entries e
+   WHERE e.workspace_id = p_workspace_id AND e.pool_id = p_pool_id
+     AND e.account_kind <> 'ASSET_CONTROL'
+   GROUP BY e.workspace_id, e.pool_id, e.epoch, e.account_owner, e.asset_code, e.asset_scale;
+
+  RETURN at_revision;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Claims are non-negative within their own epoch. Summing across epochs let a closed epoch's
+-- surplus cover a current shortfall, which is precisely the authority a reset removes.
+CREATE OR REPLACE FUNCTION assert_claims_nonnegative() RETURNS trigger AS $$
+DECLARE
+  total NUMERIC;
+BEGIN
+  IF NEW.account_kind = 'ASSET_CONTROL' THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT coalesce(sum(delta_atoms), 0) INTO total FROM ledger_entries
+   WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id AND epoch = NEW.epoch
+     AND account_owner = NEW.account_owner AND asset_code = NEW.asset_code
+     AND asset_scale = NEW.asset_scale AND claim_state = NEW.claim_state;
+  IF total < 0 THEN
+    RAISE EXCEPTION '% claim for %:% held by % would be negative (%) in epoch %',
+      NEW.claim_state, NEW.asset_code, NEW.asset_scale, NEW.account_owner, total, NEW.epoch
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF NEW.reservation_id IS NOT NULL THEN
+    SELECT coalesce(sum(delta_atoms), 0) INTO total FROM ledger_entries
+     WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
+       AND reservation_id = NEW.reservation_id;
+    IF total < 0 THEN
+      RAISE EXCEPTION 'reservation % would be over-consumed (%)', NEW.reservation_id, total
+        USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;

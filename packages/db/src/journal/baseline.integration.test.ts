@@ -6,6 +6,7 @@ import {
   type BaselineAssessment,
 } from '@capitaldesk/ledger';
 import { BaselineRepository, type BootstrapOutcome } from './baseline.js';
+import { GovernanceRepository } from './governance.js';
 import { LedgerRepository } from './ledger.js';
 import {
   ACCOUNT,
@@ -131,11 +132,12 @@ describeIfDatabase('account baseline and owner allocation', () => {
   }
 
   /** Positions read back from the ledger, for the independent conservation check. */
-  async function positions(): Promise<AssetPosition[]> {
+  async function positions(epoch = 1): Promise<AssetPosition[]> {
     const control = await harness.admin.query<{ code: string; scale: string; atoms: string }>(
       `SELECT asset_code AS code, asset_scale AS scale, sum(delta_atoms)::text AS atoms
-         FROM ledger_entries WHERE claim_state = 'CONTROL'
+         FROM ledger_entries WHERE claim_state = 'CONTROL' AND epoch = $1
         GROUP BY asset_code, asset_scale ORDER BY asset_code`,
+      [epoch],
     );
     const claims = await harness.admin.query<{
       code: string;
@@ -149,8 +151,9 @@ describeIfDatabase('account baseline and owner allocation', () => {
               coalesce(sum(delta_atoms) FILTER (WHERE claim_state = 'AVAILABLE'), 0)::text AS available,
               coalesce(sum(delta_atoms) FILTER (WHERE claim_state = 'RESERVED'), 0)::text AS reserved,
               coalesce(sum(delta_atoms) FILTER (WHERE claim_state = 'QUARANTINED'), 0)::text AS quarantined
-         FROM ledger_entries WHERE claim_state <> 'CONTROL'
+         FROM ledger_entries WHERE claim_state <> 'CONTROL' AND epoch = $1
         GROUP BY asset_code, asset_scale, account_owner ORDER BY asset_code, account_owner`,
+      [epoch],
     );
     return control.rows.map((row) => ({
       asset: { code: row.code, scaleVersion: row.scale },
@@ -171,7 +174,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
     it('posts opening balances to ASSET_CONTROL and matching HOUSE claims', async () => {
       expect(await bootstrap()).toMatchObject({ ok: true, baselineId: 'baseline-1' });
 
-      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
       expect(balances).toEqual([
         {
           owner: 'HOUSE',
@@ -404,6 +407,169 @@ describeIfDatabase('account baseline and owner allocation', () => {
     });
   });
 
+  /**
+   * T-032. An epoch exists so that a venue reset cannot let old funds become current
+   * authority. History is preserved and stays queryable; what must not survive is its
+   * spending power.
+   */
+  describe('epoch isolation after a reset', () => {
+    async function rotateToEpochTwo(): Promise<void> {
+      const rotated = await new GovernanceRepository(harness.pool).rotateEpoch({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        reason: 'testnet reset',
+      });
+      expect(rotated).toEqual({ ok: true, epoch: 2 });
+      await seedCompleteCut('cut-2', 2);
+    }
+
+    it('shows only the new epoch’s opening, and keeps the old one queryable', async () => {
+      await bootstrap();
+      await rotateToEpochTwo();
+      await bootstrap({
+        epoch: 2,
+        baselineId: 'baseline-2',
+        cutId: 'cut-2',
+        balances: [{ asset: USDT, atoms: 100n }],
+      });
+
+      const current = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 2 });
+      expect(current.find((row) => row.owner === 'HOUSE')?.availableAtoms).toBe(100n);
+
+      // The closed epoch is history, not deleted history.
+      const previous = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
+      expect(previous.find((row) => row.owner === 'HOUSE')?.availableAtoms).toBe(1_000n);
+    });
+
+    it('cannot spend the closed epoch’s funds in the new one', async () => {
+      await bootstrap();
+      await rotateToEpochTwo();
+      await bootstrap({
+        epoch: 2,
+        baselineId: 'baseline-2',
+        cutId: 'cut-2',
+        balances: [{ asset: USDT, atoms: 100n }],
+      });
+
+      // 500 was affordable under the old opening and is not under the new one.
+      expect(
+        await baselines.allocate({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 2,
+          allocationId: 'alloc-across',
+          actor: OWNER,
+          authorizedBy: 'session-1',
+          from: 'HOUSE',
+          to: 'strategy-a',
+          asset: USDT,
+          atoms: 500n,
+        }),
+      ).toEqual({ ok: false, reason: 'UNAUTHORIZED', detail: 'EXCEEDS_AVAILABLE' });
+      expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(0);
+    });
+
+    it('allows only what the new epoch actually opened', async () => {
+      // The positive control: the bound is the new opening, not a ban on allocating.
+      await bootstrap();
+      await rotateToEpochTwo();
+      await bootstrap({
+        epoch: 2,
+        baselineId: 'baseline-2',
+        cutId: 'cut-2',
+        balances: [{ asset: USDT, atoms: 100n }],
+      });
+      expect(
+        await baselines.allocate({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 2,
+          allocationId: 'alloc-ok',
+          actor: OWNER,
+          authorizedBy: 'session-1',
+          from: 'HOUSE',
+          to: 'strategy-a',
+          asset: USDT,
+          atoms: 100n,
+        }),
+      ).toMatchObject({ ok: true });
+    });
+
+    it('cannot reserve the closed epoch’s funds in the new one', async () => {
+      await bootstrap();
+      await baselines.allocate({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        epoch: 1,
+        allocationId: 'alloc-old',
+        actor: OWNER,
+        authorizedBy: 'session-1',
+        from: 'HOUSE',
+        to: 'strategy-a',
+        asset: USDT,
+        atoms: 1_000n,
+      });
+      await rotateToEpochTwo();
+      await bootstrap({
+        epoch: 2,
+        baselineId: 'baseline-2',
+        cutId: 'cut-2',
+        balances: [{ asset: USDT, atoms: 100n }],
+      });
+
+      // strategy-a holds 1000 in the closed epoch and nothing in the current one.
+      expect(
+        await ledger.reserve({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 2,
+          reservationId: 'res-across',
+          strategyId: 'strategy-a',
+          planId: 'plan-across',
+          asset: { code: 'USDT', scale: 'v1' },
+          atoms: 500n,
+        }),
+      ).toMatchObject({ ok: false, reason: 'INSUFFICIENT_AVAILABLE', availableAtoms: 0n });
+    });
+
+    it('conserves each epoch on its own, never mixed', async () => {
+      await bootstrap();
+      await rotateToEpochTwo();
+      await bootstrap({
+        epoch: 2,
+        baselineId: 'baseline-2',
+        cutId: 'cut-2',
+        balances: [{ asset: USDT, atoms: 100n }],
+      });
+      // 1000 in the old epoch and 100 in the new one, each balanced against its own control.
+      expect(verifyConservation(await positions(1)).conserved).toBe(true);
+      expect(verifyConservation(await positions(2)).conserved).toBe(true);
+      const epochOne = await positions(1);
+      const epochTwo = await positions(2);
+      expect(epochOne[0]?.controlAtoms).toBe(1_000n);
+      expect(epochTwo[0]?.controlAtoms).toBe(100n);
+    });
+
+    it('carries the transaction’s epoch onto every entry it posts', async () => {
+      await bootstrap();
+      await rotateToEpochTwo();
+      await bootstrap({
+        epoch: 2,
+        baselineId: 'baseline-2',
+        cutId: 'cut-2',
+        balances: [{ asset: USDT, atoms: 100n }],
+      });
+      const mismatched = await harness.admin.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM ledger_entries e
+           JOIN ledger_transactions t
+             ON t.workspace_id = e.workspace_id AND t.pool_id = e.pool_id
+            AND t.ledger_txn_id = e.ledger_txn_id
+          WHERE e.epoch <> t.epoch`,
+      );
+      expect(mismatched.rows[0]?.count).toBe('0');
+    });
+  });
+
   /** The golden case the prompt names: 1000 USDT to HOUSE, then 500/500. */
   describe('owner allocation', () => {
     function allocate(
@@ -435,7 +601,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
         revision: 2,
       });
 
-      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
       // HOUSE remains as an owner holding nothing, which is the honest statement: it had the
       // units and gave them away, rather than never having existed.
       expect(balances.map((b) => [b.owner, b.availableAtoms] as const)).toEqual([
@@ -469,7 +635,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
           atoms: 200n,
         }),
       ).toMatchObject({ ok: true });
-      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
       expect(balances.find((b) => b.owner === 'strategy-a')?.availableAtoms).toBe(300n);
       expect(balances.find((b) => b.owner === 'HOUSE')?.availableAtoms).toBe(700n);
     });
@@ -520,7 +686,7 @@ describeIfDatabase('account baseline and owner allocation', () => {
       expect((again as { ledgerTxnId: string }).ledgerTxnId).toBe(
         (first as { ledgerTxnId: string }).ledgerTxnId,
       );
-      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
       expect(balances.find((b) => b.owner === 'strategy-a')?.availableAtoms).toBe(500n);
     });
 
@@ -588,14 +754,14 @@ describeIfDatabase('account baseline and owner allocation', () => {
       // One allocation row, one strategy funded, and every unit still owned exactly once.
       expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(1);
       expect(verifyConservation(await positions()).conserved).toBe(true);
-      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
       expect(balances.find((b2) => b2.owner === 'HOUSE')?.availableAtoms).toBe(0n);
     });
 
     it('leaves no allocation row when the postings are rolled back', async () => {
       // A crash between the postings and the record would be an allocation nobody authorised,
       // or an authorisation that moved nothing. The transaction makes both unreachable.
-      const before = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      const before = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
       await expect(
         baselines.allocate({
           workspaceId: WORKSPACE,
@@ -619,7 +785,9 @@ describeIfDatabase('account baseline and owner allocation', () => {
           )
         ).rowCount,
       ).toBe(0);
-      expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL })).toEqual(before);
+      expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 })).toEqual(
+        before,
+      );
     });
 
     it('records who authorised it and that it moved nothing at the venue', async () => {

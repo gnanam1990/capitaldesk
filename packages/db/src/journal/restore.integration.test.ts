@@ -372,7 +372,7 @@ describeIfDatabase('restart and restore posture', () => {
       // The marked plan's reservation is a liability, not a release candidate.
       { reservation_id: 'res-unknown', state: 'HELD' },
     ]);
-    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
     expect(balances).toContainEqual({
       owner: 'strategy-b',
       asset: USDT,

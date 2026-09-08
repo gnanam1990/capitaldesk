@@ -390,11 +390,20 @@ async function availableOf(
   input: AllocationInput,
   owner: string,
 ): Promise<bigint> {
+  // Scoped to the epoch being allocated in. A closed epoch's claims are history: after a
+  // reset they must not fund anything, and summing across epochs let exactly that happen.
   const result = await client.query<{ atoms: string }>(
     `SELECT coalesce(sum(delta_atoms), 0)::text AS atoms FROM ledger_entries
-      WHERE workspace_id = $1 AND pool_id = $2 AND account_owner = $3
+      WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $6 AND account_owner = $3
         AND claim_state = 'AVAILABLE' AND asset_code = $4 AND asset_scale = $5`,
-    [input.workspaceId, input.poolId, owner, input.asset.code, input.asset.scaleVersion],
+    [
+      input.workspaceId,
+      input.poolId,
+      owner,
+      input.asset.code,
+      input.asset.scaleVersion,
+      input.epoch,
+    ],
   );
   return BigInt(result.rows[0]?.atoms ?? '0');
 }

@@ -199,7 +199,7 @@ describeIfDatabase('withdrawn authority stops every authority-creating path', ()
       ],
     });
     expect(posted).toMatchObject({ ok: true });
-    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+    const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 });
     expect(balances).toEqual([
       {
         owner: 'strategy-a',
@@ -227,7 +227,7 @@ describeIfDatabase('withdrawn authority stops every authority-creating path', ()
       'SELECT state FROM reservations',
     );
     expect(reservation.rows[0]?.state).toBe('RELEASED');
-    expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL })).toEqual([
+    expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 })).toEqual([
       {
         owner: 'strategy-a',
         asset: USDT,
@@ -398,7 +398,7 @@ describeIfDatabase('withdrawn authority stops every authority-creating path', ()
     expect(release).toMatchObject({ ok: true, reservationsReleased: 0 });
     expect(path).toEqual({ ok: false, reason: 'POOL_NOT_DISPATCHABLE', state: 'HALTED' });
     expect((await harness.admin.query('SELECT 1 FROM reservations')).rowCount).toBe(0);
-    expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL })).toEqual([
+    expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 })).toEqual([
       {
         owner: 'strategy-a',
         asset: USDT,
@@ -425,7 +425,7 @@ describeIfDatabase('withdrawn authority stops every authority-creating path', ()
     );
     expect(reservations.rows.map((row) => row.state)).toEqual(['RELEASED']);
     // The capital is back where it started, not stranded behind withdrawn authority.
-    expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL })).toEqual([
+    expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL, epoch: 1 })).toEqual([
       {
         owner: 'strategy-a',
         asset: USDT,
