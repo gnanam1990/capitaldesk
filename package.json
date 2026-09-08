@@ -26,7 +26,10 @@
     "test:integration": "pnpm run preflight:integration && tsc -b && pnpm run typecheck:tests && vitest run --project integration",
     "typecheck:tests": "tsc -p tsconfig.tools.json --noEmit",
     "preflight:integration": "tsx tools/require-database-url.ts",
-    "test:process-only": "vitest run --project integration"
+    "test:process-only": "vitest run --project integration",
+    "proof:create": "tsx tools/proof-cli.ts create",
+    "proof:verify": "tsx tools/proof-cli.ts verify",
+    "release:gate": "tsx tools/proof-cli.ts gate"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

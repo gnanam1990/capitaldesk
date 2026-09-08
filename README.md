@@ -8,11 +8,11 @@ claims, reserves capital, exposes conflicting proposals rather than resolving th
 obtains the owner's explicit approval for one exact plan, and reconciles actual exchange
 execution into a per-strategy ledger.
 
-> **Status: foundation only.** This repository currently contains frozen contracts, an
-> executable workspace, a migration lifecycle, truthful health reporting and a console shell.
-> There is **no ledger, planner, approval flow, dispatch path or venue adapter**, and no
-> Binance account has ever been contacted. See [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md)
-> for exactly what exists and what is blocked.
+> **Status: active implementation; release gate not passed.** Local contracts, PostgreSQL
+> journal paths, planning and reconciliation components exist, but no version-bound clean-room
+> testnet release manifest has passed. No authenticated Binance account has been contacted in
+> the recorded evidence. See [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for implementation
+> status and [docs/release-readiness.md](docs/release-readiness.md) for the release decision.
 
 ## What it does not do
 
@@ -72,6 +72,22 @@ pnpm run test:process-only
 That command is not the integration gate and must not be quoted as integration evidence. CI
 runs the gate with a real PostgreSQL service and additionally fails if anything skips.
 
+Release proof is a separate, stricter gate. It verifies a clean exact commit, dependency
+lockfile, test plan, migration set and every evidence-file digest, then requires the proof
+class appropriate to each scenario:
+
+```sh
+mkdir -p artifacts/local/proof
+pnpm proof:create -- --descriptor docs/evidence/proof-descriptor.example.json \
+  --out artifacts/local/proof/manifest.json
+pnpm proof:verify -- --bundle artifacts/local/proof
+pnpm release:gate -- --bundle artifacts/local/proof
+```
+
+The example descriptor is intentionally local and incomplete, so its release gate fails. A
+passing manifest must come from the documented clean testnet run; renaming fixture output to
+`venue` is rejected.
+
 ## Running
 
 ```sh
@@ -127,6 +143,10 @@ pnpm run check:secrets
 | ---------------------------------------------------------------------- | ------------------------------------------------------- |
 | [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md)                       | What is built, proven and blocked                       |
 | [docs/requirements-traceability.md](docs/requirements-traceability.md) | Every requirement mapped to code, tests and proof class |
+| [docs/architecture.md](docs/architecture.md)                           | Trust and economic data-flow boundaries                 |
+| [docs/quickstart.md](docs/quickstart.md)                               | Clean local setup and explicit testnet stop point       |
+| [docs/operator-guide.md](docs/operator-guide.md)                       | Normal operation, halt and recovery                     |
+| [docs/release-readiness.md](docs/release-readiness.md)                 | Evidence-backed release decision                        |
 | [docs/adr/](docs/adr/)                                                 | Decisions amending the reviewed specification           |
 | [docs/handoffs/](docs/handoffs/)                                       | Per-milestone evidence records                          |
 | [specs/capitaldesk/](specs/capitaldesk/)                               | The specification pack                                  |
