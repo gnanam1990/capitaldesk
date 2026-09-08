@@ -51,6 +51,24 @@ export function assertReaderAndTraderMatch(
   readerStableAccountId: string,
   traderStableAccountId: string,
 ): void {
+  // Two absent identities are not a match. Comparing them directly let the gate pass when
+  // neither credential had established an account at all — the case it exists to catch.
+  const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+  for (const [role, id] of [
+    ['reader', readerStableAccountId],
+    ['trader', traderStableAccountId],
+  ] as const) {
+    // Same segment rules as venueAccountKey: whitespace-only, padded and malformed ids are
+    // not identities, and two of them are certainly not the same identity.
+    if (id.trim().length > 0 && !ACCOUNT_ID_PATTERN.test(id)) {
+      violate('IDENTITY_UNSTABLE_ACCOUNT', `the ${role} account id is malformed`, { role });
+    }
+    if (id.trim().length === 0) {
+      violate('IDENTITY_UNSTABLE_ACCOUNT', `the ${role} credential established no account id`, {
+        role,
+      });
+    }
+  }
   if (readerStableAccountId !== traderStableAccountId) {
     violate(
       'IDENTITY_UNSTABLE_ACCOUNT',

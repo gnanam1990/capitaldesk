@@ -82,6 +82,14 @@ function checkMagnitude(atoms: bigint): void {
 }
 
 export function parseAtoms(text: string): bigint {
+  // An untyped wire payload can carry a JSON number here. Accepting it and normalising to a
+  // bigint would silently defeat the atom-string contract that exists precisely so a quantity
+  // cannot arrive as a lossy JSON number.
+  if (typeof text !== 'string') {
+    violate('MONEY_NOT_AN_INTEGER', 'atoms must arrive as a canonical decimal string', {
+      received: typeof text,
+    });
+  }
   // Length is checked before BigInt parsing: a caller-supplied digit string of arbitrary
   // length would otherwise be converted first and rejected afterwards, making the cost of
   // rejecting an oversized value grow with the attacker-chosen input.

@@ -7,6 +7,7 @@
  */
 export * from './errors.js';
 export * from './reason-codes.js';
+export * from './time.js';
 export * from './money.js';
 export * from './price.js';
 export * from './marked-value.js';

@@ -1,3 +1,5 @@
+import { violate } from './errors.js';
+import { assertOrderedInterval, covers, type Interval } from './time.js';
 import type { ObservationCoverageState } from './states.js';
 
 /**
@@ -97,15 +99,47 @@ export interface GapRecoveryCertificate {
  * is a claim that needs its own evidence, and an empty list is more often an unpopulated
  * field than a proof.
  */
-export function certificateProvesUniverse(certificate: GapRecoveryCertificate): boolean {
+export function certificateProvesUniverse(
+  certificate: GapRecoveryCertificate,
+  streamGap: Interval | null,
+): boolean {
+  // A certificate with no gap to close proves nothing: there is nothing for it to be about.
+  if (streamGap === null) return false;
+
+  const certified: Interval = { from: certificate.gapStart, to: certificate.gapEnd };
+  try {
+    assertOrderedInterval('certificate', certified);
+    assertOrderedInterval('streamGap', streamGap);
+  } catch {
+    // A malformed or non-strict instant is not a proof.
+    return false;
+  }
+
   return (
     certificate.exhaustiveSymbolUniverse.length > 0 &&
     certificate.universeExhaustivenessEvidence.length > 0 &&
     certificate.perSymbolPaginationComplete &&
     certificate.retentionCoversGap &&
     certificate.nonTradeMovementsEnumerated &&
-    Date.parse(certificate.gapStart) < Date.parse(certificate.gapEnd)
+    // The certificate must cover the actual interruption. Without this it merely had to be
+    // internally well-formed, so one describing an unrelated interval — a different day
+    // entirely — satisfied the gate and authorized a window nothing had proven.
+    covers(certified, streamGap)
   );
+}
+
+/**
+ * The intervals a coverage assessment is about.
+ *
+ * `assessed` is the reconciliation window. `streamGap` is the interruption inside it, when
+ * there was one — a certificate closes *that*, not the whole window. Requiring a certificate
+ * to span the entire assessed window would reject the legitimate case the recovery path
+ * exists for: a four-minute disconnect inside a one-hour window.
+ */
+export interface CoverageWindows {
+  readonly assessed: Interval;
+  /** The interruption to be closed, or null when the session was uninterrupted. */
+  readonly streamGap: Interval | null;
 }
 
 export interface CoverageConditions {
@@ -188,13 +222,50 @@ const CONDITION_LABELS: ReadonlyArray<readonly [keyof CoverageConditions, string
 
 export function assessCoverage(
   conditions: CoverageConditions,
+  /** The reconciliation window, and the interruption inside it if there was one. */
+  windows: CoverageWindows,
   /**
-   * A certificate closing an interrupted window. Today no producer exists, so callers pass
-   * `null` and an interrupted session is UNSUPPORTED.
+   * A certificate closing the interruption. Today no producer exists, so callers pass `null`
+   * and an interrupted session is UNSUPPORTED.
    */
   gapCertificate: GapRecoveryCertificate | null = null,
 ): CoverageAssessment {
-  const certified = gapCertificate !== null && certificateProvesUniverse(gapCertificate);
+  assertOrderedInterval('assessed window', windows.assessed);
+
+  // The session claim and the gap identity are two statements about the same fact, and they
+  // must agree. "Uninterrupted, and here is the interruption" is incoherent; so is
+  // "interrupted, but there is no gap", which leaves nothing for a certificate to close and
+  // no interval to bound it against. Either combination is a caller error, not a coverage
+  // outcome, so it is refused rather than resolved by preferring one field.
+  if (conditions.streamSessionUninterrupted !== (windows.streamGap === null)) {
+    violate(
+      'OBSERVATION_COVERAGE_INCOMPLETE',
+      windows.streamGap === null
+        ? 'the session is reported interrupted but no stream gap interval was supplied'
+        : 'a stream gap interval was supplied for a session reported uninterrupted',
+      {
+        streamSessionUninterrupted: String(conditions.streamSessionUninterrupted),
+        streamGap:
+          windows.streamGap === null ? 'null' : `${windows.streamGap.from}/${windows.streamGap.to}`,
+      },
+    );
+  }
+
+  if (windows.streamGap !== null) {
+    assertOrderedInterval('stream gap', windows.streamGap);
+    // A gap outside the window it supposedly interrupts is incoherent, and accepting it would
+    // let a certificate for an unrelated interval be applied to this assessment.
+    if (!covers(windows.assessed, windows.streamGap)) {
+      return {
+        state: 'UNSUPPORTED',
+        unmet: ['the reported stream gap lies outside the window being assessed'],
+        detectionScope: 'NET_BALANCE_CHANGES_ONLY',
+      };
+    }
+  }
+
+  const certified =
+    gapCertificate !== null && certificateProvesUniverse(gapCertificate, windows.streamGap);
 
   // A stream gap is recoverable when a certificate proves the universe over it. A transport
   // interruption is not by itself permanent financial uncertainty; what makes a window

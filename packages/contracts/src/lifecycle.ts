@@ -183,20 +183,82 @@ export const LIFECYCLE_CONTRACTS: Readonly<Record<LifecycleAction, LifecycleCont
   });
 
 /**
- * Plan states in which a dispatch marker has been committed.
+ * Whether a dispatch marker has been committed for this plan.
  *
- * From here on nothing local can retract the order. A halt, revocation or policy change
- * disables future authority; it never releases reservations, never rewrites the approval
- * and never asserts that the venue cancelled anything (TDD section 9, INV-09, INV-10).
+ * This is *evidence*, not an inference from the plan's state. `MANUAL_REVIEW` is reachable
+ * before the marker — an invalid preview or a failed eligibility check lands there — so
+ * treating it as always in flight meant a halt or credential revocation against an unmarked
+ * plan returned FUTURE_AUTHORITY_ONLY and left the plan live instead of invalidating it.
+ *
+ * Once the marker is committed nothing local can retract the order: a halt, revocation or
+ * policy change disables future authority, never releases reservations, never rewrites the
+ * approval and never asserts the venue cancelled anything (TDD section 9, INV-09, INV-10).
  */
-const MARKED_PLAN_STATES: ReadonlySet<PlanState> = new Set<PlanState>([
-  'EXECUTING',
-  'RECONCILING',
-  'MANUAL_REVIEW',
-]);
+/**
+ * The operational phase of a pool's plan, as three mutually exclusive values.
+ *
+ * Deliberately not a pair of booleans. An earlier version used `sealedPlanExists`, which is
+ * unsafe in an append-only system: sealed economic records are retained forever, so the flag
+ * stays true long after the plan stopped being invalidatable, and "exists" quietly stops
+ * meaning "still open". A phase makes the invalid combinations unrepresentable rather than
+ * merely rejected.
+ */
+export type PlanDispatchPhase =
+  /** No sealed plan is open: pre-seal, or a previous one reached a terminal state. */
+  | 'NO_ACTIVE_SEALED_PLAN'
+  /** A sealed plan is open and no dispatch marker has been committed. */
+  | 'SEALED_UNMARKED'
+  /** A dispatch marker exists, so an order may be live at the venue. */
+  | 'MARKED';
 
-export function isMarkedPlanState(state: PlanState): boolean {
-  return MARKED_PLAN_STATES.has(state);
+export interface PlanDispatchContext {
+  /**
+   * The plan's state. Diagnostic: the phase decides the outcome, because `MANUAL_REVIEW` is
+   * reachable in all three phases and no state determines the phase on its own.
+   */
+  readonly state: PlanState;
+  readonly dispatchPhase: PlanDispatchPhase;
+}
+
+/**
+ * States that can only occur in one phase. `MANUAL_REVIEW` is absent on purpose: it is
+ * reachable before sealing, while sealed and unmarked, and after a marker, which is exactly
+ * why the phase is supplied rather than inferred.
+ */
+const PHASE_BY_STATE: Partial<Record<PlanState, PlanDispatchPhase>> = {
+  PREVIEW: 'NO_ACTIVE_SEALED_PLAN',
+  COMPLETED: 'NO_ACTIVE_SEALED_PLAN',
+  PARTIAL: 'NO_ACTIVE_SEALED_PLAN',
+  UNFILLED: 'NO_ACTIVE_SEALED_PLAN',
+  INVALIDATED: 'NO_ACTIVE_SEALED_PLAN',
+  DECLINED: 'NO_ACTIVE_SEALED_PLAN',
+  EXPIRED: 'NO_ACTIVE_SEALED_PLAN',
+  SEALED_AWAITING_APPROVAL: 'SEALED_UNMARKED',
+  APPROVED: 'SEALED_UNMARKED',
+  DISPATCH_PENDING: 'SEALED_UNMARKED',
+  EXECUTING: 'MARKED',
+  RECONCILING: 'MARKED',
+};
+
+/**
+ * Refuse a phase the state cannot be in.
+ *
+ * Checked before any early return, so an incoherent context is never silently accepted just
+ * because the action happened not to care about the plan.
+ */
+export function assertPhaseConsistent(plan: PlanDispatchContext): void {
+  const required = PHASE_BY_STATE[plan.state];
+  if (required !== undefined && required !== plan.dispatchPhase) {
+    violate(
+      'IDENTITY_MALFORMED',
+      `plan state ${plan.state} cannot be in phase ${plan.dispatchPhase}`,
+      {
+        state: plan.state,
+        dispatchPhase: plan.dispatchPhase,
+        expected: required,
+      },
+    );
+  }
 }
 
 export function mayActorPerform(action: LifecycleAction, actor: ActorScope): boolean {
@@ -206,23 +268,36 @@ export function mayActorPerform(action: LifecycleAction, actor: ActorScope): boo
 /** What the action does to the current plan, given where that plan actually is. */
 export function resolveSealedPlanEffect(
   action: LifecycleAction,
-  currentPlanState: PlanState | null,
+  plan: PlanDispatchContext | null,
 ): ResolvedSealedPlanEffect {
   const contract = LIFECYCLE_CONTRACTS[action];
-  if (currentPlanState === null || contract.sealedPlanEffect === 'NONE') return 'NONE';
-  const marked = MARKED_PLAN_STATES.has(currentPlanState);
+  if (plan === null) return 'NONE';
+
+  // Validated before the early return below, so an incoherent context is refused whether or
+  // not this particular action cares about the plan.
+  assertPhaseConsistent(plan);
+  if (contract.sealedPlanEffect === 'NONE') return 'NONE';
 
   if (contract.sealedPlanEffect === 'REFUSED_WHILE_IN_FLIGHT') {
-    return marked ? 'REFUSED' : 'NONE';
+    // The marker is what makes the action incoherent: an order may be live at the venue.
+    return plan.dispatchPhase === 'MARKED' ? 'REFUSED' : 'NONE';
   }
+
   // INVALIDATE_UNMARKED
-  return marked ? 'FUTURE_AUTHORITY_ONLY' : 'INVALIDATE';
+  switch (plan.dispatchPhase) {
+    case 'SEALED_UNMARKED':
+      return 'INVALIDATE';
+    case 'MARKED':
+      return 'FUTURE_AUTHORITY_ONLY';
+    case 'NO_ACTIVE_SEALED_PLAN':
+      return 'NONE';
+  }
 }
 
 export function assertLifecycleActionPermitted(
   action: LifecycleAction,
   actor: ActorScope,
-  currentPlanState: PlanState | null,
+  plan: PlanDispatchContext | null,
 ): void {
   const contract = LIFECYCLE_CONTRACTS[action];
   if (!mayActorPerform(action, actor)) {
@@ -232,10 +307,10 @@ export function assertLifecycleActionPermitted(
       allowed: contract.allowedActors.join(','),
     });
   }
-  if (resolveSealedPlanEffect(action, currentPlanState) === 'REFUSED') {
+  if (resolveSealedPlanEffect(action, plan) === 'REFUSED') {
     violate('PLAN_IN_FLIGHT_FOR_POOL', 'action is refused while a dispatch is in flight', {
       action,
-      planState: currentPlanState ?? 'none',
+      planState: plan?.state ?? 'none',
     });
   }
 }

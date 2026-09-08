@@ -4,11 +4,19 @@ import {
   LIFECYCLE_CONTRACTS,
   assertLifecycleActionPermitted,
   isDeferredAt,
-  isMarkedPlanState,
   mayActorPerform,
+  assertPhaseConsistent,
   resolveSealedPlanEffect,
+  type PlanDispatchContext,
+  type PlanDispatchPhase,
 } from './lifecycle.js';
 import type { PlanState } from './states.js';
+
+/** A plan at a given state and operational phase. */
+const at = (state: PlanState, dispatchPhase: PlanDispatchPhase): PlanDispatchContext => ({
+  state,
+  dispatchPhase,
+});
 
 describe('lifecycle contracts', () => {
   it('gives every declared action a contract', () => {
@@ -40,12 +48,18 @@ describe('lifecycle contracts', () => {
 
     it('can halt while a plan is awaiting approval', () => {
       expect(() =>
-        assertLifecycleActionPermitted('POOL_HALT', 'owner', 'SEALED_AWAITING_APPROVAL'),
+        assertLifecycleActionPermitted(
+          'POOL_HALT',
+          'owner',
+          at('SEALED_AWAITING_APPROVAL', 'SEALED_UNMARKED'),
+        ),
       ).not.toThrow();
     });
 
     it('can still halt after the dispatch marker, to stop future dispatch', () => {
-      expect(() => assertLifecycleActionPermitted('POOL_HALT', 'owner', 'EXECUTING')).not.toThrow();
+      expect(() =>
+        assertLifecycleActionPermitted('POOL_HALT', 'owner', at('EXECUTING', 'MARKED')),
+      ).not.toThrow();
     });
 
     it('does not let an operator resume, which remains an owner decision', () => {
@@ -69,65 +83,184 @@ describe('lifecycle contracts', () => {
   // The comment said INVALIDATE_UNMARKED was "refused outright once marked" while the
   // helper permitted it. Neither was right: after the marker the action must take effect on
   // future authority without touching the in-flight plan.
-  describe('effect on a plan that is already marked', () => {
-    const marked: readonly PlanState[] = ['EXECUTING', 'RECONCILING', 'MANUAL_REVIEW'];
-    const unmarked: readonly PlanState[] = [
+  describe('effect on a plan, resolved from marker evidence', () => {
+    const sealedUnmarked: readonly PlanState[] = [
       'SEALED_AWAITING_APPROVAL',
       'APPROVED',
       'DISPATCH_PENDING',
     ];
-
-    it('classifies marked and unmarked plan states', () => {
-      for (const state of marked) expect(isMarkedPlanState(state), state).toBe(true);
-      for (const state of unmarked) expect(isMarkedPlanState(state), state).toBe(false);
-    });
+    const markedStates = ['EXECUTING', 'RECONCILING', 'MANUAL_REVIEW'] as const;
 
     it('invalidates a sealed but unmarked plan', () => {
-      for (const state of unmarked) {
-        expect(resolveSealedPlanEffect('POOL_HALT', state), state).toBe('INVALIDATE');
-        expect(resolveSealedPlanEffect('CREDENTIAL_REVOKE', state), state).toBe('INVALIDATE');
+      for (const state of sealedUnmarked) {
+        expect(resolveSealedPlanEffect('POOL_HALT', at(state, 'SEALED_UNMARKED')), state).toBe(
+          'INVALIDATE',
+        );
+        expect(
+          resolveSealedPlanEffect('CREDENTIAL_REVOKE', at(state, 'SEALED_UNMARKED')),
+          state,
+        ).toBe('INVALIDATE');
       }
     });
 
     it('limits a halt after the marker to future authority only', () => {
-      for (const state of marked) {
-        expect(resolveSealedPlanEffect('POOL_HALT', state), state).toBe('FUTURE_AUTHORITY_ONLY');
+      for (const state of markedStates) {
+        expect(resolveSealedPlanEffect('POOL_HALT', at(state, 'MARKED')), state).toBe(
+          'FUTURE_AUTHORITY_ONLY',
+        );
       }
     });
 
-    it('limits a credential revocation after the marker to future authority only', () => {
-      expect(resolveSealedPlanEffect('CREDENTIAL_REVOKE', 'EXECUTING')).toBe(
+    it('limits a credential revocation and policy publication after the marker', () => {
+      expect(resolveSealedPlanEffect('CREDENTIAL_REVOKE', at('EXECUTING', 'MARKED'))).toBe(
         'FUTURE_AUTHORITY_ONLY',
       );
-    });
-
-    it('limits a policy publication after the marker to future authority only', () => {
-      expect(resolveSealedPlanEffect('POLICY_VERSION_PUBLISH', 'EXECUTING')).toBe(
+      expect(resolveSealedPlanEffect('POLICY_VERSION_PUBLISH', at('EXECUTING', 'MARKED'))).toBe(
         'FUTURE_AUTHORITY_ONLY',
       );
     });
 
     it('refuses account unlink and epoch rotation while in flight', () => {
-      expect(resolveSealedPlanEffect('ACCOUNT_UNLINK', 'EXECUTING')).toBe('REFUSED');
-      expect(resolveSealedPlanEffect('POOL_EPOCH_ROTATE', 'RECONCILING')).toBe('REFUSED');
-      expect(() => assertLifecycleActionPermitted('ACCOUNT_UNLINK', 'owner', 'EXECUTING')).toThrow(
-        /PLAN_IN_FLIGHT_FOR_POOL/,
+      expect(resolveSealedPlanEffect('ACCOUNT_UNLINK', at('EXECUTING', 'MARKED'))).toBe('REFUSED');
+      expect(resolveSealedPlanEffect('POOL_EPOCH_ROTATE', at('RECONCILING', 'MARKED'))).toBe(
+        'REFUSED',
       );
+      expect(() =>
+        assertLifecycleActionPermitted('ACCOUNT_UNLINK', 'owner', at('EXECUTING', 'MARKED')),
+      ).toThrow(/PLAN_IN_FLIGHT_FOR_POOL/);
     });
 
     it('permits account unlink when no plan is in flight', () => {
-      expect(resolveSealedPlanEffect('ACCOUNT_UNLINK', 'APPROVED')).toBe('NONE');
+      expect(resolveSealedPlanEffect('ACCOUNT_UNLINK', at('APPROVED', 'SEALED_UNMARKED'))).toBe(
+        'NONE',
+      );
       expect(() => assertLifecycleActionPermitted('ACCOUNT_UNLINK', 'owner', null)).not.toThrow();
     });
 
-    it('never reports an effect that would release or rewrite an in-flight plan', () => {
+    it('never reports an effect that would release or rewrite a marked plan', () => {
       for (const action of LIFECYCLE_ACTIONS) {
-        for (const state of marked) {
-          expect(resolveSealedPlanEffect(action, state), `${action}/${state}`).not.toBe(
-            'INVALIDATE',
-          );
+        for (const state of markedStates) {
+          expect(
+            resolveSealedPlanEffect(action, at(state, 'MARKED')),
+            `${action}/${state}`,
+          ).not.toBe('INVALIDATE');
         }
       }
+    });
+
+    // --- regression: PR 1 review, MANUAL_REVIEW resolved from the state alone -----------
+    // MANUAL_REVIEW is reachable before sealing and after a sealed plan fails, and the two
+    // want opposite answers. Inferring "in flight" left an unmarked sealed plan live when the
+    // owner halted it; inferring "no sealed plan" left it live for the other reason. Both
+    // facts are now supplied, and these assert the exact outcome rather than merely ruling
+    // one out — the weaker assertion is what let the first fix pass while still wrong.
+    describe('MANUAL_REVIEW is resolved from evidence, not from the state', () => {
+      it('invalidates a sealed, unmarked MANUAL_REVIEW plan', () => {
+        expect(resolveSealedPlanEffect('POOL_HALT', at('MANUAL_REVIEW', 'SEALED_UNMARKED'))).toBe(
+          'INVALIDATE',
+        );
+        expect(
+          resolveSealedPlanEffect('CREDENTIAL_REVOKE', at('MANUAL_REVIEW', 'SEALED_UNMARKED')),
+        ).toBe('INVALIDATE');
+      });
+
+      it('reports no effect when MANUAL_REVIEW was reached without a sealed plan', () => {
+        expect(
+          resolveSealedPlanEffect('POOL_HALT', at('MANUAL_REVIEW', 'NO_ACTIVE_SEALED_PLAN')),
+        ).toBe('NONE');
+      });
+
+      it('limits a marked MANUAL_REVIEW plan to future authority only', () => {
+        expect(resolveSealedPlanEffect('POOL_HALT', at('MANUAL_REVIEW', 'MARKED'))).toBe(
+          'FUTURE_AUTHORITY_ONLY',
+        );
+      });
+
+      it('refuses account unlink only once the marker exists', () => {
+        expect(
+          resolveSealedPlanEffect('ACCOUNT_UNLINK', at('MANUAL_REVIEW', 'SEALED_UNMARKED')),
+        ).toBe('NONE');
+        expect(resolveSealedPlanEffect('ACCOUNT_UNLINK', at('MANUAL_REVIEW', 'MARKED'))).toBe(
+          'REFUSED',
+        );
+      });
+
+      it('covers all three phases with exact outcomes', () => {
+        expect(resolveSealedPlanEffect('POOL_HALT', at('MANUAL_REVIEW', 'SEALED_UNMARKED'))).toBe(
+          'INVALIDATE',
+        );
+        expect(resolveSealedPlanEffect('POOL_HALT', at('MANUAL_REVIEW', 'MARKED'))).toBe(
+          'FUTURE_AUTHORITY_ONLY',
+        );
+        expect(
+          resolveSealedPlanEffect('POOL_HALT', at('MANUAL_REVIEW', 'NO_ACTIVE_SEALED_PLAN')),
+        ).toBe('NONE');
+      });
+    });
+
+    // --- regression: PR 1 review, terminal states claimed an invalidation --------------
+    // Only a plan that is still sealed and unmarked has something to invalidate.
+    it('reports no effect on a pre-seal plan', () => {
+      expect(resolveSealedPlanEffect('POOL_HALT', at('PREVIEW', 'NO_ACTIVE_SEALED_PLAN'))).toBe(
+        'NONE',
+      );
+    });
+
+    it('reports no effect on a terminal plan whose sealed version is closed', () => {
+      for (const state of [
+        'COMPLETED',
+        'PARTIAL',
+        'UNFILLED',
+        'DECLINED',
+        'EXPIRED',
+        'INVALIDATED',
+      ] as const) {
+        expect(
+          resolveSealedPlanEffect('POOL_HALT', at(state, 'NO_ACTIVE_SEALED_PLAN')),
+          state,
+        ).toBe('NONE');
+      }
+    });
+
+    // --- regression: PR 1 review, an "exists" flag stayed true forever -----------------
+    // Sealed records are retained in an append-only system, so existence stopped meaning
+    // "still open". The phase is validated against the state, so combinations a state cannot
+    // be in are refused rather than answered.
+    describe('phase and state must be consistent', () => {
+      it('refuses a terminal plan claiming an open sealed plan', () => {
+        for (const phase of ['SEALED_UNMARKED', 'MARKED'] as const) {
+          expect(() => assertPhaseConsistent(at('COMPLETED', phase)), phase).toThrow(
+            /cannot be in phase/,
+          );
+        }
+      });
+
+      it('refuses a pre-seal plan claiming a marker', () => {
+        expect(() => assertPhaseConsistent(at('PREVIEW', 'MARKED'))).toThrow(/cannot be in phase/);
+      });
+
+      it('refuses an executing plan claiming no active sealed plan', () => {
+        expect(() => assertPhaseConsistent(at('EXECUTING', 'NO_ACTIVE_SEALED_PLAN'))).toThrow(
+          /cannot be in phase/,
+        );
+      });
+
+      it('refuses an approved plan claiming a marker', () => {
+        expect(() => assertPhaseConsistent(at('APPROVED', 'MARKED'))).toThrow(/cannot be in phase/);
+      });
+
+      it('accepts MANUAL_REVIEW in any phase, which is why the phase is supplied', () => {
+        for (const phase of ['NO_ACTIVE_SEALED_PLAN', 'SEALED_UNMARKED', 'MARKED'] as const) {
+          expect(() => assertPhaseConsistent(at('MANUAL_REVIEW', phase)), phase).not.toThrow();
+        }
+      });
+
+      it('validates before deciding, even for an action with no sealed-plan effect', () => {
+        // CREDENTIAL_ISSUE declares NONE, so an early return would have skipped the check.
+        expect(() =>
+          resolveSealedPlanEffect('CREDENTIAL_ISSUE', at('COMPLETED', 'MARKED')),
+        ).toThrow(/cannot be in phase/);
+      });
     });
   });
 

@@ -221,11 +221,27 @@ export function isTerminalVenueStatus(status: VenueOrderStatus): boolean {
  * (INV-10, TEST-PLAN T-021).
  */
 export function mayReleaseUnusedReservation(input: {
-  readonly venueStatus: VenueOrderStatus;
+  /** Absent when no order was ever observed, as in a proven-unsent attempt. */
+  readonly venueStatus: VenueOrderStatus | null;
   readonly accounting: AccountingState;
   readonly coverage: ObservationCoverageState;
+  readonly dispatchState: DispatchAttemptState;
 }): boolean {
+  // ADR-0001's positive recovery path. A proven-unsent attempt has no venue status, because
+  // no order exists to have one: requiring a terminal status made NOT_SENT_PROVEN unable to
+  // release the reservations the ADR says it releases. Coverage must still be COMPLETE, since
+  // that is what established the absence in the first place.
+  if (input.dispatchState === 'NOT_SENT_PROVEN') {
+    return input.coverage === 'COMPLETE';
+  }
+
+  // UNKNOWN and IRRECOVERABLE_UNCERTAINTY never release, whatever else is true.
+  if (input.dispatchState === 'UNKNOWN' || input.dispatchState === 'IRRECOVERABLE_UNCERTAINTY') {
+    return false;
+  }
+
   return (
+    input.venueStatus !== null &&
     isTerminalVenueStatus(input.venueStatus) &&
     input.accounting === 'RECONCILED' &&
     input.coverage === 'COMPLETE'

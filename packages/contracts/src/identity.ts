@@ -38,11 +38,25 @@ export interface VenueAccountKey {
   readonly stableAccountId: string;
 }
 
+const VENUE_SET: ReadonlySet<string> = new Set<string>(VENUES);
+const ENVIRONMENT_SET: ReadonlySet<string> = new Set<string>(ENVIRONMENTS);
+
 export function venueAccountKey(
   venue: Venue,
   environment: Environment,
   stableAccountId: string,
 ): VenueAccountKey {
+  // The exported allowlists are the contract; enforcing them only in the type system lets an
+  // unvalidated wire value reach persistence and routing as a malformed identity.
+  if (!VENUE_SET.has(venue)) {
+    violate('IDENTITY_MALFORMED', 'unsupported venue', { venue, supported: VENUES.join(',') });
+  }
+  if (!ENVIRONMENT_SET.has(environment)) {
+    violate('IDENTITY_ENVIRONMENT_MISMATCH', 'unsupported environment', {
+      environment,
+      supported: ENVIRONMENTS.join(','),
+    });
+  }
   return Object.freeze({
     venue,
     environment,

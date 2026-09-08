@@ -19,6 +19,9 @@ function evidence(overrides: Partial<FeeBoundEvidence> = {}): FeeBoundEvidence {
   };
 }
 
+/** The account settings the fixture policy requires, as a caller would have verified them. */
+const FIXTURE_SETTINGS = [...QUOTE_FEE_FIXTURE_V1.requiredAccountSettings];
+
 describe('fee policy capability', () => {
   it('resolves known policies and refuses unknown ones', () => {
     expect(feePolicy('STANDARD_NO_BNB_V1').route).toBe('RECEIVED_ASSET');
@@ -51,9 +54,9 @@ describe('fee policy capability', () => {
 
   describe('a status alone can never authorize dispatch', () => {
     it('refuses a PROVEN policy when no derivation is supplied', () => {
-      expect(() => assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', null)).toThrow(
-        /no fee bound derivation was supplied/,
-      );
+      expect(() =>
+        assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', null, FIXTURE_SETTINGS),
+      ).toThrow(/no fee bound derivation was supplied/);
     });
 
     it('refuses a derivation produced for a different policy', () => {
@@ -62,6 +65,7 @@ describe('fee policy capability', () => {
           QUOTE_FEE_FIXTURE_V1,
           'local',
           evidence({ policyVersion: 'STANDARD_NO_BNB_V1' }),
+          FIXTURE_SETTINGS,
         ),
       ).toThrow(/derived for a different policy/);
     });
@@ -69,7 +73,12 @@ describe('fee policy capability', () => {
     it('refuses a derivation with no finite fill count', () => {
       for (const maxFillCount of [0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN]) {
         expect(() =>
-          assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', evidence({ maxFillCount })),
+          assertFeePolicyDispatchable(
+            QUOTE_FEE_FIXTURE_V1,
+            'local',
+            evidence({ maxFillCount }),
+            FIXTURE_SETTINGS,
+          ),
         ).toThrow(/finite maximum fill count/);
       }
     });
@@ -80,13 +89,14 @@ describe('fee policy capability', () => {
           QUOTE_FEE_FIXTURE_V1,
           'local',
           evidence({ minFillBaseAtoms: 0n }),
+          FIXTURE_SETTINGS,
         ),
       ).toThrow(/positive minimum fill size/);
     });
 
     it('accepts the fixture policy locally with a complete derivation', () => {
       expect(() =>
-        assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', evidence()),
+        assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', evidence(), FIXTURE_SETTINGS),
       ).not.toThrow();
     });
   });
@@ -116,10 +126,86 @@ describe('fee policy capability', () => {
     for (const environment of ['testnet', 'production'] as const) {
       it(`is refused in ${environment}`, () => {
         expect(() =>
-          assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, environment, evidence()),
+          assertFeePolicyDispatchable(
+            QUOTE_FEE_FIXTURE_V1,
+            environment,
+            evidence(),
+            FIXTURE_SETTINGS,
+          ),
         ).toThrow(/refused outside the local environment/);
       });
     }
+  });
+
+  // --- regression: PR 1 review, evidence fields and account settings unchecked ---------
+  describe('the derivation record must be well formed', () => {
+    it('refuses a derivedAt that is not a real UTC instant', () => {
+      for (const derivedAt of ['not-a-date', '2026-02-30T00:00:00.000Z', '2026-09-08T00:00:00']) {
+        expect(
+          () =>
+            assertFeePolicyDispatchable(
+              QUOTE_FEE_FIXTURE_V1,
+              'local',
+              evidence({ derivedAt }),
+              FIXTURE_SETTINGS,
+            ),
+          derivedAt,
+        ).toThrow(/derivedAt must be a real ISO-8601 UTC instant/);
+      }
+    });
+
+    it('refuses a derivation digest that is not a sha256 reference', () => {
+      for (const derivationDigest of ['', 'not-a-digest', 'sha256:xyz', 'md5:' + 'a'.repeat(32)]) {
+        expect(
+          () =>
+            assertFeePolicyDispatchable(
+              QUOTE_FEE_FIXTURE_V1,
+              'local',
+              evidence({ derivationDigest }),
+              FIXTURE_SETTINGS,
+            ),
+          derivationDigest,
+        ).toThrow(/sha256 digest/);
+      }
+    });
+
+    it('checks the digest structurally only, which the source states explicitly', () => {
+      // A well-formed digest that names nothing real still passes. Verifying that the
+      // derivation exists and says what it claims needs the producer, which is module 14.
+      expect(() =>
+        assertFeePolicyDispatchable(
+          QUOTE_FEE_FIXTURE_V1,
+          'local',
+          evidence({ derivationDigest: `sha256:${'0'.repeat(64)}` }),
+          FIXTURE_SETTINGS,
+        ),
+      ).not.toThrow();
+    });
+  });
+
+  describe('required account settings are enforced, not merely declared', () => {
+    it('refuses when a required setting was not verified', () => {
+      expect(() =>
+        assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', evidence(), []),
+      ).toThrow(/required account settings were not verified/);
+    });
+
+    it('names the settings that are missing', () => {
+      try {
+        assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', evidence(), []);
+        throw new Error('expected a refusal');
+      } catch (error) {
+        expect((error as { detail: Record<string, string> }).detail['missing']).toContain(
+          'environment=local',
+        );
+      }
+    });
+
+    it('accepts when every required setting was verified', () => {
+      expect(() =>
+        assertFeePolicyDispatchable(QUOTE_FEE_FIXTURE_V1, 'local', evidence(), FIXTURE_SETTINGS),
+      ).not.toThrow();
+    });
   });
 
   it('ships no policy that can authorize a real dispatch today', () => {

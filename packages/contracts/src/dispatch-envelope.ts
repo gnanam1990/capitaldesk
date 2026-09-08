@@ -1,4 +1,5 @@
 import { violate } from './errors.js';
+import { strictUtcMs } from './time.js';
 
 /**
  * The signed-request timing envelope (ADR-0003).
@@ -172,14 +173,11 @@ export function assertEnvelopeWithinApproval(
   submissionDeadlineAtIso: string,
   approvalExpiresAtIso: string,
 ): void {
-  const deadline = Date.parse(submissionDeadlineAtIso);
-  const expiry = Date.parse(approvalExpiresAtIso);
-  if (Number.isNaN(deadline) || Number.isNaN(expiry)) {
-    violate('IDENTITY_MALFORMED', 'submission deadline and approval expiry must be ISO instants', {
-      submissionDeadlineAt: submissionDeadlineAtIso,
-      approvalExpiresAt: approvalExpiresAtIso,
-    });
-  }
+  // Strict: a timezone-less value would otherwise be resolved in the host's local zone, so
+  // two executors on differently configured hosts would derive different deadlines from one
+  // approval.
+  const deadline = strictUtcMs('submissionDeadlineAt', submissionDeadlineAtIso);
+  const expiry = strictUtcMs('approvalExpiresAt', approvalExpiresAtIso);
   if (deadline > expiry) {
     violate(
       'SUBMISSION_DEADLINE_PASSED',

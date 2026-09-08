@@ -24,6 +24,49 @@ describe('price', () => {
     expect(formatPrice(priceFromDecimal(BTC, USDT, '0.3'))).toBe('0.3');
   });
 
+  // --- regression: PR 1 review, trailing zeros produced different digests -------------
+  describe('one economic price has one representation', () => {
+    it('formats equivalent prices identically', () => {
+      for (const [a, b] of [
+        ['20000', '20000.00'],
+        ['0', '0.000'],
+        ['19900.5', '19900.50'],
+        ['1', '1.00000000'],
+      ]) {
+        expect(formatPrice(priceFromDecimal(BTC, USDT, a)), `${a} vs ${b}`).toBe(
+          formatPrice(priceFromDecimal(BTC, USDT, b)),
+        );
+      }
+    });
+
+    it('gives equivalent prices the same digest payload', () => {
+      const a = priceFromDecimal(BTC, USDT, '20000');
+      const b = priceFromDecimal(BTC, USDT, '20000.0000');
+      expect({ m: a.mantissa, e: a.exponent }).toEqual({ m: b.mantissa, e: b.exponent });
+    });
+
+    it('preserves significant digits rather than truncating', () => {
+      expect(formatPrice(priceFromDecimal(BTC, USDT, '0.00000001'))).toBe('0.00000001');
+      expect(formatPrice(priceFromDecimal(BTC, USDT, '19900.55'))).toBe('19900.55');
+    });
+
+    it('normalises zero to a single representation', () => {
+      const zero = priceFromDecimal(BTC, USDT, '0.0000');
+      expect(zero.mantissa).toBe(0n);
+      expect(zero.exponent).toBe(0);
+    });
+  });
+
+  // --- regression: PR 1 review, oversized text parsed before bounds --------------------
+  it('refuses oversized price text before converting it', () => {
+    const started = process.hrtime.bigint();
+    expect(() => priceFromDecimal(BTC, USDT, '1'.repeat(500_000))).toThrow(
+      /longer than any representable price/,
+    );
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    expect(elapsedMs).toBeLessThan(50);
+  });
+
   it('compares prices of the same pair across different exponents', () => {
     expect(
       comparePrices(priceFromDecimal(BTC, USDT, '20000'), priceFromDecimal(BTC, USDT, '20000.00')),

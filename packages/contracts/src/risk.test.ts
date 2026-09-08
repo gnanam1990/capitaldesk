@@ -257,3 +257,74 @@ describe('pool concentration', () => {
     });
   });
 });
+
+// --- regression: PR 1 review, same-asset prospective exposure was overstated ------------
+// Spending the same asset a plan acquires nets out. Adding the acquisition without
+// subtracting the spend overstated exposure and could block a plan that does not increase it.
+describe('prospective exposure when the funding asset is the target asset', () => {
+  const BTC_ONLY: readonly ValuedClaim[] = [
+    claim('a', 'STRATEGY', BTC, 400n),
+    claim('h', 'HOUSE', USDT, 600n),
+  ];
+
+  it('does not increase exposure when acquiring and spending the same asset', () => {
+    const outcome = prospectivePoolConcentration(
+      BTC_ONLY,
+      {
+        asset: BTC,
+        maxAcquiredReferenceValueAtoms: 100n,
+        spentAsset: BTC,
+        maxSpentReferenceValueAtoms: 100n,
+      },
+      ratioLimit(1n, 2n),
+    );
+    expect(outcome.kind).toBe('WITHIN_LIMIT');
+    expect(outcome.kind === 'WITHIN_LIMIT' ? outcome.exposureAtoms : 0n).toBe(400n);
+  });
+
+  it('reflects a net increase when acquiring more of the asset than it spends', () => {
+    // 400 held, +300 acquired, -100 spent => exposure 600 of a 1200 total: exactly the 50%
+    // limit, so WITHIN_LIMIT is correct and the exposure figure is what this asserts.
+    const outcome = prospectivePoolConcentration(
+      BTC_ONLY,
+      {
+        asset: BTC,
+        maxAcquiredReferenceValueAtoms: 300n,
+        spentAsset: BTC,
+        maxSpentReferenceValueAtoms: 100n,
+      },
+      ratioLimit(1n, 2n),
+    );
+    expect(outcome.kind).toBe('WITHIN_LIMIT');
+    expect(outcome.kind === 'WITHIN_LIMIT' ? outcome.exposureAtoms : 0n).toBe(600n);
+    expect(outcome.kind === 'WITHIN_LIMIT' ? outcome.totalAtoms : 0n).toBe(1200n);
+  });
+
+  it('exceeds the limit once the net increase passes it', () => {
+    const outcome = prospectivePoolConcentration(
+      BTC_ONLY,
+      {
+        asset: BTC,
+        maxAcquiredReferenceValueAtoms: 301n,
+        spentAsset: BTC,
+        maxSpentReferenceValueAtoms: 100n,
+      },
+      ratioLimit(1n, 2n),
+    );
+    expect(outcome.kind).toBe('EXCEEDED');
+  });
+
+  it('still nets cross-asset spending against the funding asset only', () => {
+    const outcome = prospectivePoolConcentration(
+      BTC_ONLY,
+      {
+        asset: BTC,
+        maxAcquiredReferenceValueAtoms: 100n,
+        spentAsset: USDT,
+        maxSpentReferenceValueAtoms: 100n,
+      },
+      ratioLimit(1n, 2n),
+    );
+    expect(outcome.kind === 'WITHIN_LIMIT' ? outcome.exposureAtoms : 0n).toBe(500n);
+  });
+});

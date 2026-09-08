@@ -1,4 +1,5 @@
 import { violate } from './errors.js';
+import { isStrictUtcInstant } from './time.js';
 
 /**
  * Fee policies (ADR-0010).
@@ -158,10 +159,18 @@ export function feePolicy(version: string): FeePolicy {
  * constant can therefore never authorize dispatch on its own: flipping a status to `PROVEN`
  * without producing a derivation still refuses.
  */
+const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
 export function assertFeePolicyDispatchable(
   policy: FeePolicy,
   environment: 'local' | 'testnet' | 'production',
   evidence: FeeBoundEvidence | null,
+  /**
+   * Account settings observed and verified against the live account, as `name=value` strings.
+   * Every entry in the policy's `requiredAccountSettings` must appear here. Passing the
+   * policy's own list back would prove nothing, so the caller must supply what it observed.
+   */
+  verifiedAccountSettings: readonly string[] = [],
 ): void {
   if (policy.boundStatus !== 'PROVEN') {
     violate('FEE_BOUND_UNPROVEN', 'fee policy has no derived pre-trade cumulative debit bound', {
@@ -193,6 +202,34 @@ export function assertFeePolicyDispatchable(
       'a finite fill count requires an evidenced positive minimum fill size',
       { minFillBaseAtoms: evidence.minFillBaseAtoms.toString() },
     );
+  }
+  // A derivation record that cannot say when it was derived, or point at the evidence it
+  // rests on, is not a derivation. Both fields went unchecked, so a malformed record passed.
+  if (!isStrictUtcInstant(evidence.derivedAt)) {
+    violate('FEE_BOUND_UNPROVEN', 'derivedAt must be a real ISO-8601 UTC instant ending in Z', {
+      derivedAt: evidence.derivedAt,
+    });
+  }
+  // Structural only, and deliberately labelled as such. A well-formed digest proves the
+  // record has the right shape; it does not prove the derivation it names exists or says
+  // what it claims. Verifying a canonical derivation payload needs the producer, which is
+  // module 14's work. Until then this gate validates structure, and the honest consequence
+  // is that no policy outside the local fixture is PROVEN anyway.
+  if (!DIGEST_PATTERN.test(evidence.derivationDigest)) {
+    violate('FEE_BOUND_UNPROVEN', 'the derivation must reference its evidence by sha256 digest', {
+      derivationDigest: evidence.derivationDigest,
+    });
+  }
+
+  // Metadata is not enforcement. The policy lists the account settings it depends on; those
+  // must be verified against the account, or a PROVEN policy authorizes without them.
+  const verified = new Set(verifiedAccountSettings);
+  const missing = policy.requiredAccountSettings.filter((setting) => !verified.has(setting));
+  if (missing.length > 0) {
+    violate('CAPABILITY_UNVERIFIED', 'required account settings were not verified', {
+      version: policy.version,
+      missing: missing.join(','),
+    });
   }
   if (policy.version === 'QUOTE_FEE_FIXTURE_V1' && environment !== 'local') {
     violate(

@@ -3,6 +3,7 @@ import { violate } from './errors.js';
 import { formatAssetKey, type AssetAmount } from './money.js';
 import { formatPoolId, type PoolId } from './identity.js';
 import { formatPrice, type Price } from './price.js';
+import { parseStrictUtcInstant, strictUtcMs } from './time.js';
 
 /**
  * The exact economic payload an owner approves.
@@ -98,14 +99,10 @@ export const PLAN_DIGEST_BOUND_FIELDS = [
   'authorizationDurability',
 ] as const;
 
-const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
-
 function isoUtc(name: string, value: string): string {
-  if (!ISO_UTC_PATTERN.test(value) || Number.isNaN(Date.parse(value))) {
-    violate('IDENTITY_MALFORMED', `${name} must be an ISO-8601 UTC instant ending in Z`, {
-      [name]: value,
-    });
-  }
+  // Strict, so an impossible calendar day such as 2026-02-30 is refused rather than
+  // normalised into a different instant that the digest would then bind.
+  parseStrictUtcInstant(name, value);
   return value;
 }
 
@@ -196,7 +193,10 @@ export function planDigestPayload(plan: SealedPlanPayload): CanonicalValue {
       });
     }
   });
-  if (Date.parse(plan.submissionDeadlineAt) > Date.parse(plan.approvalExpiresAt)) {
+  if (
+    strictUtcMs('submissionDeadlineAt', plan.submissionDeadlineAt) >
+    strictUtcMs('approvalExpiresAt', plan.approvalExpiresAt)
+  ) {
     violate(
       'SUBMISSION_DEADLINE_PASSED',
       'submissionDeadlineAt must not be later than approvalExpiresAt',

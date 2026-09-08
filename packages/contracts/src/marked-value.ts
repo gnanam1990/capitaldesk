@@ -1,4 +1,6 @@
-import type { AssetKey } from './money.js';
+import { violate } from './errors.js';
+import { MAX_ATOMS, MAX_ATOM_DIGITS, type AssetKey } from './money.js';
+import { isStrictUtcInstant } from './time.js';
 
 /**
  * A marked (estimated) portfolio value.
@@ -22,5 +24,28 @@ export interface MarkedValue {
 }
 
 export function markedValue(init: Omit<MarkedValue, 'kind'>): MarkedValue {
-  return Object.freeze({ kind: 'MarkedValue' as const, ...init });
+  // A negative "estimate" is not an estimate, and an unparseable instant makes the freshness
+  // classification meaningless. Both were accepted before, so a MarkedValue could contradict
+  // its own documented contract.
+  if (init.estimatedAtoms < 0n) {
+    violate('MONEY_NEGATIVE_RESULT', 'a marked value estimate is nonnegative', {
+      estimatedAtoms: init.estimatedAtoms.toString(),
+    });
+  }
+  if (init.estimatedAtoms > MAX_ATOMS) {
+    violate('MONEY_PRECISION_EXCEEDED', `marked value exceeds ${MAX_ATOM_DIGITS} digits`, {
+      estimatedAtoms: init.estimatedAtoms.toString(),
+    });
+  }
+  if (!isStrictUtcInstant(init.observedAt)) {
+    violate('EVIDENCE_STALE', 'observedAt must be a real ISO-8601 UTC instant ending in Z', {
+      observedAt: init.observedAt,
+    });
+  }
+  if (init.priceSource.length === 0) {
+    violate('POLICY_CONFIGURATION_MISSING', 'a marked value must name its price source');
+  }
+  // `kind` is assigned last so a caller cannot override the discriminator through `init` and
+  // hand back an object that lies about its own runtime variant.
+  return Object.freeze({ ...init, kind: 'MarkedValue' as const });
 }

@@ -55,6 +55,24 @@ export interface Price {
   readonly exponent: number;
 }
 
+/**
+ * Strip trailing decimal zeros so one economic price has one representation.
+ *
+ * `20000` and `20000.00` are the same price. Left unnormalised they format differently, so
+ * they produced different approval digests for an identical plan — an owner could approve a
+ * plan and have its digest fail to match purely because of how the price was written.
+ */
+function canonicalise(mantissa: bigint, exponent: number): { mantissa: bigint; exponent: number } {
+  if (mantissa === 0n) return { mantissa: 0n, exponent: 0 };
+  let m = mantissa;
+  let e = exponent;
+  while (e < 0 && m % 10n === 0n) {
+    m /= 10n;
+    e += 1;
+  }
+  return { mantissa: m, exponent: e };
+}
+
 export function price(base: AssetKey, quote: AssetKey, mantissa: bigint, exponent: number): Price {
   if (mantissa < 0n) {
     violate('MONEY_NEGATIVE_RESULT', 'price mantissa must be nonnegative', {
@@ -80,11 +98,25 @@ export function price(base: AssetKey, quote: AssetKey, mantissa: bigint, exponen
       asset: formatAssetKey(base),
     });
   }
-  return Object.freeze({ kind: 'Price' as const, base, quote, mantissa, exponent });
+  const canonical = canonicalise(mantissa, exponent);
+  return Object.freeze({
+    kind: 'Price' as const,
+    base,
+    quote,
+    mantissa: canonical.mantissa,
+    exponent: canonical.exponent,
+  });
 }
 
 /** Parse an exact decimal string such as "20000" or "19900.55". Never uses binary floats. */
 export function priceFromDecimal(base: AssetKey, quote: AssetKey, text: string): Price {
+  // Length first, as parseAtoms does: converting a caller-supplied string of arbitrary length
+  // and rejecting it afterwards makes the cost of refusal grow with the input.
+  if (text.length > MAX_PRICE_DIGITS + MAX_PRICE_EXPONENT + 2) {
+    violate('MONEY_PRECISION_EXCEEDED', 'price text is longer than any representable price', {
+      length: String(text.length),
+    });
+  }
   if (!DECIMAL_PATTERN.test(text)) {
     violate('MONEY_NOT_AN_INTEGER', 'price must be an exact nonnegative decimal string', { text });
   }

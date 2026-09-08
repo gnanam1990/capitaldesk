@@ -68,6 +68,32 @@ describe('money', () => {
     // --- regression: maintainer draft review, oversized input ---------------------------
     // The length bound is now checked before BigInt parsing, so the cost of rejecting an
     // oversized caller-supplied digit string does not grow with its length.
+    // --- regression: PR 1 review, a JSON number was accepted as atoms -----------------
+    // An untyped wire payload could supply a numeric `atoms` and have it normalised to a
+    // bigint, defeating the atom-string contract that exists so a quantity cannot arrive as
+    // a lossy JSON number.
+    it('refuses a numeric atoms value from an untyped payload', () => {
+      for (const value of [1000, 0, 1e21, 0.5, Number.NaN]) {
+        expect(() => parseAtoms(value as unknown as string), String(value)).toThrow(
+          /canonical decimal string/,
+        );
+      }
+    });
+
+    it('refuses other non-string atom inputs', () => {
+      const cases: ReadonlyArray<readonly [string, unknown]> = [
+        ['null', null],
+        ['undefined', undefined],
+        ['object', {}],
+        ['array', []],
+        ['bigint', 1000n],
+        ['boolean', true],
+      ];
+      for (const [label, value] of cases) {
+        expect(() => parseAtoms(value as string), label).toThrow(/canonical decimal string/);
+      }
+    });
+
     it('refuses an oversized atom string before parsing it', () => {
       const oversized = '9'.repeat(MAX_ATOM_DIGITS + 1);
       expect(() => parseAtoms(oversized)).toThrow(/exceeds 78 digits/);

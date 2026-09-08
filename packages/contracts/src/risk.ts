@@ -202,8 +202,15 @@ export function prospectivePoolConcentration(
     prospective.maxAcquiredReferenceValueAtoms;
   if (total <= 0n) return { kind: 'EMPTY_POOL' };
 
+  // Spending the same asset it acquires nets out. Adding the acquisition without subtracting
+  // the spend overstated exposure and could block a plan that does not increase it at all.
+  const spentFromTargetAsset = sameAsset(prospective.asset, prospective.spentAsset)
+    ? prospective.maxSpentReferenceValueAtoms
+    : 0n;
   const exposure =
-    poolAssetExposure(claims, prospective.asset) + prospective.maxAcquiredReferenceValueAtoms;
+    poolAssetExposure(claims, prospective.asset) +
+    prospective.maxAcquiredReferenceValueAtoms -
+    spentFromTargetAsset;
 
   return exceeds(exposure, total, limit)
     ? { kind: 'EXCEEDED', exposureAtoms: exposure, totalAtoms: total }
