@@ -404,9 +404,9 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthRouteOptio
       credentialId,
       // The only response that ever contains it.
       token: formatAgentToken({ environment: options.environment, credentialId, secret }),
-      // "Sent once", not "received once". The server cannot observe delivery; if this response
-      // is lost, the credential exists and its secret is unrecoverable, and the fix is a
-      // rotation.
+      // Produced once. The server cannot observe transmission or receipt; if this response is
+      // lost, the credential exists and its secret is unrecoverable, and the recovery is the
+      // credential list followed by a rotation.
       displayedOnce: true,
     });
   }

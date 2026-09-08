@@ -493,6 +493,9 @@ export class IdentityRepository {
         if (revoked.rowCount !== 1) return { ok: false, reason: 'UNKNOWN_CREDENTIAL' };
       }
 
+      // revealed_at is written here, inside the transaction, before any response exists. It
+      // marks the row as having been issued on the one-time reveal path so a second reveal
+      // can be refused; it says nothing about whether the response was built, sent or read.
       await tx.db.query(
         `INSERT INTO agent_credentials
            (credential_id, workspace_id, pool_id, strategy_id, secret_hash, label, rotated_from,

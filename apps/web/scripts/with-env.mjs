@@ -13,6 +13,10 @@
  * `.env.local`, and since Next does not override existing values, `.env.local` could never
  * win — contrary to what its own comment claimed.
  *
+ * Every script that runs Next goes through here - build, typegen, dev and start - so the
+ * developer's main command sees the same defaults and precedence as CI, and a non-local
+ * `start` is fail-closed like a non-local build. A test reads package.json to keep it so.
+ *
  * The rules themselves are in build-env.mjs, where they are unit-tested.
  */
 import { spawn } from 'node:child_process';
@@ -31,10 +35,14 @@ const require = createRequire(import.meta.url);
 // @next/env is CommonJS; a named ESM import of it fails at load time.
 const { loadEnvConfig } = require('@next/env');
 
-const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Where Next's env files are read from. The package directory, except under test, where a
+// directory with known files stands in so the process-level behaviour is deterministic
+// whatever a developer keeps in their own .env.local. Process environment still wins.
+const envDir = process.env.CAPITALDESK_WEB_ENV_DIR ?? packageDir;
 // Snapshot what was set explicitly before the loader adds file values to process.env.
 const explicit = { ...process.env };
-const { combinedEnv } = loadEnvConfig(projectDir, args[0] === 'dev', {
+const { combinedEnv } = loadEnvConfig(envDir, args[0] === 'dev', {
   info: () => undefined,
   error: (...parts) => process.stderr.write(`${parts.join(' ')}\n`),
 });

@@ -67,7 +67,7 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run lint`             | pass                                              |
 | `pnpm run check:layering`   | pass — 9 packages, 43 crossings checked           |
 | `pnpm run check:secrets`    | pass — 209 files scanned                          |
-| `pnpm run test:unit`        | **501 passed**, 0 skipped, 30 files               |
+| `pnpm run test:unit`        | **506 passed**, 0 skipped, 31 files               |
 | `pnpm run test:property`    | **13 passed**, seed 20260908                      |
 | `pnpm run test:integration` | **135 passed**, 9 files, against PostgreSQL 17.10 |
 | `pnpm run build`            | pass — all packages and apps                      |
@@ -76,7 +76,7 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 
 | Suite       | Count | Where                                                                                                |
 | ----------- | ----- | ---------------------------------------------------------------------------------------------------- |
-| unit        | 501   | contracts 186, domain 57, config 20, web 30, api auth/cli 31, observability 8, tools 8, api 5, other |
+| unit        | 506   | contracts 186, domain 57, config 20, web 35, api auth/cli 31, observability 8, tools 8, api 5, other |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                       |
 | integration | 135   | auth 56, migrations 30, identity scope 11, CLI 18, worker/executor 12, API 8                         |
 

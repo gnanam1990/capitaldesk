@@ -128,8 +128,9 @@ on one checked-out connection.
 **Limitation, stated plainly.** That transaction covers the database and nothing else. Whether
 the one-time response reached its recipient is not a property a COMMIT can establish, so a
 committed credential whose secret nobody received is a possible outcome by construction. There
-is no route that returns a secret again, and `revealed_at` records that the secret was written
-into a response, not that it arrived.
+is no route that returns a secret again. `revealed_at` is set inside the issuing transaction
+and records only that issuance committed on the one-time reveal path; it proves neither that
+a response was constructed, nor sent, nor received.
 
 **Recovery, bounded and owner-visible.** A lost issuance response also loses the credential
 id, which rotation needs. So: a first issue against a strategy whose key is already live is a
