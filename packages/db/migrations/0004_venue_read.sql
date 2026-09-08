@@ -235,3 +235,64 @@ CREATE TRIGGER venue_observation_cuts_are_append_only
 CREATE TRIGGER venue_observation_cuts_require_an_open_epoch
   BEFORE INSERT ON venue_observation_cuts
   FOR EACH ROW EXECUTE FUNCTION refuse_closed_epoch_read_state();
+
+-- A cut's window is the interval its own brackets actually describe.
+--
+-- The foreign keys prove the two snapshots exist in this scope; they say nothing about whether
+-- the declared window matches them. Without this a caller could file a one-second window over
+-- an hour-long pair of readings, name the same snapshot as both brackets, or put them in the
+-- wrong order — and the cut would read afterwards as a properly bracketed assessment.
+CREATE OR REPLACE FUNCTION refuse_incoherent_cut_window() RETURNS trigger AS $$
+DECLARE
+  opening venue_account_snapshots%ROWTYPE;
+  closing venue_account_snapshots%ROWTYPE;
+BEGIN
+  IF NEW.opening_snapshot_id = NEW.closing_snapshot_id THEN
+    RAISE EXCEPTION 'cut % uses one snapshot as both brackets', NEW.cut_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  SELECT * INTO opening FROM venue_account_snapshots
+    WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
+      AND epoch = NEW.epoch AND snapshot_id = NEW.opening_snapshot_id;
+  SELECT * INTO closing FROM venue_account_snapshots
+    WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
+      AND epoch = NEW.epoch AND snapshot_id = NEW.closing_snapshot_id;
+
+  IF opening.snapshot_id IS NULL OR closing.snapshot_id IS NULL THEN
+    RAISE EXCEPTION 'cut % names a snapshot that does not exist in its scope', NEW.cut_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  -- The brackets must be in the order the cut claims.
+  IF closing.requested_at < opening.requested_at THEN
+    RAISE EXCEPTION 'cut % closes with a snapshot taken before it opens', NEW.cut_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  -- And the window must be exactly what they span: from when the first was requested to when
+  -- the last was answered.
+  IF NEW.window_from <> opening.requested_at THEN
+    RAISE EXCEPTION 'cut % declares window_from % but its opening bracket was requested at %',
+      NEW.cut_id, NEW.window_from, opening.requested_at
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF NEW.window_to <> closing.responded_at THEN
+    RAISE EXCEPTION 'cut % declares window_to % but its closing bracket answered at %',
+      NEW.cut_id, NEW.window_to, closing.responded_at
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  -- Both brackets must be readings of the same account, or they bracket nothing.
+  IF opening.stable_account_id <> closing.stable_account_id THEN
+    RAISE EXCEPTION 'cut % brackets two different accounts', NEW.cut_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER venue_observation_cuts_window_matches_its_brackets
+  BEFORE INSERT ON venue_observation_cuts
+  FOR EACH ROW EXECUTE FUNCTION refuse_incoherent_cut_window();

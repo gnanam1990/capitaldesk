@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
+import type { CoverageAssessment } from '@capitaldesk/contracts';
 import { serializable, type Queryable } from './transaction.js';
 
 /**
@@ -42,6 +44,51 @@ export interface TradeCursor {
   readonly version: number;
 }
 
+export type ScopeCheckOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: 'UNKNOWN_POOL' | 'NO_OPEN_EPOCH' }
+  | {
+      readonly ok: false;
+      readonly reason: 'ACCOUNT_MISMATCH' | 'ENVIRONMENT_MISMATCH';
+      readonly expected: string;
+      readonly observed: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: 'EPOCH_NOT_CURRENT';
+      readonly expected: number;
+      readonly observed: number;
+    };
+
+/** One trade whose stored evidence and incoming evidence disagree. */
+export interface TradeConflict {
+  readonly venueTradeId: string;
+  readonly conflictId: string;
+}
+
+export type RecordPageOutcome =
+  | {
+      readonly ok: true;
+      readonly cursor: TradeCursor | null;
+      readonly recorded: number;
+      readonly duplicates: number;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: 'EVIDENCE_CONTRADICTORY';
+      readonly conflicts: readonly TradeConflict[];
+      readonly recorded: number;
+      readonly duplicates: number;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: 'CURSOR_NOT_ADVANCING' | 'UNKNOWN_EPOCH' | 'EPOCH_CLOSED';
+      readonly stored?: string;
+      readonly proposed?: string;
+      readonly recorded: number;
+      readonly duplicates: number;
+    };
+
 export type AdvanceCursorOutcome =
   | { readonly ok: true; readonly cursor: TradeCursor }
   /** The proposed cursor is not ahead of the stored one. */
@@ -56,6 +103,36 @@ export type AdvanceCursorOutcome =
   | { readonly ok: false; readonly reason: 'EPOCH_CLOSED' };
 
 const DIGITS = /^(0|[1-9][0-9]*)$/;
+
+/**
+ * Canonical bytes for one trade payload.
+ *
+ * Keys sorted, so two encodings of the same fact digest identically and a genuine change
+ * digests differently. `JSON.stringify` alone depends on insertion order, which would make a
+ * re-read of the same trade look like a contradiction.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+}
+
+/**
+ * A bounded, deterministic observation id for one trade.
+ *
+ * `raw_observations.observation_id` is capped at 64 characters by its shape CHECK. A symbol
+ * and a venue trade id can exceed that together, and the insert would then fail *after* the
+ * page had partly succeeded, so the id is truncated with a digest suffix that keeps it unique.
+ */
+function observationIdFor(symbol: string, venueTradeId: string): string {
+  const plain = `trade-${symbol}-${venueTradeId}`;
+  if (plain.length <= 64) return plain;
+  const suffix = createHash('sha256').update(plain).digest('hex').slice(0, 16);
+  return `${plain.slice(0, 47)}-${suffix}`;
+}
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 /** The atom magnitude this system supports, matching the money contract and the CHECK. */
 const MAX_ID_DIGITS = 78;
@@ -158,11 +235,15 @@ export class VenueReadRepository {
     readonly cutId: string;
     readonly opening: SnapshotRecord;
     readonly closing: SnapshotRecord;
-    readonly assessment: {
-      readonly state: string;
-      readonly unmet: readonly string[];
-      readonly detectionScope: string;
-    };
+    /**
+     * The verdict, as the shared predicate produced it.
+     *
+     * The typed `CoverageAssessment`, not three strings. A caller that can name its own
+     * verdict does not need the predicate, and the string form let `COMPLETE` be written
+     * beside a list of unmet conditions — the one contradiction the table's CHECKs exist to
+     * make unstorable.
+     */
+    readonly assessment: CoverageAssessment;
     readonly observedSymbols: readonly string[];
   }): Promise<void> {
     return serializable(this.pool, async (client) => {
@@ -192,8 +273,17 @@ export class VenueReadRepository {
   }
 
   /** Every cursor this pool holds in this epoch, for a restart to resume from. */
-  /** Record one bracket of a cut. Append-only: the database refuses an update or a delete. */
-  async recordSnapshot(input: {
+  /**
+   * Record one bracket on its own.
+   *
+   * Deliberately not exported from the repository's public surface any more: a snapshot with
+   * no cut is a reading nobody drew a conclusion from, and a cut with missing snapshots is not
+   * evidence of anything. `recordAssessedCut` is the way in. This stays only for the tests
+   * that exercise the table's own constraints directly.
+   *
+   * @internal
+   */
+  async recordSnapshotForTableTests(input: {
     readonly workspaceId: string;
     readonly poolId: string;
     readonly epoch: number;
@@ -225,8 +315,15 @@ export class VenueReadRepository {
     );
   }
 
-  /** Record an assessed cut with its verdict and every unmet condition. */
-  async recordCut(input: {
+  /**
+   * Record a cut on its own.
+   *
+   * Same reasoning as `recordSnapshotForTableTests`: kept for direct constraint tests, not for
+   * production use, and it takes a typed assessment rather than free strings.
+   *
+   * @internal
+   */
+  async recordCutForTableTests(input: {
     readonly workspaceId: string;
     readonly poolId: string;
     readonly epoch: number;
@@ -235,8 +332,8 @@ export class VenueReadRepository {
     readonly windowTo: string;
     readonly openingSnapshotId: string;
     readonly closingSnapshotId: string;
-    readonly coverageState: string;
-    readonly detectionScope: string;
+    readonly coverageState: CoverageAssessment['state'];
+    readonly detectionScope: CoverageAssessment['detectionScope'];
     readonly unmet: readonly string[];
     readonly observedSymbols: readonly string[];
   }): Promise<void> {
@@ -263,6 +360,61 @@ export class VenueReadRepository {
   }
 
   /**
+   * Refuse a reader whose provenance does not describe this pool, before anything is written.
+   *
+   * Every later write is scoped by workspace, pool and epoch, and the snapshot foreign keys
+   * catch a bad scope eventually — but "eventually" is after a page of trade evidence has
+   * already been written under it. This is the check that runs first: the pool's governing
+   * account, its environment, and the epoch actually open for it, compared against what the
+   * reader proved.
+   */
+  async assertReaderScope(input: {
+    readonly workspaceId: string;
+    readonly poolId: string;
+    readonly epoch: number;
+    readonly provenAccountId: string;
+    readonly environment: string;
+  }): Promise<ScopeCheckOutcome> {
+    const pool = await this.pool.query<{
+      stable_account_id: string;
+      environment: string;
+    }>(
+      `SELECT stable_account_id, environment FROM pools
+        WHERE workspace_id = $1 AND pool_id = $2`,
+      [input.workspaceId, input.poolId],
+    );
+    const row = pool.rows[0];
+    if (row === undefined) return { ok: false, reason: 'UNKNOWN_POOL' };
+    if (row.stable_account_id !== input.provenAccountId) {
+      return {
+        ok: false,
+        reason: 'ACCOUNT_MISMATCH',
+        expected: row.stable_account_id,
+        observed: input.provenAccountId,
+      };
+    }
+    if (row.environment !== input.environment) {
+      return {
+        ok: false,
+        reason: 'ENVIRONMENT_MISMATCH',
+        expected: row.environment,
+        observed: input.environment,
+      };
+    }
+    const epoch = await this.pool.query<{ epoch: number }>(
+      `SELECT epoch FROM baseline_epochs
+        WHERE workspace_id = $1 AND pool_id = $2 AND closed_at IS NULL`,
+      [input.workspaceId, input.poolId],
+    );
+    const open = epoch.rows[0]?.epoch;
+    if (open === undefined) return { ok: false, reason: 'NO_OPEN_EPOCH' };
+    if (open !== input.epoch) {
+      return { ok: false, reason: 'EPOCH_NOT_CURRENT', expected: open, observed: input.epoch };
+    }
+    return { ok: true };
+  }
+
+  /**
    * One page of trade evidence and the cursor advance, in one transaction.
    *
    * Advancing the cursor separately from recording what the page contained is the shape of bug
@@ -278,41 +430,98 @@ export class VenueReadRepository {
     readonly poolId: string;
     readonly epoch: number;
     readonly symbol: string;
-    readonly trades: readonly {
-      readonly venueTradeId: string;
-      readonly payload: unknown;
-      readonly payloadDigest: string;
-      readonly tradedAt: string;
-    }[];
+    readonly trades: readonly { readonly venueTradeId: string; readonly payload: unknown }[];
     readonly cursor: {
       readonly nextFromId: string;
       readonly highestTradeId: string;
       readonly digest: string;
     } | null;
-  }): Promise<AdvanceCursorOutcome | { readonly ok: true; readonly cursor: null }> {
+  }): Promise<RecordPageOutcome> {
     if (input.cursor !== null) assertCursorShape(input.cursor);
-    return serializable(this.pool, async (client) => {
+    return serializable(this.pool, async (client): Promise<RecordPageOutcome> => {
+      const conflicts: TradeConflict[] = [];
+      let recorded = 0;
+      let duplicates = 0;
+
       for (const trade of input.trades) {
+        const sourceRef = `${input.symbol}:${trade.venueTradeId}`;
+        // Per trade, over that trade's own canonical bytes. Stamping the whole page's response
+        // digest onto every row made two different trades compare equal to each other and made
+        // a corrected record indistinguishable from the original.
+        const digest = createHash('sha256').update(canonicalJson(trade.payload)).digest('hex');
+
+        const existing = await client.query<{
+          observation_id: string;
+          payload_digest: string;
+          payload: unknown;
+        }>(
+          `SELECT observation_id, payload_digest, payload FROM raw_observations
+            WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3
+              AND source = 'rest' AND kind = 'venue_trade' AND source_ref = $4
+            FOR UPDATE`,
+          [input.workspaceId, input.poolId, input.epoch, sourceRef],
+        );
+        const stored = existing.rows[0];
+        if (stored !== undefined) {
+          if (stored.payload_digest === digest) {
+            // The same fact delivered twice. One effect, no conflict — the journal's existing
+            // dedupe boundary, not a new one.
+            duplicates += 1;
+            continue;
+          }
+          // A *different* payload under the same scoped trade id. Immutable evidence does not
+          // change, so the contradiction is recorded and the stored row is left alone.
+          const conflict = await client.query<{ conflict_id: string }>(
+            `INSERT INTO evidence_conflicts
+               (workspace_id, pool_id, epoch, subject_kind, subject_ref, stored, incoming)
+             VALUES ($1, $2, $3, 'fill', $4, $5::jsonb, $6::jsonb)
+             RETURNING conflict_id::text`,
+            [
+              input.workspaceId,
+              input.poolId,
+              input.epoch,
+              sourceRef,
+              JSON.stringify({ payload: stored.payload, digest: stored.payload_digest }),
+              JSON.stringify({ payload: trade.payload, digest }),
+            ],
+          );
+          conflicts.push({
+            venueTradeId: trade.venueTradeId,
+            conflictId: conflict.rows[0]?.conflict_id ?? '',
+          });
+          continue;
+        }
+
         await client.query(
           `INSERT INTO raw_observations
              (workspace_id, pool_id, epoch, observation_id, source, kind, source_ref,
               source_event_time, payload, payload_digest)
-           VALUES ($1, $2, $3, $4, 'rest', 'venue_trade', $5, $6, $7::jsonb, $8)
-           ON CONFLICT (workspace_id, pool_id, epoch, source, kind, source_ref) DO NOTHING`,
+           VALUES ($1, $2, $3, $4, 'rest', 'venue_trade', $5, $6, $7::jsonb, $8)`,
           [
             input.workspaceId,
             input.poolId,
             input.epoch,
-            `trade-${input.symbol}-${trade.venueTradeId}`,
-            `${input.symbol}:${trade.venueTradeId}`,
-            trade.tradedAt,
+            observationIdFor(input.symbol, trade.venueTradeId),
+            sourceRef,
+            (trade.payload as { tradedAt?: string }).tradedAt ?? null,
             JSON.stringify(trade.payload),
-            trade.payloadDigest,
+            digest,
           ],
         );
+        recorded += 1;
       }
-      if (input.cursor === null) return { ok: true as const, cursor: null };
-      return advanceOn(client, input, input.cursor);
+
+      if (conflicts.length > 0) {
+        // The cursor does not move past a contradiction. Advancing would leave the disputed
+        // trade behind a position that claims the range is settled, and the incident path
+        // would have nothing to come back to.
+        return { ok: false, reason: 'EVIDENCE_CONTRADICTORY', conflicts, recorded, duplicates };
+      }
+      if (input.cursor === null) return { ok: true, cursor: null, recorded, duplicates };
+      const advanced = await advanceOn(client, input, input.cursor);
+      return advanced.ok
+        ? { ...advanced, recorded, duplicates }
+        : { ...advanced, recorded, duplicates };
     });
   }
 

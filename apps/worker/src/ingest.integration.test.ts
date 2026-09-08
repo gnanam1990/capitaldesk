@@ -9,7 +9,12 @@ import { catchUp, type BookedEffects, type SessionEvidence } from './ingest.js';
 const DATABASE_URL = process.env['CAPITALDESK_TEST_DATABASE_URL'];
 const WORKSPACE = 'ws-ingest';
 const POOL_ID = 'pool-1';
-const ACCOUNT_KEY = { venue: 'binance-spot', environment: 'local', stableAccountId: '354937868' };
+// The pool's environment must match the reader's, which is what the scope check compares.
+const ACCOUNT_KEY = {
+  venue: 'binance-spot',
+  environment: 'testnet',
+  stableAccountId: '354937868',
+};
 
 /**
  * A schema for this suite, migrated from the shipped files.
@@ -343,14 +348,15 @@ describeIfDatabase('worker ingest catch-up', () => {
       expect(result.backfills[0]?.trades).toHaveLength(1002);
       expect(result.backfills[0]?.contiguous).toBe(true);
       expect(result.assessment.state).toBe('COMPLETE');
-      // Persisted between pages, so a crash resumes rather than re-reading.
+      // Persisted between pages, so a crash resumes rather than re-reading — and past the
+      // final short page's rows too, or every restart would re-fetch history already durable.
       const stored = await repository.cursor({
         workspaceId: WORKSPACE,
         poolId: POOL_ID,
         epoch: 1,
         symbol: 'BTCUSDT',
       });
-      expect(stored?.nextFromId).toBe('1001');
+      expect(stored?.nextFromId).toBe('1003');
     });
 
     it('resumes from a persisted cursor after a restart', async () => {
@@ -628,6 +634,67 @@ describeIfDatabase('worker ingest catch-up', () => {
     });
   });
 
+  /**
+   * The pre-write scope check. Every later write is scoped by workspace, pool and epoch, and
+   * the snapshot foreign keys catch a bad scope eventually — but "eventually" is after a page
+   * of trade evidence has already been written under it.
+   */
+  describe('reader scope is bound to the pool before anything is written', () => {
+    it('refuses a scope epoch that is not the pool’s open epoch, writing nothing', async () => {
+      // A reader on another epoch could otherwise persist its trades under this one and only
+      // fail at the final snapshot.
+      const built = reader({ myTrades: () => [trade(1), trade(2)] });
+      await expect(
+        catchUp({
+          scope: {
+            workspaceId: WORKSPACE,
+            poolId: POOL_ID,
+            epoch: 99,
+            observedSymbols: ['BTCUSDT'],
+            scales: SCALES,
+            assetScales: ASSET_SCALES,
+          },
+          reader: built.reader,
+          repository,
+          session: FULLY_OBSERVABLE,
+          knownClientOrderIds: new Set(),
+          bookedEffects: {},
+          cutId: 'cut-wrong-epoch',
+        }),
+      ).rejects.toThrow(/EPOCH_NOT_CURRENT/);
+
+      expect((await harness.admin.query('SELECT 1 FROM raw_observations')).rowCount).toBe(0);
+      expect((await harness.admin.query('SELECT 1 FROM venue_trade_cursors')).rowCount).toBe(0);
+      expect((await harness.admin.query('SELECT 1 FROM venue_account_snapshots')).rowCount).toBe(0);
+    });
+
+    it('refuses a pool governed by a different account, writing nothing', async () => {
+      await harness.admin.query(
+        `INSERT INTO venue_accounts (venue, environment, stable_account_id)
+         VALUES ('binance-spot', 'testnet', 'another-account')`,
+      );
+      await harness.admin.query(
+        `UPDATE pools SET stable_account_id = 'another-account' WHERE pool_id = $1`,
+        [POOL_ID],
+      );
+      const built = reader({ myTrades: () => [trade(1)] });
+      await expect(run(built)).rejects.toThrow(/ACCOUNT_MISMATCH/);
+      expect((await harness.admin.query('SELECT 1 FROM raw_observations')).rowCount).toBe(0);
+      expect((await harness.admin.query('SELECT 1 FROM venue_trade_cursors')).rowCount).toBe(0);
+    });
+
+    it('refuses a pool whose epoch has been closed by a reset, writing nothing', async () => {
+      await harness.admin.query(
+        `UPDATE baseline_epochs SET closed_at = now(), closed_reason = 'reset'
+          WHERE workspace_id = $1 AND pool_id = $2 AND epoch = 1`,
+        [WORKSPACE, POOL_ID],
+      );
+      const built = reader({ myTrades: () => [trade(1)] });
+      await expect(run(built)).rejects.toThrow(/NO_OPEN_EPOCH/);
+      expect((await harness.admin.query('SELECT 1 FROM raw_observations')).rowCount).toBe(0);
+    });
+  });
+
   describe('durability', () => {
     it('persists both brackets and the assessed cut itself', async () => {
       // Previously the test recorded these by hand after catchUp returned, so it proved the
@@ -686,7 +753,7 @@ describeIfDatabase('worker ingest catch-up', () => {
         epoch: 1,
         symbol: 'BTCUSDT',
       });
-      expect(cursor?.nextFromId).toBe('1001');
+      expect(cursor?.nextFromId).toBe('1002');
     });
 
     it('leaves no cursor advance behind when the page evidence cannot be written', async () => {

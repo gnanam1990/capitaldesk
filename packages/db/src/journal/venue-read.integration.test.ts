@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { CoverageAssessment } from '@capitaldesk/contracts';
 import { VenueReadRepository } from './venue-read.js';
 import {
   ACCOUNT,
@@ -306,20 +307,156 @@ describeIfDatabase('venue read state', () => {
     });
   });
 
+  /**
+   * The same trade delivered twice is one fact. The same trade id carrying different economic
+   * content is a contradiction, and the cursor must not move past one — advancing would leave
+   * the disputed trade behind a position claiming the range is settled.
+   */
+  describe('page evidence: duplicate versus corrected', () => {
+    const page = (trades: readonly { id: string; qty: string }[], cursor: string | null) => ({
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      epoch: 1,
+      symbol: 'BTCUSDT',
+      trades: trades.map((t) => ({
+        venueTradeId: t.id,
+        payload: { symbol: 'BTCUSDT', venueTradeId: t.id, baseAtoms: t.qty },
+      })),
+      cursor:
+        cursor === null
+          ? null
+          : {
+              nextFromId: cursor,
+              highestTradeId: (BigInt(cursor) - 1n).toString(),
+              digest: DIGEST,
+            },
+    });
+
+    it('records a page and advances', async () => {
+      const outcome = await repository.recordPageAndAdvance(
+        page(
+          [
+            { id: '1', qty: '100' },
+            { id: '2', qty: '200' },
+          ],
+          '3',
+        ),
+      );
+      expect(outcome).toMatchObject({ ok: true, recorded: 2, duplicates: 0 });
+      expect(await repository.cursor(SCOPE)).toMatchObject({ nextFromId: '3' });
+    });
+
+    it('records an identical redelivery once, as a duplicate, and still advances', async () => {
+      await repository.recordPageAndAdvance(page([{ id: '1', qty: '100' }], '2'));
+      const again = await repository.recordPageAndAdvance(
+        page(
+          [
+            { id: '1', qty: '100' },
+            { id: '2', qty: '200' },
+          ],
+          '3',
+        ),
+      );
+      expect(again).toMatchObject({ ok: true, recorded: 1, duplicates: 1 });
+      const rows = await harness.admin.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM raw_observations WHERE kind = 'venue_trade'`,
+      );
+      expect(rows.rows[0]?.count).toBe('2');
+      expect((await harness.admin.query('SELECT 1 FROM evidence_conflicts')).rowCount).toBe(0);
+    });
+
+    it('records a contradiction, leaves the stored fact alone, and refuses to advance', async () => {
+      await repository.recordPageAndAdvance(page([{ id: '1', qty: '100' }], '2'));
+      const corrected = await repository.recordPageAndAdvance(page([{ id: '1', qty: '999' }], '2'));
+
+      expect(corrected).toMatchObject({
+        ok: false,
+        reason: 'EVIDENCE_CONTRADICTORY',
+        conflicts: [{ venueTradeId: '1' }],
+      });
+      const conflicts = await harness.admin.query<{ subject_ref: string; subject_kind: string }>(
+        'SELECT subject_ref, subject_kind FROM evidence_conflicts',
+      );
+      expect(conflicts.rows[0]).toMatchObject({ subject_ref: 'BTCUSDT:1', subject_kind: 'fill' });
+      // Immutable evidence is not rewritten.
+      const stored = await harness.admin.query<{ payload: { baseAtoms: string } }>(
+        `SELECT payload FROM raw_observations WHERE source_ref = 'BTCUSDT:1'`,
+      );
+      expect(stored.rows[0]?.payload.baseAtoms).toBe('100');
+      // And the cursor stayed where it was, so the incident path has something to come back to.
+      expect(await repository.cursor(SCOPE)).toMatchObject({ nextFromId: '2' });
+    });
+
+    it('digests each trade on its own bytes, not the page response digest', async () => {
+      // Stamping one digest onto every row made two different trades compare equal to each
+      // other, and made a corrected record indistinguishable from the original.
+      await repository.recordPageAndAdvance(
+        page(
+          [
+            { id: '1', qty: '100' },
+            { id: '2', qty: '200' },
+          ],
+          '3',
+        ),
+      );
+      const digests = await harness.admin.query<{ payload_digest: string }>(
+        `SELECT payload_digest FROM raw_observations WHERE kind = 'venue_trade' ORDER BY source_ref`,
+      );
+      expect(digests.rows[0]?.payload_digest).not.toBe(digests.rows[1]?.payload_digest);
+    });
+
+    it('bounds the observation id for a symbol and trade id that would overflow it', async () => {
+      // observation_id is capped at 64 characters. Without a bound the insert fails after the
+      // page has partly succeeded.
+      const long = '9'.repeat(70);
+      const outcome = await repository.recordPageAndAdvance({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        epoch: 1,
+        symbol: 'BTCUSDT',
+        trades: [{ venueTradeId: long, payload: { venueTradeId: long } }],
+        cursor: {
+          nextFromId: (BigInt(long) + 1n).toString(),
+          highestTradeId: long,
+          digest: DIGEST,
+        },
+      });
+      expect(outcome).toMatchObject({ ok: true, recorded: 1 });
+      const stored = await harness.admin.query<{ observation_id: string }>(
+        `SELECT observation_id FROM raw_observations WHERE kind = 'venue_trade'`,
+      );
+      expect((stored.rows[0]?.observation_id ?? '').length).toBeLessThanOrEqual(64);
+    });
+  });
+
   describe('snapshots and cuts', () => {
-    async function snapshot(id: string, free = '100'): Promise<void> {
-      await repository.recordSnapshot({
+    const OPENED_AT = '2026-09-08T11:00:00.000Z';
+    const CLOSED_AT = '2026-09-08T12:00:00.100Z';
+
+    async function snapshot(
+      id: string,
+      free = '100',
+      requestedAt = OPENED_AT,
+      respondedAt = '2026-09-08T11:00:00.100Z',
+    ): Promise<void> {
+      await repository.recordSnapshotForTableTests({
         workspaceId: WORKSPACE,
         poolId: POOL,
         epoch: 1,
         snapshotId: id,
         stableAccountId: ACCOUNT.stableAccountId,
-        requestedAt: '2026-09-08T12:00:00.000Z',
-        respondedAt: '2026-09-08T12:00:00.100Z',
-        sourceTime: '2026-09-08T11:59:59.000Z',
+        requestedAt,
+        respondedAt,
+        sourceTime: '2026-09-08T10:59:59.000Z',
         responseDigest: DIGEST,
         balances: [{ asset: 'USDT', freeAtoms: free, lockedAtoms: '0' }],
       });
+    }
+
+    /** The pair a coherent cut brackets: an opening reading, then a later closing one. */
+    async function brackets(): Promise<void> {
+      await snapshot('snap-open');
+      await snapshot('snap-close', '90', '2026-09-08T12:00:00.000Z', CLOSED_AT);
     }
 
     it('records a snapshot with its interval, digest and balances', async () => {
@@ -336,7 +473,7 @@ describeIfDatabase('venue read state', () => {
     it('refuses a snapshot whose interval runs backwards', async () => {
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
-        await repository.recordSnapshot({
+        await repository.recordSnapshotForTableTests({
           workspaceId: WORKSPACE,
           poolId: POOL,
           epoch: 1,
@@ -357,7 +494,7 @@ describeIfDatabase('venue read state', () => {
     it('refuses a snapshot whose digest is not a sha256 reference', async () => {
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
-        await repository.recordSnapshot({
+        await repository.recordSnapshotForTableTests({
           workspaceId: WORKSPACE,
           poolId: POOL,
           epoch: 1,
@@ -391,14 +528,18 @@ describeIfDatabase('venue read state', () => {
       }
     });
 
-    async function cut(state: string, unmet: string[], scope: string): Promise<void> {
-      await repository.recordCut({
+    async function cut(
+      state: CoverageAssessment['state'],
+      unmet: string[],
+      scope: CoverageAssessment['detectionScope'],
+    ): Promise<void> {
+      await repository.recordCutForTableTests({
         workspaceId: WORKSPACE,
         poolId: POOL,
         epoch: 1,
         cutId: `cut-${state}`,
-        windowFrom: '2026-09-08T11:00:00.000Z',
-        windowTo: '2026-09-08T12:00:00.000Z',
+        windowFrom: OPENED_AT,
+        windowTo: CLOSED_AT,
         openingSnapshotId: 'snap-open',
         closingSnapshotId: 'snap-close',
         coverageState: state,
@@ -409,8 +550,7 @@ describeIfDatabase('venue read state', () => {
     }
 
     it('records a cut with its verdict, reasons and observed symbol set', async () => {
-      await snapshot('snap-open');
-      await snapshot('snap-close', '90');
+      await brackets();
       await cut('COMPLETE', [], 'FULL_WITHIN_PROVEN_UNIVERSE');
       const stored = await harness.admin.query<{ observed_symbols: unknown; unmet: unknown }>(
         'SELECT observed_symbols, unmet FROM venue_observation_cuts',
@@ -422,8 +562,7 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('refuses a COMPLETE cut that still lists an unmet condition', async () => {
-      await snapshot('snap-open');
-      await snapshot('snap-close', '90');
+      await brackets();
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
         await cut(
@@ -439,8 +578,7 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('refuses a COMPLETE cut whose detection scope is only net balance changes', async () => {
-      await snapshot('snap-open');
-      await snapshot('snap-close', '90');
+      await brackets();
       let refusal = { state: 'accepted', constraint: 'accepted' };
       try {
         await cut('COMPLETE', [], 'NET_BALANCE_CHANGES_ONLY');
@@ -451,8 +589,7 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('accepts an UNSUPPORTED cut carrying its reasons', async () => {
-      await snapshot('snap-open');
-      await snapshot('snap-close', '90');
+      await brackets();
       await cut(
         'UNSUPPORTED',
         ['the account-wide event stream session was interrupted'],
@@ -467,7 +604,7 @@ describeIfDatabase('venue read state', () => {
     it('refuses a snapshot attributed to an account this pool does not govern', async () => {
       let refusal = 'accepted';
       try {
-        await repository.recordSnapshot({
+        await repository.recordSnapshotForTableTests({
           workspaceId: WORKSPACE,
           poolId: POOL,
           epoch: 1,
@@ -512,9 +649,9 @@ describeIfDatabase('venue read state', () => {
     });
 
     it('writes both brackets and the cut atomically, and rolls all three back on failure', async () => {
-      const assessment = {
+      const assessment: CoverageAssessment = {
         state: 'COMPLETE',
-        unmet: [] as string[],
+        unmet: [],
         detectionScope: 'FULL_WITHIN_PROVEN_UNIVERSE',
       };
       const bracket = (id: string) => ({
@@ -567,8 +704,72 @@ describeIfDatabase('venue read state', () => {
 
     it('refuses a cut whose brackets are not snapshots in the same scope', async () => {
       await snapshot('snap-open');
+      // The closing bracket does not exist. The trigger names it before the foreign key does.
       await expect(cut('INCOMPLETE', ['x'], 'NET_BALANCE_CHANGES_ONLY')).rejects.toMatchObject({
-        code: '23503',
+        code: '23001',
+      });
+    });
+
+    /**
+     * The foreign keys prove the two snapshots exist in this scope. They say nothing about
+     * whether the declared window matches them, so a one-second window over an hour-long pair
+     * of readings would read afterwards as a properly bracketed assessment.
+     */
+    describe('a cut window must be the interval its own brackets describe', () => {
+      async function cutWith(overrides: Record<string, unknown>): Promise<void> {
+        await repository.recordCutForTableTests({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+          cutId: 'cut-window',
+          windowFrom: OPENED_AT,
+          windowTo: CLOSED_AT,
+          openingSnapshotId: 'snap-open',
+          closingSnapshotId: 'snap-close',
+          coverageState: 'INCOMPLETE',
+          detectionScope: 'NET_BALANCE_CHANGES_ONLY',
+          unmet: ['x'],
+          observedSymbols: ['BTCUSDT'],
+          ...overrides,
+        });
+      }
+
+      beforeEach(async () => {
+        await brackets();
+      });
+
+      it('accepts the window its brackets actually span', async () => {
+        await expect(cutWith({})).resolves.toBeUndefined();
+      });
+
+      it('refuses a window_from that is not when the opening bracket was requested', async () => {
+        await expect(cutWith({ windowFrom: '2026-09-08T10:00:00.000Z' })).rejects.toMatchObject({
+          code: '23001',
+        });
+      });
+
+      it('refuses a window_to that is not when the closing bracket answered', async () => {
+        await expect(cutWith({ windowTo: '2026-09-08T23:00:00.000Z' })).rejects.toMatchObject({
+          code: '23001',
+        });
+      });
+
+      it('refuses one snapshot used as both brackets', async () => {
+        // A cut that brackets nothing still reads as a bracketed assessment afterwards.
+        await expect(
+          cutWith({ closingSnapshotId: 'snap-open', windowTo: '2026-09-08T11:00:00.100Z' }),
+        ).rejects.toMatchObject({ code: '23001' });
+      });
+
+      it('refuses brackets in the wrong order', async () => {
+        await expect(
+          cutWith({
+            openingSnapshotId: 'snap-close',
+            closingSnapshotId: 'snap-open',
+            windowFrom: '2026-09-08T12:00:00.000Z',
+            windowTo: '2026-09-08T11:00:00.100Z',
+          }),
+        ).rejects.toMatchObject({ code: '23001' });
       });
     });
   });

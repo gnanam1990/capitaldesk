@@ -159,6 +159,30 @@ export async function catchUp(options: CatchUpOptions): Promise<CutResult> {
   }
 
   const opening = await reader.accountSnapshot(scope.assetScales);
+
+  // Before anything is written. The snapshot foreign keys catch a bad scope eventually, but
+  // "eventually" is after a page of trade evidence has already been written under it — a
+  // reader on another epoch could persist its trades under this one and only fail at the
+  // final snapshot.
+  const scopeCheck = await repository.assertReaderScope({
+    workspaceId: scope.workspaceId,
+    poolId: scope.poolId,
+    epoch: scope.epoch,
+    provenAccountId: opening.value.stableAccountId,
+    environment: opening.provenance.environment,
+  });
+  if (!scopeCheck.ok) {
+    violate(
+      scopeCheck.reason === 'ENVIRONMENT_MISMATCH'
+        ? 'IDENTITY_ENVIRONMENT_MISMATCH'
+        : scopeCheck.reason === 'EPOCH_NOT_CURRENT' || scopeCheck.reason === 'NO_OPEN_EPOCH'
+          ? 'IDENTITY_EPOCH_MISMATCH'
+          : 'IDENTITY_UNSTABLE_ACCOUNT',
+      `the reader does not describe this pool: ${scopeCheck.reason}`,
+      { poolId: scope.poolId, reason: scopeCheck.reason },
+    );
+  }
+
   const openingContext = await marketContexts(reader, scope);
 
   const backfills: SymbolBackfill[] = [];
@@ -220,8 +244,8 @@ export async function catchUp(options: CatchUpOptions): Promise<CutResult> {
     poolId: scope.poolId,
     epoch: scope.epoch,
     cutId: options.cutId,
-    opening: snapshotRecordOf(`${options.cutId}-open`, opening),
-    closing: snapshotRecordOf(`${options.cutId}-close`, closing),
+    opening: snapshotRecordOf(bracketId(options.cutId, 'open'), opening),
+    closing: snapshotRecordOf(bracketId(options.cutId, 'close'), closing),
     assessment,
     observedSymbols: scope.observedSymbols,
   });
@@ -279,6 +303,20 @@ function reconcileBrackets(
   return discrepancies;
 }
 
+/**
+ * A bounded, deterministic id for one bracket.
+ *
+ * `snapshot_id` is capped at 64 characters by its shape CHECK, and `cutId` may itself be 64.
+ * Appending a suffix would overflow that for any long cut id, and the insert would then fail
+ * after the reads had already been performed.
+ */
+function bracketId(cutId: string, side: 'open' | 'close'): string {
+  const suffix = `-${side}`;
+  return cutId.length + suffix.length <= 64
+    ? `${cutId}${suffix}`
+    : `${cutId.slice(0, 64 - suffix.length)}${suffix}`;
+}
+
 function snapshotRecordOf(snapshotId: string, observed: Observation<AccountSnapshot>) {
   return {
     snapshotId,
@@ -333,6 +371,12 @@ async function backfillSymbol(options: CatchUpOptions, symbol: string): Promise<
     });
     trades.push(...observed.value.trades);
 
+    // A terminal page still moves the cursor past the rows it carried. Leaving it where it
+    // was makes every restart re-fetch history that is already durable, forever.
+    const highest = highestOf(observed.value.trades);
+    const nextFromId =
+      observed.value.nextFromId ?? (highest === null ? null : (highest + 1n).toString());
+
     // The page's evidence and the cursor move together, in one transaction. Advancing
     // separately is the shape of bug that loses history silently: the cursor moves, the
     // process dies before the trades are durable, and the next run resumes past a page nothing
@@ -356,35 +400,44 @@ async function backfillSymbol(options: CatchUpOptions, symbol: string): Promise<
           isBuyer: trade.isBuyer,
           isMaker: trade.isMaker,
         },
-        payloadDigest: observed.provenance.responseDigest,
-        tradedAt: new Date(trade.tradedAt).toISOString(),
       })),
       cursor:
-        observed.value.nextFromId === null
+        nextFromId === null
           ? null
           : {
-              nextFromId: observed.value.nextFromId,
-              highestTradeId: (BigInt(observed.value.nextFromId) - 1n).toString(),
+              nextFromId,
+              highestTradeId: (BigInt(nextFromId) - 1n).toString(),
               digest: observed.provenance.responseDigest,
             },
     });
 
-    if (observed.value.nextFromId !== null) {
-      if (!recorded.ok) {
-        // A cursor that will not advance is not a reason to keep paging: the next request
-        // would return the same rows forever.
-        break;
-      }
-      cursor = observed.value.nextFromId;
-      continue;
+    if (!recorded.ok) {
+      // Contradicted evidence, or a cursor that will not advance. Neither is a reason to keep
+      // paging: the next request would return the same rows, and the contradiction needs an
+      // owner rather than another page. The backfill is left not contiguous, which makes the
+      // window unprovable — the conservative direction, and visible.
+      break;
     }
 
-    // A short page is the end of the range: pagination reached it contiguously.
-    contiguous = true;
-    break;
+    if (observed.value.nextFromId === null) {
+      // A short page is the end of the range: pagination reached it contiguously.
+      if (nextFromId !== null) cursor = nextFromId;
+      contiguous = true;
+      break;
+    }
+    cursor = observed.value.nextFromId;
   }
-
   return { symbol, trades, cursor, contiguous };
+}
+
+/** The largest trade id in a page, or null when it carried none. */
+function highestOf(trades: readonly VenueTradeObservation[]): bigint | null {
+  let highest: bigint | null = null;
+  for (const trade of trades) {
+    const id = BigInt(trade.venueTradeId);
+    if (highest === null || id > highest) highest = id;
+  }
+  return highest;
 }
 
 async function marketContexts(
