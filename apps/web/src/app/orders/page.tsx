@@ -1,3 +1,5 @@
+import Link from 'next/link';
+import { previewMode } from '../../lib/preview-data';
 import {
   EvidenceLink,
   FactList,
@@ -19,9 +21,11 @@ export default function OrdersPage() {
         title="Known, held and missing — without guessing."
         summary="Transport, venue order and accounting each keep their own state. Recovery reads evidence; it never creates a replacement order."
         action={
-          <button className="cd-button cd-button--quiet" type="button" disabled>
-            Recheck status
-          </button>
+          previewMode(process.env) ? (
+            <Link className="cd-button cd-button--quiet" href="/demo">
+              Explore recovery demo
+            </Link>
+          ) : undefined
         }
       />
       <PreviewGate>
@@ -29,7 +33,7 @@ export default function OrdersPage() {
           <div className="cd-callout cd-callout--unknown">
             <Icon name="alert" width="20" height="20" />
             <div>
-              <strong>The exchange may have accepted this order.</strong>
+              <strong>Sample incident: an order response is lost.</strong>
               <p>
                 Capital stays reserved while status is checked. There is no safe resend and no
                 generic retry action.
@@ -116,14 +120,13 @@ export default function OrdersPage() {
                   ['Owner resolution', 'Unavailable until evidence supports one'],
                 ]}
               />
-              <button
+              <Link
                 className="cd-button cd-button--quiet"
                 style={{ marginTop: 'var(--cd-s4)' }}
-                type="button"
-                disabled
+                href="/demo"
               >
-                Request read-only recheck
-              </button>
+                Request read-only recheck · demo
+              </Link>
             </Panel>
           </div>
           <Panel

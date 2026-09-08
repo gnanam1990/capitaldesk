@@ -3,6 +3,15 @@
 Owner-approved shared-account execution coordination with attributable strategy claims and
 recoverable order evidence, for a single Binance Spot account.
 
+**[Try the interactive demo](https://capitaldeskweb-production.up.railway.app/demo)**
+— resolve competing targets, review a fixed FIFO plan, simulate a partial fill, and recover
+from a missing response. All displayed account records are synthetic. No Binance account is
+connected and the demo cannot place orders.
+
+To run the demo locally, install dependencies, then run
+`CAPITALDESK_UI_PREVIEW=true pnpm --filter @capitaldesk/web dev` and open
+`http://localhost:3100/demo`. No database or account credential is needed for the demo.
+
 Several strategy agents propose absolute target holdings. CapitalDesk checks ownership
 claims, reserves capital, exposes conflicting proposals rather than resolving them silently,
 obtains the owner's explicit approval for one exact plan, and reconciles actual exchange

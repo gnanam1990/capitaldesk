@@ -6,6 +6,7 @@ import '@fontsource/ibm-plex-mono/500.css';
 import './globals.css';
 import { loadWebPublicConfig } from '@capitaldesk/config';
 import { AppShell } from '../components/AppShell';
+import { previewMode } from '../lib/preview-data';
 
 export const metadata: Metadata = {
   title: 'CapitalDesk',
@@ -24,6 +25,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           accountAlias={config.accountAlias}
           environment={config.deploymentEnvironment}
           epoch={config.baselineEpoch}
+          demo={previewMode(process.env)}
         >
           {children}
         </AppShell>

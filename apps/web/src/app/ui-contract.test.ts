@@ -23,7 +23,7 @@ describe('operational console truth and accessibility contract', () => {
   it('keeps every development fixture behind the explicit preview gate', () => {
     for (const page of pages.slice(1)) expect(read(page), page).toContain('<PreviewGate>');
     expect(read('page.tsx')).toContain('<PreviewGate>');
-    expect(read('../components/Console.tsx')).toContain('Development preview · fixture evidence');
+    expect(read('../components/Console.tsx')).toContain('Demo workspace · fixture evidence');
   });
 
   it('renders UNKNOWN recovery without a resend or generic retry control', () => {

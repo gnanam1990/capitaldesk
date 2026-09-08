@@ -4,6 +4,30 @@ The single authoritative record of what is built, what is proven and what is blo
 Updated with every milestone. Where a claim is not backed by a command in this document, it
 is not a claim.
 
+## Hosted demo status — September 9, 2026
+
+The public web deployment is a **simulated product demo**, enabled explicitly with
+`CAPITALDESK_UI_PREVIEW=true`. It includes a browser-only walkthrough of opposing targets,
+owner review, FIFO partial fills, and UNKNOWN recovery. This walkthrough exercises its own
+demo state machine; it is not evidence of calls through the backend financial services.
+It cannot sign, authorize or submit an exchange order. Reloading the page resets the scenario.
+
+The account connection attempt did not complete Binance security verification. Browser login
+does not connect this application. The worker entry point still idles rather than invoking
+the implemented ingest service; the executor entry point does not run dispatch jobs. The
+console's operational record SDK wiring and production API/database configuration also remain
+pending. These are runtime integration gaps in addition to the venue evidence blockers below.
+
+Demo mode renders sample records and skips live API readiness calls. Outside demo mode, missing
+readiness and records remain explicit. Sample exports identify themselves as synthetic fixtures.
+
+Demo change validation: 80 web unit tests passed; web production build, focused ESLint,
+dependency layering and credential-boundary checks passed. A production-server browser run
+exercised both scenario branches, UNKNOWN restart, reset, sample-manifest download and the
+overview/intents/plans/orders/capital/evidence/settings/strategies routes. It observed zero
+browser errors and zero operational API requests. The demo fits a 390px mobile viewport.
+This evidence validates the demo only, not live venue integration.
+
 - **Milestone:** M7 — governed execution, operations, console and release gates (modules 11–29).
 - **Branch:** `main`.
 - **Pull request:** [#8](https://github.com/gnanam1990/capitaldesk/pull/8), merged at

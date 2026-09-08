@@ -1,3 +1,5 @@
+import Link from 'next/link';
+import { previewMode } from '../../lib/preview-data';
 import {
   FactList,
   PageIntro,
@@ -35,14 +37,11 @@ export default function PlansPage() {
         title="Approve exactly what can be sent."
         summary="The order, limits, source revisions, reservations and FIFO allocation are bound into one digest. Any material change requires a fresh review."
         action={
-          <>
-            <button className="cd-button cd-button--quiet" type="button" disabled>
-              Decline preview
-            </button>
-            <button className="cd-button" type="button" disabled>
-              Approve this plan
-            </button>
-          </>
+          previewMode(process.env) ? (
+            <Link className="cd-button" href="/demo">
+              Try the approval demo
+            </Link>
+          ) : undefined
         }
       />
       <PreviewGate>
@@ -50,10 +49,10 @@ export default function PlansPage() {
           <div className="cd-callout">
             <Icon name="alert" width="20" height="20" />
             <div>
-              <strong>Approval controls are disabled in fixture preview</strong>
+              <strong>Explore the plan, then try a simulated approval</strong>
               <p>
-                This surface demonstrates the exact consequence and review data. It cannot create an
-                approval, native confirmation or order.
+                This sample binds the order limits and FIFO allocation into one review. The guided
+                demo lets you explore the decision and its outcome using simulated records only.
               </p>
             </div>
           </div>

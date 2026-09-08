@@ -11,7 +11,7 @@ import {
   Timeline,
 } from '../components/Console';
 import { Icon } from '../components/Icons';
-import { INTENTS } from '../lib/preview-data';
+import { INTENTS, previewMode } from '../lib/preview-data';
 import { healthUrl, parseReadiness, resolveDeploymentFacts, type Readiness } from './readiness';
 
 export const dynamic = 'force-dynamic';
@@ -34,12 +34,33 @@ async function fetchReadiness(apiBaseUrl: string): Promise<Readiness> {
   }
 }
 
-export default async function OverviewPage() {
+async function LiveReadiness() {
   const config = loadWebPublicConfig();
   const readiness = await fetchReadiness(config.apiBaseUrl);
   const facts = resolveDeploymentFacts(config, readiness);
   const liveReady = readiness.kind === 'reachable' && readiness.report.status === 'ready';
 
+  return (
+    <section className={`cd-callout ${liveReady ? '' : 'cd-callout--danger'}`} aria-live="polite">
+      <Icon name={liveReady ? 'check' : 'alert'} width="20" height="20" />
+      <div>
+        <strong>{liveReady ? 'API readiness confirmed' : 'Execution is unavailable'}</strong>
+        <p>
+          {readiness.kind === 'unreachable'
+            ? `The API did not answer: ${readiness.detail}. This says nothing about venue account state.`
+            : readiness.report.execution.reason}
+        </p>
+        <small className="cd-mono">
+          {facts.source === 'api' ? 'API OBSERVATION' : 'CONSOLE CONFIG ONLY'} ·{' '}
+          {facts.accountAlias}
+        </small>
+      </div>
+    </section>
+  );
+}
+
+export default function OverviewPage() {
+  const demo = previewMode(process.env);
   return (
     <div className="cd-stack">
       <PageIntro
@@ -48,34 +69,58 @@ export default async function OverviewPage() {
         summary="The desk separates owner authority, venue facts and accounting evidence so the next safe action is always explicit."
         action={
           <>
-            <button className="cd-button cd-button--quiet" type="button" disabled>
-              New events · 3
-            </button>
-            <a className="cd-button" href="/plans">
-              Review active plan <Icon name="arrow" width="17" height="17" />
+            <a className="cd-button cd-button--quiet" href="/evidence">
+              Explore evidence
+            </a>
+            <a className="cd-button" href={demo ? '/demo' : '/plans'}>
+              {demo ? 'Start interactive demo' : 'Review active plan'}{' '}
+              <Icon name="arrow" width="17" height="17" />
             </a>
           </>
         }
       />
 
-      <section className={`cd-callout ${liveReady ? '' : 'cd-callout--danger'}`} aria-live="polite">
-        <Icon name={liveReady ? 'check' : 'alert'} width="20" height="20" />
-        <div>
-          <strong>{liveReady ? 'API readiness confirmed' : 'Execution is unavailable'}</strong>
-          <p>
-            {readiness.kind === 'unreachable'
-              ? `The API did not answer: ${readiness.detail}. This says nothing about venue account state.`
-              : readiness.report.execution.reason}
-          </p>
-          <small className="cd-mono">
-            {facts.source === 'api' ? 'API OBSERVATION' : 'CONSOLE CONFIG ONLY'} ·{' '}
-            {facts.accountAlias}
-          </small>
-        </div>
-      </section>
+      {demo ? (
+        <section className="cd-callout" aria-label="Demo scenario introduction">
+          <Icon name="shield" width="20" height="20" />
+          <div>
+            <strong>One account. Three strategies. One accountable plan.</strong>
+            <p>
+              Explore a sample BTC/USDT desk: coordinate competing targets, inspect reserved
+              capital, and follow an uncertain order through recovery. All account data is
+              simulated; this demo does not connect to Binance or place orders.
+            </p>
+          </div>
+        </section>
+      ) : (
+        <LiveReadiness />
+      )}
 
       <PreviewGate>
         <div className="cd-stack">
+          <div className="cd-grid-3">
+            <Panel title="Coordinate" eyebrow="01 · Agent proposals">
+              <p>
+                Two strategies want to buy. A third wants to unwind. See the conflict before capital
+                moves.
+              </p>
+              <EvidenceLink href="/intents">Inspect three targets</EvidenceLink>
+            </Panel>
+            <Panel title="Approve" eyebrow="02 · Owner control">
+              <p>
+                Inspect the shared plan, its capital reservation and the allocation each strategy
+                would receive.
+              </p>
+              <EvidenceLink href="/plans">Review the sample plan</EvidenceLink>
+            </Panel>
+            <Panel title="Recover" eyebrow="03 · Evidence first">
+              <p>
+                A missing acknowledgement leaves funds reserved. Follow the evidence without
+                resending the order.
+              </p>
+              <EvidenceLink href="/orders">Open recovery scenario</EvidenceLink>
+            </Panel>
+          </div>
           <div className="cd-stats">
             <Stat
               label="Available claim"
@@ -98,10 +143,10 @@ export default async function OverviewPage() {
               tone="danger"
             />
             <Stat
-              label="Source age"
+              label="Snapshot age"
               value="01.8"
               unit="s"
-              meta="Account snapshot · complete coverage"
+              meta="Simulated snapshot · fixed scenario"
               tone="ok"
             />
           </div>
@@ -149,7 +194,7 @@ export default async function OverviewPage() {
               </TableRegion>
             </Panel>
 
-            <Panel title="Source health" eyebrow="Evidence clock">
+            <Panel title="Scenario evidence" eyebrow="Simulated source health">
               <ul className="cd-list">
                 <li>
                   <div>
