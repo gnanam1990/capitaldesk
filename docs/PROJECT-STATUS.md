@@ -66,10 +66,10 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run typecheck`        | pass                                               |
 | `pnpm run lint`             | pass                                               |
 | `pnpm run check:layering`   | pass — 9 packages, 45 crossings checked            |
-| `pnpm run check:secrets`    | pass — 232 files scanned                           |
+| `pnpm run check:secrets`    | pass — 233 files scanned                           |
 | `pnpm run test:unit`        | **507 passed**, 0 skipped, 31 files                |
 | `pnpm run test:property`    | **13 passed**, seed 20260908                       |
-| `pnpm run test:integration` | **181 passed**, 17 files, against PostgreSQL 17.10 |
+| `pnpm run test:integration` | **204 passed**, 18 files, against PostgreSQL 17.10 |
 | `pnpm run build`            | pass — all packages and apps                       |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
@@ -78,10 +78,10 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 | ----------- | ----- | --------------------------------------------------------------------------------------------------------------- |
 | unit        | 507   | contracts 284, web 63, tools 37, api 36, config 35, domain 29, observability 23 (by package, from the reporter) |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                                  |
-| integration | 181   | auth 56, journal 46, migrations 30, CLI 18, worker/executor 12, identity scope 11, API 8                        |
+| integration | 204   | journal 69, auth 56, migrations 30, CLI 18, worker/executor 12, identity scope 11, API 8                        |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 88
-integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 46
+integration cases listed in [docs/handoffs/03.md](handoffs/03.md), and module 04's the 69
 integration cases in [docs/handoffs/04.md](handoffs/04.md) — not the workspace figures.
 
 Toolchain: Node 22.23.1, pnpm 11.10.0, TypeScript 5.9.3, Fastify 5.12.3, Next 16.3.4,

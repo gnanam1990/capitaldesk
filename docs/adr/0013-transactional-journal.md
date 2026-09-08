@@ -25,13 +25,36 @@ misbehaving role but invisible to the tests, which run as the schema owner. Trig
 every role including the owner, and are exercised by every test. Role-based revocation is a
 deployment step recorded as such in the handoff, not a substitute claimed here.
 
-### 2. A ledger transaction balances at COMMIT, per asset
+### 2. A ledger transaction balances at COMMIT, per asset, and its entry set is then final
 
 A deferred constraint trigger sums each transaction's entries per asset and refuses the
 commit when the ASSET_CONTROL side and the claims side differ (INV-02, INV-04). Deferred,
 because entries are inserted one at a time and only the whole set can balance. The
 repository checks the same property before writing, so the ordinary path never reaches the
 trigger; the trigger is for every other path.
+
+Because that trigger fires once — at the commit that inserted the parent — making the
+existing entry rows UPDATE- and DELETE-proof left the set itself open. A later transaction
+could insert another entry against a committed `ledger_txn_id` and no balance check fired at
+all; a probe appended a `+999` claim and left control at 10 against claims of 1009. Each
+transaction now records the database transaction that created it, and entries may only be
+inserted by that same one. Creating a posting with all its entries atomically is unchanged;
+every later append is refused, balanced or not, because a balanced append is still an edit to
+a record that was already final.
+
+### 2a. Economic references carry their whole scope
+
+A probe crossed three boundaries that the keys did not close: an epoch-2 fill cited an
+epoch-1 observation, an order in one workspace correlated to a client order id marked in
+another, and `applied_ledger_txn_id` accepted a string naming no transaction at all.
+Reservations named a strategy through an unchecked text column, and so did ledger entries.
+
+Every one of those is now a composite foreign key over the complete tuple — fills to evidence
+in the same epoch, orders to attempts in the same workspace, pool and epoch, applied
+observations to a real ledger transaction in their own scope, reservations to a real strategy
+in their own pool. The ledger's owner column also carries `HOUSE` and `ASSET_CONTROL`, so it
+cannot be a foreign key; a trigger checks the same tuple. A `NULL` correlation still means
+external activity, and is skipped rather than invented.
 
 Every transaction names its source operation, unique within the pool and epoch. That is what
 makes reapplying an observation after a crash idempotent: the second posting of the same fill
@@ -73,6 +96,24 @@ account, in any epoch, is `DISPATCH_MARKED`, `SEND_ATTEMPTED`, `UNKNOWN` or
 `IRRECOVERABLE_UNCERTAINTY` (ADR-0001 section 3); a trigger enforces this for every writer.
 Epoch rotation is refused while any attempt is unresolved, and never touches the lease.
 
+### 5a. Marking validates the whole authority chain, under the pool lock
+
+`mark` checks the attempt's own state and, before writing anything, locks the pool row and
+requires: a dispatchable pool state, an active governance lease for that account, a plan still
+at `DISPATCH_PENDING`, and an attempt that is `PREPARED` and not voided.
+
+Checking only the attempt was not enough. A restore could halt the pool, invalidate the plan
+and release its reservation, and a `mark` arriving afterwards still produced a marker and a
+send message — for a plan whose authority had been withdrawn and whose funds had been
+returned. Taking the pool lock first is also what makes marking and `enterRestorePosture`
+mutually exclusive: either the marker commits first and restore then finds a marked attempt
+and leaves its plan and reservation alone, or restore commits first and the mark is refused.
+
+Invalidating a plan voids the `PREPARED` attempts it left behind. `voided_at` is a durable,
+database-enforced terminal posture: the transition trigger refuses to move a voided attempt,
+so it can never be marked by any writer, which is the honest state for an attempt that was
+never sent and now never can be.
+
 ### 6. A dispatch attempt moves forward only
 
 The contract's transition table is copied into a trigger, and a test reads both and fails if
@@ -81,6 +122,16 @@ signed request once set — is immutable whether or not the state changes; an ea
 checked it only on a state change, which is exactly the update a resend would not make. The
 marker and the single-attempt outbox message that will carry the send commit together
 (T-024). `SEND_ATTEMPTED` is a second write that cannot precede the marker (ADR-0001).
+
+### 6a. Lease and queue deadlines are the database's, not the caller's
+
+Neither the outbox nor `job_leases` accepts a `now`. A caller-supplied clock is a way for a
+worker whose watch runs fast to declare another worker's lease lapsed and take work that is
+still held; there is now no way to express it. Acquiring a lease is one
+`INSERT ... ON CONFLICT DO UPDATE ... WHERE expires_at <= now()`, so a fresh key, a lapsed
+lease and a live one are decided atomically — a read followed by an insert left a window in
+which two acquirers for a key that did not exist yet both passed the read, and one surfaced a
+raw unique violation instead of a decision.
 
 ### 7. SERIALIZABLE for economic writes, with retries only before an effect
 
@@ -95,11 +146,25 @@ Under contention two reservers that read the same opening availability cannot bo
 the second blocks on the pool row, fails serialization when the first commits, and on re-run
 reads the reduced availability and is refused (T-013).
 
-### 8. The outbox is single-attempt for dispatch, by constraint
+### 8. The outbox is single-attempt for dispatch, and the attempt bound is enforced on claim
 
-`max_attempts` must be 1 for any `dispatch.*` kind. A dispatch message that fails once is
-dead-lettered; there is no path by which it is delivered twice (INV-09). Nothing in the outbox
-is ever deleted.
+`max_attempts` must be 1 for any `dispatch.*` kind, and `attempts <= max_attempts` is a table
+constraint. A dispatch message that fails once is dead-lettered.
+
+The bound has to be enforced where messages are handed out, not only where they are failed.
+It was not: `claim` re-offered any message whose lease had lapsed, without consulting
+`attempts`, so an executor that claimed a send message and then crashed had it handed to the
+next consumer as attempt 2 — a second delivery of an order placement, which is the single
+outcome this queue exists to prevent. `claim` now refuses a message with no attempts left,
+and retires one whose lease lapsed with none remaining: dead-lettered, with the reason that
+the outcome of its last attempt is unknown. That is a terminal, explicit posture, and it
+authorises nothing; resolving what became of the send is the reconciler's work.
+
+`fail` requires a live lease, as `acknowledge` already did. A worker that stalls past its
+lease and resumes is still recorded as the holder, so checking the name alone let it consume
+an attempt it no longer held.
+
+Nothing in the outbox is ever deleted.
 
 ### 9. Idempotency rows are tombstones
 
@@ -114,6 +179,21 @@ action is not performed again (INV-11).
 invalidates sealed plans that never reached a marker and releases their reservations, and
 leaves every marked attempt, its reservation and its uncertainty exactly as found. It reports
 how many liabilities it retained (T-035, ADR-0005 section 4).
+
+### 10a. Contradictory evidence is a conflict, never a duplicate
+
+Two different payloads under one source reference are not a repeat: the source has said two
+different things about one fact. Reporting that as an ordinary duplicate discarded the second
+statement silently. The digests are compared; an exact repeat deduplicates, and a difference
+records an `evidence_conflicts` row holding both the stored and the incoming evidence, for
+the incident path in module 15. The stored evidence is still never overwritten.
+
+The same applies to order status. `ON CONFLICT DO NOTHING` meant every observation after the
+first was a no-op, so an order seen as `NEW` stayed `NEW` through `PARTIALLY_FILLED` and
+`FILLED` — status, version and last-observed time all frozen. The policy is now explicit:
+advance, repeat, arrive late, or contradict. Only an advance writes; two different terminal
+statuses, or an unsupported status against a known one, are recorded as conflict evidence and
+the stored status is kept.
 
 ### 11. Evidence is digested as received, not canonically
 
@@ -133,7 +213,9 @@ otherwise over the persisted serialisation. Deduplication is by source reference
 
 ## Tests
 
-Every decision above has a real-PostgreSQL test on independent connections where
-concurrency is claimed, and the load-bearing ones were shown to fail with the guard removed:
-the deferred balance check, the pool lock under contention, the lease-race re-read, the
-restore quarantine, and the projection write guard.
+Every decision above has a real-PostgreSQL test on independent connections where concurrency
+is claimed, and each guard was shown to fail its test when removed. That verification found
+two of its own defects: an injection that appeared to prove the restore voiding had not
+actually been applied to the file, and the first stale-`fail` test passed with the liveness
+check removed because another worker had already taken the message, so `leased_by` alone
+excluded the stale holder. Both were corrected before the guards were counted as proven.
