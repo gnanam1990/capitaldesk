@@ -71,11 +71,13 @@ export async function authenticateRequest(
     .cookies;
   const rawSessionCookie = cookies?.[options.cookieName];
 
+  // RFC 9110 makes the auth scheme case-insensitive, so `bearer x` is a valid request that
+  // a case-sensitive prefix check rejected. Only the scheme is matched loosely; the token
+  // bytes after it are taken exactly as sent.
   const authorization = request.headers.authorization;
+  const scheme = typeof authorization === 'string' ? authorization.slice(0, 7) : '';
   const bearer =
-    typeof authorization === 'string' && authorization.startsWith('Bearer ')
-      ? authorization.slice('Bearer '.length).trim()
-      : undefined;
+    scheme.toLowerCase() === 'bearer ' ? (authorization as string).slice(7).trim() : undefined;
 
   if (rawSessionCookie !== undefined && bearer !== undefined) {
     return { ok: false, failure: 'BOTH_CREDENTIAL_KINDS' };

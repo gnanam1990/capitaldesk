@@ -147,8 +147,15 @@ const GRANTS: Readonly<Record<ActorRole, readonly Capability[]>> = Object.freeze
   agent: ['intent.propose', 'intent.read', 'plan.read', 'strategy.read', 'market.read'],
 });
 
+/**
+ * The capabilities a role holds.
+ *
+ * A frozen copy. `Object.freeze` on the matrix froze the outer object but not the arrays
+ * inside it, so a caller inspecting a role's grants could push a capability into the live
+ * matrix and change every later authorization decision for that role.
+ */
 export function grantsFor(role: ActorRole): readonly Capability[] {
-  return GRANTS[role];
+  return Object.freeze([...GRANTS[role]]);
 }
 
 export function roleHasCapability(role: ActorRole, capability: Capability): boolean {

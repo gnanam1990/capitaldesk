@@ -25,7 +25,23 @@ const pool = new Pool({
   connectionTimeoutMillis: 5000,
 });
 
+/**
+ * An idle pooled client can lose its connection - a database restart, a dropped network - and
+ * node-postgres emits that on the pool. With no listener Node treats it as an unhandled
+ * 'error' event and terminates the process, so a recoverable blip took the API down instead
+ * of letting readiness report the database as down while the pool reconnected.
+ *
+ * The error is logged and nothing else: the pool discards the broken client itself, and the
+ * readiness probe is what tells an operator the database is unreachable.
+ */
 const app = buildServer(config, { identityPool: pool });
+
+pool.on('error', (error: Error) => {
+  app.log.error(
+    { err: error, component: 'identity-pool' },
+    'an idle database client failed; the pool will discard it and readiness will report the database',
+  );
+});
 
 /**
  * Shut down once, in order, and within a bound.

@@ -114,6 +114,17 @@ describeIfDatabase('identity and access', () => {
         ($2,'u-outsider','owner')`,
       [WORKSPACE, OTHER_WORKSPACE],
     );
+    // A strategy belongs to a real pool, so the fixture creates the account and pool it names
+    // rather than relying on an unconstrained column.
+    await pool.query(
+      `INSERT INTO venue_accounts (venue, environment, stable_account_id)
+       VALUES ('binance-spot','local','acct-auth')`,
+    );
+    await pool.query(
+      `INSERT INTO pools (workspace_id, pool_id, venue, environment, stable_account_id, state)
+       VALUES ($1, $2, 'binance-spot', 'local', 'acct-auth', 'READY')`,
+      [WORKSPACE, POOL],
+    );
     await pool.query(
       `INSERT INTO strategies (workspace_id, strategy_id, pool_id, display_name) VALUES
         ($1,$2,$3,'A'), ($1,$4,$3,'B')`,
@@ -909,7 +920,7 @@ describeIfDatabase('identity and access', () => {
 
   // ------------------------------------------------------------------------------------
   describe('audit detail cannot carry a secret into PostgreSQL', () => {
-    it('drops injected secrets before the insert, recording only the key names', async () => {
+    it('drops injected secrets before the insert, recording only how many were refused', async () => {
       const repository = new IdentityRepository(pool);
       const secrets = {
         token: `cdk_local_cred-a_${AGENT_SECRET}`,
@@ -929,9 +940,9 @@ describeIfDatabase('identity and access', () => {
       );
       const serialized = JSON.stringify(stored.rows[0]?.detail);
       for (const value of Object.values(secrets)) expect(serialized).not.toContain(value);
-      expect(stored.rows[0]?.detail).toEqual({
-        rejectedDetailKeys: 'token,password,signedUrl',
-      });
+      // A count, not the key names: object keys are caller-controlled too, so writing them
+      // back would have carried a secret passed as a key straight into the column.
+      expect(stored.rows[0]?.detail).toEqual({ rejectedDetailCount: '3' });
     });
   });
 
@@ -1371,6 +1382,92 @@ describeIfDatabase('identity and access', () => {
         headers: { authorization: `Bearer ${agentToken}` },
       });
       expect(asAgent.statusCode).toBe(404);
+    });
+  });
+
+  // ------------------------------------------------------------------------------------
+  describe('the authorization scheme is matched as HTTP defines it', () => {
+    it('accepts every casing of the Bearer scheme and preserves the token bytes', async () => {
+      for (const scheme of ['Bearer', 'bearer', 'BEARER', 'BeArEr']) {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/v1/workspaces/${WORKSPACE}/principal`,
+          headers: { authorization: `${scheme} ${agentToken}` },
+        });
+        expect(response.statusCode, scheme).toBe(200);
+        expect(response.json<{ subjectId: string }>().subjectId).toBe('cred-a');
+      }
+    });
+
+    it('still refuses another scheme, and a token whose case was altered', async () => {
+      const basic = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/principal`,
+        headers: { authorization: `Basic ${agentToken}` },
+      });
+      expect(basic.statusCode).toBe(401);
+      // The scheme is case-insensitive; the credential is not.
+      const altered = await app.inject({
+        method: 'GET',
+        url: `/v1/workspaces/${WORKSPACE}/principal`,
+        headers: { authorization: `Bearer ${agentToken.toUpperCase()}` },
+      });
+      expect(altered.statusCode).toBe(401);
+    });
+  });
+
+  // ------------------------------------------------------------------------------------
+  describe('a refused credential lifecycle action is still audited', () => {
+    it('records a failed issue for a strategy that does not exist', async () => {
+      const repository = new IdentityRepository(pool);
+      const outcome = await repository.issueAgentCredential({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        strategyId: 'strategy-ghost',
+        credentialId: 'cred-ghost',
+        secret: AGENT_SECRET,
+        label: 'ghost',
+        rotatedFrom: null,
+        actor: OWNER_PRINCIPAL,
+        now: new Date(),
+      });
+      expect(outcome).toEqual({ ok: false, reason: 'UNKNOWN_STRATEGY' });
+
+      // The refusal is what an attempt to probe another pool's identifiers looks like, so it
+      // belongs in the trail. It was silently dropped.
+      const audits = await pool.query<{
+        action: string;
+        outcome: string;
+        detail: Record<string, string>;
+      }>(`SELECT action, outcome, detail FROM audit_events WHERE action LIKE 'credential.%'`);
+      expect(audits.rows).toEqual([
+        { action: 'credential.issue', outcome: 'failed', detail: { refusal: 'UNKNOWN_STRATEGY' } },
+      ]);
+    });
+
+    it('records a failed issue when a live credential already exists', async () => {
+      const repository = new IdentityRepository(pool);
+      const outcome = await repository.issueAgentCredential({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        strategyId: STRATEGY,
+        credentialId: 'cred-second',
+        secret: AGENT_SECRET,
+        label: 'second',
+        rotatedFrom: null,
+        actor: OWNER_PRINCIPAL,
+        now: new Date(),
+      });
+      expect(outcome).toMatchObject({ ok: false, reason: 'ACTIVE_CREDENTIAL_EXISTS' });
+      const audits = await pool.query<{ outcome: string; detail: Record<string, string> }>(
+        `SELECT outcome, detail FROM audit_events WHERE action = 'credential.issue'`,
+      );
+      expect(audits.rows).toEqual([
+        {
+          outcome: 'failed',
+          detail: { refusal: 'ACTIVE_CREDENTIAL_EXISTS', credentialId: 'cred-a' },
+        },
+      ]);
     });
   });
 

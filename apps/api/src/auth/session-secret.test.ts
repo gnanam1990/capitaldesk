@@ -91,13 +91,19 @@ describe('owner session secret resolution', () => {
       );
     });
 
-    it('refuses an obvious placeholder', () => {
-      for (const placeholder of ['changeme', 'CHANGEME', 'placeholder', 'password']) {
-        // Padded to the length minimum so the placeholder check is what refuses it.
+    it('refuses an obvious placeholder, whatever its length', () => {
+      // These reach REFUSED_PLACEHOLDERS. The earlier version used 8-11 character values, so
+      // the length guard threw first and the assertion accepted either message - the
+      // placeholder branch was never executed, and would have passed if it were deleted.
+      for (const placeholder of ['changeme', 'CHANGEME', 'placeholder', 'password', 'todo']) {
         expect(() => resolveOwnerSessionSecret(secretFile(placeholder)), placeholder).toThrow(
-          /at least 32|placeholder/,
+          /placeholder/,
         );
       }
+      // A long value that is not a placeholder still fails on entropy, not on this branch.
+      expect(() => resolveOwnerSessionSecret(secretFile('a'.repeat(64)))).toThrow(
+        /too few distinct characters/,
+      );
     });
 
     it('never puts the resolved content in the error message', () => {

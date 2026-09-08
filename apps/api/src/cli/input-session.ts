@@ -24,12 +24,23 @@ export interface InputSessionOptions {
   readonly interactive: boolean;
 }
 
+/** The operator interrupted an input read. */
+export class InputInterrupted extends Error {
+  constructor() {
+    super('input interrupted');
+    this.name = 'InputInterrupted';
+  }
+}
+
 export class InputSession {
   private muted = false;
   private closed = false;
   private readonly reader: Interface;
   private readonly lines: AsyncIterator<string>;
   private readonly destination: Writable;
+
+  /** Resolves when the operator interrupts a read. */
+  private interrupted: (() => void) | null = null;
 
   constructor(options: InputSessionOptions) {
     this.destination = options.output;
@@ -45,18 +56,33 @@ export class InputSession {
       terminal: options.interactive,
     });
     this.lines = this.reader[Symbol.asyncIterator]();
+    // In terminal mode readline consumes Ctrl-C itself and emits SIGINT rather than letting
+    // the process handler see it. Without this the iterator simply closed, `read` returned an
+    // empty string, and a redemption reported WEAK_PASSWORD instead of being interrupted.
+    this.reader.on('SIGINT', () => {
+      this.interrupted?.();
+    });
   }
 
-  /** Read one line. `secret: true` suppresses echo for the duration of that read. */
+  /**
+   * Read one line. `secret: true` suppresses echo for the duration of that read.
+   *
+   * Throws {@link InputInterrupted} when the operator interrupts, so the caller can exit on
+   * the interrupted path rather than proceeding with an empty answer.
+   */
   async read(prompt: string, secret: boolean): Promise<string> {
     this.destination.write(prompt);
     this.muted = secret;
     try {
-      const next = await this.lines.next();
+      const interrupt = new Promise<never>((_, reject) => {
+        this.interrupted = () => reject(new InputInterrupted());
+      });
+      const next = await Promise.race([this.lines.next(), interrupt]);
       // End of input is a value, not a hang: the caller gets an empty string and the policy
       // check refuses it.
       return next.done === true ? '' : next.value;
     } finally {
+      this.interrupted = null;
       this.muted = false;
       // The Enter keystroke was swallowed with the rest of the echo; end the line here so the
       // next prompt does not print on top of it.

@@ -73,13 +73,18 @@ export function resolveOwnerSessionSecret(reference: string): string {
   if (secret.length === 0) {
     throw new SessionSecretError('the referenced file is empty');
   }
+  // Before the length check: every value in the placeholder set is shorter than the minimum,
+  // so ordering the length guard first made this branch unreachable - a file holding
+  // "changeme" was refused for being short, and deleting this check would have changed
+  // nothing. A placeholder is a placeholder at any length, and saying so is more useful.
+  if (REFUSED_PLACEHOLDERS.has(secret.toLowerCase())) {
+    throw new SessionSecretError('the referenced file holds a placeholder rather than a secret');
+  }
+
   if (secret.length < MINIMUM_SECRET_LENGTH) {
     throw new SessionSecretError(
       `the referenced file holds ${String(secret.length)} characters; at least ${String(MINIMUM_SECRET_LENGTH)} are required`,
     );
-  }
-  if (REFUSED_PLACEHOLDERS.has(secret.toLowerCase())) {
-    throw new SessionSecretError('the referenced file holds a placeholder rather than a secret');
   }
   if (new Set(secret).size < 8) {
     // "aaaa..." satisfies a length check and has almost no entropy.

@@ -458,7 +458,18 @@ export class IdentityRepository {
             FOR UPDATE`,
         [input.workspaceId, input.poolId, input.strategyId],
       );
-      if (strategy.rowCount !== 1) return { ok: false, reason: 'UNKNOWN_STRATEGY' };
+      if (strategy.rowCount !== 1) {
+        // An authorized caller naming a strategy that does not exist, or was archived, is a
+        // security-relevant refusal: it is what probing for another pool's identifiers looks
+        // like. Recorded with no scope, because the tuple was never confirmed.
+        await tx.recordAudit({
+          actor: { kind: 'principal', principal: input.actor },
+          action: input.rotatedFrom === null ? 'credential.issue' : 'credential.rotate',
+          outcome: 'failed',
+          detail: { refusal: 'UNKNOWN_STRATEGY' },
+        });
+        return { ok: false, reason: 'UNKNOWN_STRATEGY' };
+      }
 
       if (input.rotatedFrom === null) {
         // A first issue against a strategy that already has a live key is a decision, not a
@@ -473,6 +484,13 @@ export class IdentityRepository {
         );
         const live = active.rows[0];
         if (live !== undefined) {
+          await tx.recordConfirmedScopeAudit({
+            actor: { kind: 'principal', principal: input.actor },
+            action: 'credential.issue',
+            outcome: 'failed',
+            confirmed: { poolId: input.poolId, strategyId: input.strategyId },
+            detail: { refusal: 'ACTIVE_CREDENTIAL_EXISTS', credentialId: live.credential_id },
+          });
           return {
             ok: false,
             reason: 'ACTIVE_CREDENTIAL_EXISTS',
@@ -490,7 +508,15 @@ export class IdentityRepository {
               AND revoked_at IS NULL`,
           [input.workspaceId, input.poolId, input.strategyId, input.rotatedFrom, input.now],
         );
-        if (revoked.rowCount !== 1) return { ok: false, reason: 'UNKNOWN_CREDENTIAL' };
+        if (revoked.rowCount !== 1) {
+          await tx.recordAudit({
+            actor: { kind: 'principal', principal: input.actor },
+            action: 'credential.rotate',
+            outcome: 'failed',
+            detail: { refusal: 'UNKNOWN_CREDENTIAL' },
+          });
+          return { ok: false, reason: 'UNKNOWN_CREDENTIAL' };
+        }
       }
 
       // revealed_at is written here, inside the transaction, before any response exists. It

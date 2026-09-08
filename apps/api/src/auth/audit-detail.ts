@@ -42,7 +42,8 @@ export type AuditDetailKey = keyof typeof AUDIT_DETAIL_SHAPES;
 
 export type AuditDetail = Partial<Record<AuditDetailKey, string | null>>;
 
-export const REJECTED_KEYS_FIELD = 'rejectedDetailKeys';
+/** How many entries the schema refused. A count, never the names. */
+export const REJECTED_COUNT_FIELD = 'rejectedDetailCount';
 
 export interface SanitizedAuditDetail {
   readonly detail: Record<string, string>;
@@ -83,7 +84,12 @@ export function sanitizeAuditDetail(
   }
 
   if (rejectedKeys.length > 0) {
-    output[REJECTED_KEYS_FIELD] = rejectedKeys.join(',');
+    // A count, not the names. Object keys are caller-controlled and can be arbitrary strings,
+    // so writing the rejected key names into the column recreated the exact leak the schema
+    // exists to prevent - a secret passed as a *key* would have been persisted verbatim. The
+    // names are still returned to the caller for logging behind the redacting sink; only the
+    // durable column is restricted.
+    output[REJECTED_COUNT_FIELD] = String(rejectedKeys.length);
   }
   return { detail: output, rejectedKeys };
 }

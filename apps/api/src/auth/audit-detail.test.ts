@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REJECTED_KEYS_FIELD, sanitizeAuditDetail } from './audit-detail.js';
+import { REJECTED_COUNT_FIELD, sanitizeAuditDetail } from './audit-detail.js';
 
 describe('audit detail schema', () => {
   it('keeps the identifiers an operator needs to read the trail', () => {
@@ -34,7 +34,23 @@ describe('audit detail schema', () => {
     expect([...rejectedKeys].sort()).toEqual(['password', 'secret_hash', 'signedUrl', 'token']);
     const serialized = JSON.stringify(detail);
     for (const value of Object.values(secrets)) expect(serialized).not.toContain(value);
-    expect(detail[REJECTED_KEYS_FIELD]).toBe('token,password,signedUrl,secret_hash');
+    expect(detail[REJECTED_COUNT_FIELD]).toBe('4');
+  });
+
+  it('never writes a rejected key name, because keys are caller-controlled too', () => {
+    // A secret passed as a *key* would have been persisted verbatim in the rejected-keys
+    // list, which is the leak the schema exists to prevent, arriving through the other half
+    // of the object.
+    const secretKey = 'cdk_local_cred-AbCdEfGhI_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_A';
+    const { detail, rejectedKeys } = sanitizeAuditDetail({
+      [secretKey]: 'x',
+      'another-secret-key': 'y',
+    });
+    expect(rejectedKeys).toEqual([secretKey, 'another-secret-key']);
+    const serialized = JSON.stringify(detail);
+    expect(serialized).not.toContain(secretKey);
+    expect(serialized).not.toContain('another-secret-key');
+    expect(detail).toEqual({ [REJECTED_COUNT_FIELD]: '2' });
   });
 
   it('refuses every secret under every permitted key', () => {

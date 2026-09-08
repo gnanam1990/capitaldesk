@@ -246,9 +246,12 @@ export async function issueEnrollment(
       actorId: enrollmentId,
       action: 'owner.enrollment.issue',
       outcome: 'allowed',
+      // The login name is caller-supplied text on this path, and an operator who types a
+      // secret into it would otherwise put it in the durable trail. The enrollment id is
+      // server-generated and identifies the act; the login name is recoverable from the
+      // enrollment row itself, which is not an audit record.
       detail: {
         enrollmentId,
-        loginName: input.loginName,
         supersededEnrollmentId: superseded?.enrollmentId ?? null,
         supersededReason: superseded?.reason ?? null,
       },
@@ -271,7 +274,13 @@ export type RedeemOutcome =
         | 'ALREADY_CONSUMED'
         | 'INVALIDATED'
         | 'EXPIRED'
-        | 'WRONG_CODE';
+        | 'WRONG_CODE'
+        /**
+         * `users.login_name` is unique across every workspace, so a name already enrolled
+         * elsewhere collides. Reported as a decision rather than surfacing a raw 23505 with
+         * whatever the driver puts in its message.
+         */
+        | 'LOGIN_NAME_TAKEN';
     };
 
 /**
@@ -363,6 +372,14 @@ export async function redeemEnrollment(
       return { ok: false, reason: 'WRONG_CODE' };
     }
 
+    // Checked under the workspace lock this transaction already holds, and the unique index
+    // is still the arbiter: a concurrent redeemer in another workspace makes the insert fail,
+    // and that is caught below rather than escaping as a database error.
+    const taken = await client.query(`SELECT 1 FROM users WHERE login_name = $1`, [
+      live.login_name,
+    ]);
+    if (taken.rowCount === 1) return { ok: false, reason: 'LOGIN_NAME_TAKEN' };
+
     const userId = newId('usr');
     // consumed_by is an immediate foreign key, so the user row exists before the consume runs.
     await client.query(
@@ -389,7 +406,7 @@ export async function redeemEnrollment(
       actorId: userId,
       action: 'owner.enrollment.redeem',
       outcome: 'allowed',
-      detail: { enrollmentId: live.enrollment_id, loginName: live.login_name },
+      detail: { enrollmentId: live.enrollment_id, userId },
       at: now,
     });
 

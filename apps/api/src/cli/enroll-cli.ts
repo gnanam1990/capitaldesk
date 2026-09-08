@@ -1,7 +1,7 @@
 import { Client } from 'pg';
 import { parseArguments, USAGE } from './args.js';
 import { issueEnrollment, redeemEnrollment } from './enroll.js';
-import { InputSession } from './input-session.js';
+import { InputInterrupted, InputSession } from './input-session.js';
 
 /**
  * Operator entry point for one-time owner enrollment.
@@ -91,6 +91,15 @@ async function main(): Promise<void> {
       // read avoids.
       code = await session.read('enrollment code: ', true);
       password = await session.read('new owner password: ', true);
+    } catch (error) {
+      // On a terminal, readline consumes Ctrl-C and the process handler never ran, so an
+      // interrupt used to look like an empty answer and was reported as a weak password.
+      if (error instanceof InputInterrupted) {
+        process.stderr.write('\ninterrupted\n');
+        process.exitCode = EXIT_INTERRUPTED;
+        return;
+      }
+      throw error;
     } finally {
       session.close();
       process.off('SIGINT', onSignal);
