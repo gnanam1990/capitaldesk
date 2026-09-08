@@ -1,8 +1,12 @@
-import Fastify from 'fastify';
-import { Client } from 'pg';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { Client, type Pool } from 'pg';
 import type { ApiConfig } from '@capitaldesk/config';
 import { createLogger } from '@capitaldesk/observability';
 import { liveness, readiness, type DependencyReport } from './health.js';
+import authPlugin from './auth/plugin.js';
+import { registerAuthRoutes } from './auth/routes.js';
+import { IdentityRepository } from './auth/repository.js';
+import { resolveOwnerSessionSecret } from './auth/session-secret.js';
 
 /**
  * Probe PostgreSQL with every step bounded.
@@ -69,7 +73,27 @@ async function probeDatabase(databaseUrl: string): Promise<DependencyReport> {
   }
 }
 
-export function buildServer(config: ApiConfig) {
+/**
+ * Build the server, optionally with the identity surface.
+ *
+ * The auth routes need a connection pool, which the health-only server does not have. Passing
+ * one in is what turns them on, so a deployment that has not configured a database gets a
+ * server with no authentication surface rather than one that fails per request.
+ */
+export interface ServerDependencies {
+  readonly identityPool?: Pool;
+}
+
+export function buildServer(config: ApiConfig, dependencies: ServerDependencies = {}) {
+  /**
+   * Normalised to the default `FastifyInstance` at this one boundary.
+   *
+   * Passing a Pino instance as `loggerInstance` makes Fastify infer a logger generic that is
+   * structurally compatible with `FastifyBaseLogger` but not assignable to it under
+   * `exactOptionalPropertyTypes`. Without this the instance type differs from every helper
+   * that takes a `FastifyInstance`, and the difference propagates through the whole route
+   * surface for no behavioural reason.
+   */
   const app = Fastify({
     loggerInstance: createLogger({
       role: 'api',
@@ -78,7 +102,11 @@ export function buildServer(config: ApiConfig) {
       deploymentEnvironment: config.deploymentEnvironment,
       accountAlias: config.accountAlias,
     }),
-  });
+    // Fastify's default ajv strips unknown properties. Rejecting them instead makes a body
+    // that carries an identity field a visible error rather than a silently ignored one, so
+    // an attempt to smuggle a role or a workspace id fails loudly.
+    ajv: { customOptions: { removeAdditional: false } },
+  }) as unknown as FastifyInstance;
 
   const startedAt = Date.now();
 
@@ -96,7 +124,29 @@ export function buildServer(config: ApiConfig) {
     return report;
   });
 
-  // There is deliberately no /v1 surface yet. Routes arrive with the domain behaviour they
+  if (dependencies.identityPool !== undefined) {
+    const repository = new IdentityRepository(dependencies.identityPool);
+    const secureCookies = config.deploymentEnvironment !== 'local';
+    void app
+      .register(authPlugin, {
+        repository,
+        environment: config.deploymentEnvironment,
+        secureCookies,
+        // Resolved from the reference, never the reference itself. Signing with the
+        // reference would give every deployment that used the same conventional path an
+        // identical, guessable key — and would never read the mounted secret at all.
+        sessionSecret: resolveOwnerSessionSecret(config.ownerSessionSecretRef),
+      })
+      .after(() => {
+        registerAuthRoutes(app, {
+          repository,
+          environment: config.deploymentEnvironment,
+          secureCookies,
+        });
+      });
+  }
+
+  // Beyond identity there is deliberately no /v1 surface yet. Routes arrive with the domain behaviour they
   // expose (prompts 03, 07, 17); an endpoint that returns a plausible shape without the
   // behaviour behind it would be a false claim of capability.
   app.setNotFoundHandler((request, reply) => {
