@@ -6,9 +6,12 @@ import { transactional, type Queryable } from './transaction.js';
  *
  * A message is enqueued inside the transaction that makes the change it announces, so there
  * is no committed change without its message and no message without its change. Consumers
- * claim under a lease, then acknowledge or fail; failure past the attempt bound dead-letters
- * the message rather than retrying forever, and a dispatch message is single-attempt by
- * database constraint. Nothing is ever deleted.
+ * claim under a lease, then acknowledge or fail; a message that fails past its attempt bound
+ * is dead-lettered rather than retried forever, and nothing is ever deleted.
+ *
+ * Every expiry decision reads the database clock. A caller's `now` was an argument, which
+ * meant a consumer with a fast clock could declare another consumer's lease lapsed and take a
+ * message that was still held. There is now no way to express that.
  */
 
 export interface EnqueueInput {
@@ -25,7 +28,7 @@ export interface ClaimedMessage {
   readonly outboxId: string;
   readonly kind: string;
   readonly payload: unknown;
-  /** 1 for the first delivery. */
+  /** 1 for the first delivery. Never exceeds the message's attempt bound. */
   readonly attempt: number;
 }
 
@@ -58,35 +61,56 @@ export class OutboxRepository {
   /**
    * Claim the oldest deliverable message for this pool under a lease.
    *
-   * SKIP LOCKED, so two consumers never contend on one row; a message whose lease has lapsed
-   * without acknowledgement is deliverable again, and its attempt counter says so.
+   * A message whose lease lapsed without an acknowledgement is only re-offered while it has
+   * attempts left. When it does not, its holder consumed the last one and vanished, so the
+   * outcome of that attempt is unknown: the message is dead-lettered with that reason rather
+   * than delivered again or left pending forever.
+   *
+   * For a `dispatch.*` message the bound is one, so this is the rule that makes a second
+   * delivery impossible. Before it, a crashed executor's send message was handed to the next
+   * consumer as attempt 2 — the one thing an order-placement queue must never do.
    */
   claim(input: {
     readonly workspaceId: string;
     readonly poolId: string;
     readonly consumerId: string;
     readonly leaseMs: number;
-    readonly now: Date;
   }): Promise<ClaimedMessage | null> {
     return transactional(this.pool, async (client) => {
+      // Retire anything whose lease lapsed with no attempts left, before looking for work.
+      await client.query(
+        `UPDATE outbox
+            SET dead_lettered_at = now(),
+                dead_letter_reason = 'lease expired with no attempts remaining; the outcome of the last attempt is unknown',
+                leased_by = NULL, leased_until = NULL
+          WHERE workspace_id = $1 AND pool_id = $2
+            AND published_at IS NULL AND dead_lettered_at IS NULL AND quarantined_at IS NULL
+            AND attempts >= max_attempts
+            AND (leased_until IS NULL OR leased_until <= now())`,
+        [input.workspaceId, input.poolId],
+      );
+
       const candidate = await client.query<{ outbox_id: string }>(
         `SELECT outbox_id FROM outbox
           WHERE workspace_id = $1 AND pool_id = $2
             AND published_at IS NULL AND dead_lettered_at IS NULL AND quarantined_at IS NULL
-            AND (leased_until IS NULL OR leased_until <= $3)
+            AND attempts < max_attempts
+            AND (leased_until IS NULL OR leased_until <= now())
           ORDER BY created_at, outbox_id
           LIMIT 1
           FOR UPDATE SKIP LOCKED`,
-        [input.workspaceId, input.poolId, input.now],
+        [input.workspaceId, input.poolId],
       );
       const row = candidate.rows[0];
       if (row === undefined) return null;
-      const leasedUntil = new Date(input.now.getTime() + input.leaseMs);
+
       const claimed = await client.query<{ kind: string; payload: unknown; attempts: number }>(
-        `UPDATE outbox SET leased_by = $4, leased_until = $5, attempts = attempts + 1
-          WHERE workspace_id = $1 AND pool_id = $2 AND outbox_id = $3
+        `UPDATE outbox
+            SET leased_by = $3, leased_until = now() + ($5::bigint * interval '1 millisecond'),
+                attempts = attempts + 1
+          WHERE workspace_id = $1 AND pool_id = $2 AND outbox_id = $4
           RETURNING kind, payload, attempts`,
-        [input.workspaceId, input.poolId, row.outbox_id, input.consumerId, leasedUntil],
+        [input.workspaceId, input.poolId, input.consumerId, row.outbox_id, input.leaseMs],
       );
       const message = claimed.rows[0];
       if (message === undefined) return null;
@@ -99,37 +123,41 @@ export class OutboxRepository {
     });
   }
 
-  /** Only the consumer holding a live lease may acknowledge. A stale holder is refused. */
+  /** Only the consumer holding a live lease may acknowledge. */
   async acknowledge(input: {
     readonly workspaceId: string;
     readonly poolId: string;
     readonly outboxId: string;
     readonly consumerId: string;
-    readonly now: Date;
   }): Promise<AcknowledgeOutcome> {
     const updated = await this.pool.query(
-      `UPDATE outbox SET published_at = $5, leased_by = NULL, leased_until = NULL
+      `UPDATE outbox SET published_at = now(), leased_by = NULL, leased_until = NULL
         WHERE workspace_id = $1 AND pool_id = $2 AND outbox_id = $3
-          AND leased_by = $4 AND leased_until > $5 AND published_at IS NULL`,
-      [input.workspaceId, input.poolId, input.outboxId, input.consumerId, input.now],
+          AND leased_by = $4 AND leased_until > now() AND published_at IS NULL`,
+      [input.workspaceId, input.poolId, input.outboxId, input.consumerId],
     );
     return updated.rowCount === 1 ? { ok: true } : { ok: false, reason: 'NOT_HELD' };
   }
 
-  /** Release the message for another attempt, or dead-letter it when the bound is reached. */
+  /**
+   * Release the message for another attempt, or dead-letter it when the bound is reached.
+   *
+   * Refused for a holder whose lease has lapsed, exactly as `acknowledge` refuses one: a
+   * resumed consumer must not disturb the lease another consumer now holds.
+   */
   fail(input: {
     readonly workspaceId: string;
     readonly poolId: string;
     readonly outboxId: string;
     readonly consumerId: string;
     readonly reason: string;
-    readonly now: Date;
   }): Promise<FailOutcome> {
     return transactional(this.pool, async (client): Promise<FailOutcome> => {
       const held = await client.query<{ attempts: number; max_attempts: number }>(
         `SELECT attempts, max_attempts FROM outbox
           WHERE workspace_id = $1 AND pool_id = $2 AND outbox_id = $3
-            AND leased_by = $4 AND published_at IS NULL AND dead_lettered_at IS NULL
+            AND leased_by = $4 AND leased_until > now()
+            AND published_at IS NULL AND dead_lettered_at IS NULL
           FOR UPDATE`,
         [input.workspaceId, input.poolId, input.outboxId, input.consumerId],
       );
@@ -137,9 +165,9 @@ export class OutboxRepository {
       if (row === undefined) return { kind: 'not-held' };
       if (row.attempts >= row.max_attempts) {
         await client.query(
-          `UPDATE outbox SET dead_lettered_at = $4, dead_letter_reason = $5, leased_by = NULL, leased_until = NULL
+          `UPDATE outbox SET dead_lettered_at = now(), dead_letter_reason = $4, leased_by = NULL, leased_until = NULL
             WHERE workspace_id = $1 AND pool_id = $2 AND outbox_id = $3`,
-          [input.workspaceId, input.poolId, input.outboxId, input.now, input.reason],
+          [input.workspaceId, input.poolId, input.outboxId, input.reason],
         );
         return { kind: 'dead-lettered' };
       }
