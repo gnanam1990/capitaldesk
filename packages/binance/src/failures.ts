@@ -165,19 +165,25 @@ export function unavailable(
   cause: string,
   status: number | null = null,
 ): ReadFailure {
-  return new ReadFailure('SOURCE_UNAVAILABLE', `${endpoint} could not be read: ${cause}`, {
+  // Redacted before it reaches the message, not only the detail. An unhandled rejection prints
+  // `Error.message`, and a transport error routinely quotes the URL it failed on — signed
+  // query string and all.
+  const safe = redactText(cause, []);
+  return new ReadFailure('SOURCE_UNAVAILABLE', `${endpoint} could not be read: ${safe}`, {
     endpoint,
     status,
-    detail: { cause: redactText(cause, []) },
+    detail: { cause: safe },
   });
 }
 
 /** The response did not decode against the narrow schema. */
 export function schemaUnrecognized(endpoint: ReadEndpointName, what: string): ReadFailure {
+  // Same reasoning as `unavailable`: a decoder message can quote the value it choked on.
+  const safe = redactText(what, []);
   return new ReadFailure(
     'SOURCE_SCHEMA_UNRECOGNIZED',
-    `${endpoint} returned a shape this build does not recognise: ${what}`,
-    { endpoint, detail: { what: redactText(what, []) } },
+    `${endpoint} returned a shape this build does not recognise: ${safe}`,
+    { endpoint, detail: { what: safe } },
   );
 }
 

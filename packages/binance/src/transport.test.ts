@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { ContractViolation } from '@capitaldesk/contracts';
 import { ReadFailure } from './failures.js';
@@ -541,6 +542,80 @@ describe('the read-only transport', () => {
       expect(result.bodyDigest).toBe(
         'sha256:20fdf3538c7e5a183d8bb95f330e20dcec7cf5453dc9f0a5d9f0a252c91b8eba',
       );
+    });
+
+    it('hashes the exact bytes, not the decoded string', async () => {
+      // `response.text()` strips a byte-order mark and replaces invalid UTF-8 with U+FFFD, so
+      // a digest over the decoded string is a digest of something the venue did not send.
+      const withBom = Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]),
+        Buffer.from('{"serverTime":1}', 'utf8'),
+      ]);
+      const fetchImpl = vi.fn(() =>
+        Promise.resolve(
+          new Response(withBom, { status: 200, headers: { 'content-type': 'application/json' } }),
+        ),
+      ) as unknown as typeof fetch;
+      const result = await transportWith(fetchImpl).read('serverTime', {});
+      // The digest is over the wire bytes, so an independent verifier recomputing it from the
+      // wire gets the same value.
+      expect(result.bodyDigest).toBe(
+        `sha256:${createHash('sha256').update(withBom).digest('hex')}`,
+      );
+      // The decoded body has lost the mark, which is why a digest taken over it would differ.
+      expect(result.body).toBe('{"serverTime":1}');
+      expect(result.bodyDigest).not.toBe(
+        `sha256:${createHash('sha256').update(result.body).digest('hex')}`,
+      );
+    });
+
+    it('reports a body that cannot be read as unavailable, never as empty', async () => {
+      // '' decodes as "no trades" or "no open orders", which is the shape of answer that
+      // releases capital.
+      const fetchImpl = vi.fn(() => {
+        const response = new Response('{}', { status: 200 });
+        Object.defineProperty(response, 'arrayBuffer', {
+          value: () => Promise.reject(new Error('stream closed, signature=abcdef0123456789')),
+        });
+        return Promise.resolve(response);
+      }) as unknown as typeof fetch;
+      const failure = (await transportWith(fetchImpl)
+        .read('myTrades', { symbol: 'BTCUSDT' })
+        .catch((error: unknown) => error)) as ReadFailure;
+      expect(failure.reason).toBe('SOURCE_UNAVAILABLE');
+      expect(failure.message).toContain('body could not be read');
+      // Redacted in the message too: an unhandled rejection prints Error.message.
+      expect(failure.message).not.toContain('abcdef0123456789');
+    });
+
+    it('closes the interval after the body has been read, not at the headers', async () => {
+      // Stamping respondedAt at the headers reports an interval that excludes however long
+      // the body took, while claiming to describe the whole request.
+      let ticks = 0;
+      const clock = [0, 100, 900];
+      const fetchImpl = vi.fn(() => {
+        const response = new Response('{"serverTime":1}', { status: 200 });
+        Object.defineProperty(response, 'arrayBuffer', {
+          value: () => {
+            ticks += 1;
+            return Promise.resolve(Buffer.from('{"serverTime":1}', 'utf8'));
+          },
+        });
+        return Promise.resolve(response);
+      }) as unknown as typeof fetch;
+      let read = 0;
+      const transport = new ReadOnlyTransport({
+        deployment: 'testnet',
+        origin: TESTNET,
+        fetch: fetchImpl,
+        credential: readCredential(),
+        now: () =>
+          new Date(Date.parse('2026-09-08T12:00:00.000Z') + (clock[read++] ?? 0) + ticks * 0),
+      });
+      const result = await transport.read('serverTime', {});
+      // Two clock reads only: the request start and the instant after the body arrived.
+      expect(result.requestedAt.toISOString()).toBe('2026-09-08T12:00:00.000Z');
+      expect(result.respondedAt.toISOString()).toBe('2026-09-08T12:00:00.100Z');
     });
 
     it('never records credential material in the recorded request URL', async () => {

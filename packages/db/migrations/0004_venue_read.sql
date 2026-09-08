@@ -9,6 +9,26 @@
 -- does not corrupt anything, but it makes the affected window UNSUPPORTED, which stops
 -- dispatch — so the cursor is durable state, not a cache.
 
+-- Read state belongs to an open epoch.
+--
+-- A closed epoch is one a reset invalidated. Advancing its cursor or filing a snapshot under
+-- it would attribute post-reset evidence to the account that existed before, which is the
+-- crossing epochs exist to prevent.
+CREATE OR REPLACE FUNCTION refuse_closed_epoch_read_state() RETURNS trigger AS $$
+DECLARE
+  closed TIMESTAMPTZ;
+BEGIN
+  SELECT closed_at INTO closed FROM baseline_epochs
+    WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id AND epoch = NEW.epoch;
+  IF closed IS NOT NULL THEN
+    RAISE EXCEPTION 'epoch % of pool % was closed at %; read state cannot be written to it',
+      NEW.epoch, NEW.pool_id, closed
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Per-symbol trade cursors.
 --
 -- Per symbol because `myTrades` requires a symbol and its ids are per-symbol: there is no
@@ -40,6 +60,18 @@ CREATE TABLE venue_trade_cursors (
   -- text must have exactly one spelling.
   CONSTRAINT venue_trade_cursors_from_shape CHECK (next_from_id ~ '^(0|[1-9][0-9]*)$'),
   CONSTRAINT venue_trade_cursors_highest_shape CHECK (highest_trade_id ~ '^(0|[1-9][0-9]*)$'),
+  -- Bounded to the atom magnitude this system supports. An unbounded digit string flows
+  -- through the ::NUMERIC comparison in the forward-only trigger, where an absurd value is a
+  -- performance and correctness hazard rather than a cursor.
+  CONSTRAINT venue_trade_cursors_from_bounded CHECK (length(next_from_id) <= 78),
+  CONSTRAINT venue_trade_cursors_highest_bounded CHECK (length(highest_trade_id) <= 78),
+  -- `fromId` is inclusive, so the next request must start exactly one past the highest id
+  -- actually observed. Any other pair either re-reads a booked trade or skips one, and both
+  -- read as a legitimate cursor afterwards.
+  CONSTRAINT venue_trade_cursors_next_is_one_past_highest
+    CHECK (next_from_id::NUMERIC = highest_trade_id::NUMERIC + 1),
+  CONSTRAINT venue_trade_cursors_digest_shape
+    CHECK (advanced_by_digest ~ '^sha256:[0-9a-f]{64}$'),
   CONSTRAINT venue_trade_cursors_version_positive CHECK (version >= 1)
 );
 
@@ -50,8 +82,11 @@ CREATE TABLE venue_trade_cursors (
 -- discarded. Compared numerically, because '9' sorts after '10' as text.
 CREATE OR REPLACE FUNCTION refuse_cursor_rollback() RETURNS trigger AS $$
 BEGIN
-  IF NEW.next_from_id::NUMERIC < OLD.next_from_id::NUMERIC THEN
-    RAISE EXCEPTION 'trade cursor for % cannot move backwards from % to %',
+  -- Strictly forward. An equal cursor that rewrote the digest, the highest id and the version
+  -- recorded a new advance for a position that had not moved, so the evidence trail said a
+  -- page was read when none was.
+  IF NEW.next_from_id::NUMERIC <= OLD.next_from_id::NUMERIC THEN
+    RAISE EXCEPTION 'trade cursor for % cannot move from % to %',
       OLD.symbol, OLD.next_from_id, NEW.next_from_id
       USING ERRCODE = 'restrict_violation';
   END IF;
@@ -66,6 +101,10 @@ CREATE TRIGGER venue_trade_cursors_move_forward_only
 CREATE TRIGGER venue_trade_cursors_are_never_deleted
   BEFORE DELETE ON venue_trade_cursors
   FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+CREATE TRIGGER venue_trade_cursors_require_an_open_epoch
+  BEFORE INSERT OR UPDATE ON venue_trade_cursors
+  FOR EACH ROW EXECUTE FUNCTION refuse_closed_epoch_read_state();
 
 -- Account snapshots: the brackets of a cut.
 --
@@ -102,6 +141,38 @@ CREATE TABLE venue_account_snapshots (
   -- An interval that runs backwards is not a measurement, it is a fault.
   CONSTRAINT venue_account_snapshots_interval_ordered CHECK (responded_at >= requested_at)
 );
+
+-- A snapshot belongs to the account its pool governs.
+--
+-- Without this the column accepted any string, so a snapshot read from one account could be
+-- filed against a pool governing another — which is the bracket a cut is later reconciled
+-- against.
+CREATE OR REPLACE FUNCTION refuse_foreign_account_snapshot() RETURNS trigger AS $$
+DECLARE
+  governed TEXT;
+BEGIN
+  SELECT stable_account_id INTO governed FROM pools
+    WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id;
+  IF governed IS NULL THEN
+    RAISE EXCEPTION 'snapshot % names no known pool', NEW.snapshot_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF governed <> NEW.stable_account_id THEN
+    RAISE EXCEPTION 'snapshot % is for account % but the pool governs %',
+      NEW.snapshot_id, NEW.stable_account_id, governed
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER venue_account_snapshots_match_the_pool_account
+  BEFORE INSERT ON venue_account_snapshots
+  FOR EACH ROW EXECUTE FUNCTION refuse_foreign_account_snapshot();
+
+CREATE TRIGGER venue_account_snapshots_require_an_open_epoch
+  BEFORE INSERT ON venue_account_snapshots
+  FOR EACH ROW EXECUTE FUNCTION refuse_closed_epoch_read_state();
 
 CREATE TRIGGER venue_account_snapshots_are_append_only
   BEFORE UPDATE OR DELETE ON venue_account_snapshots
@@ -160,3 +231,7 @@ CREATE TABLE venue_observation_cuts (
 CREATE TRIGGER venue_observation_cuts_are_append_only
   BEFORE UPDATE OR DELETE ON venue_observation_cuts
   FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+CREATE TRIGGER venue_observation_cuts_require_an_open_epoch
+  BEFORE INSERT ON venue_observation_cuts
+  FOR EACH ROW EXECUTE FUNCTION refuse_closed_epoch_read_state();

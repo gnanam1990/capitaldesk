@@ -4,12 +4,12 @@ import path from 'node:path';
 import { Client, Pool } from 'pg';
 import { BinanceSpotReader, ReadOnlyTransport, readOrigin } from '@capitaldesk/binance';
 import { VenueReadRepository, loadMigrations, migrate } from '@capitaldesk/db';
-import { catchUp, type SessionEvidence } from './ingest.js';
+import { catchUp, type BookedEffects, type SessionEvidence } from './ingest.js';
 
 const DATABASE_URL = process.env['CAPITALDESK_TEST_DATABASE_URL'];
 const WORKSPACE = 'ws-ingest';
 const POOL_ID = 'pool-1';
-const ACCOUNT_KEY = { venue: 'binance-spot', environment: 'local', stableAccountId: 'acct-1' };
+const ACCOUNT_KEY = { venue: 'binance-spot', environment: 'local', stableAccountId: '354937868' };
 
 /**
  * A schema for this suite, migrated from the shipped files.
@@ -199,6 +199,7 @@ describeIfDatabase('worker ingest catch-up', () => {
     let tick = 0;
     return {
       reader: new BinanceSpotReader({
+        deployment: 'testnet',
         transport: new ReadOnlyTransport({
           deployment: 'testnet',
           origin: TESTNET,
@@ -224,6 +225,7 @@ describeIfDatabase('worker ingest catch-up', () => {
     built: { reader: BinanceSpotReader },
     session: SessionEvidence = FULLY_OBSERVABLE,
     known: ReadonlySet<string> = new Set(),
+    bookedEffects: BookedEffects = {},
   ): ReturnType<typeof catchUp> {
     return catchUp({
       scope: {
@@ -238,6 +240,7 @@ describeIfDatabase('worker ingest catch-up', () => {
       repository,
       session,
       knownClientOrderIds: known,
+      bookedEffects,
       cutId: 'cut-1',
     });
   }
@@ -386,6 +389,7 @@ describeIfDatabase('worker ingest catch-up', () => {
         repository,
         session: FULLY_OBSERVABLE,
         knownClientOrderIds: new Set(),
+        bookedEffects: {},
         maxPagesPerSymbol: 2,
         cutId: 'cut-bounded',
       });
@@ -465,6 +469,7 @@ describeIfDatabase('worker ingest catch-up', () => {
         repository,
         session: FULLY_OBSERVABLE,
         knownClientOrderIds: new Set(),
+        bookedEffects: {},
         cutId: 'cut-empty',
       }),
     ).rejects.toThrow(/observed symbol set/);
@@ -485,14 +490,125 @@ describeIfDatabase('worker ingest catch-up', () => {
         repository,
         session: FULLY_OBSERVABLE,
         knownClientOrderIds: new Set(),
+        bookedEffects: {},
         cutId: 'cut-unscaled',
       }),
     ).rejects.toThrow(/ETHUSDT/);
   });
 
-  it('records the cut and its brackets durably, with the verdict and reasons', async () => {
-    const result = await run(
-      reader({
+  /**
+   * ADR-0002 condition C4, actually evaluated.
+   *
+   * The earlier version set this condition from filter drift alone, so a changed balance with
+   * no matching booked effect reported COMPLETE. These cases pin the comparison itself.
+   */
+  describe('bracketing balances against booked effects', () => {
+    function accountWith(free: string): unknown {
+      return {
+        ...ACCOUNT,
+        balances: [{ asset: 'USDT', free, locked: '0.00000000' }],
+      };
+    }
+
+    it('reports COMPLETE when the observed movement equals what the journal booked', async () => {
+      const built = reader({
+        account: (call) =>
+          call === 0 ? accountWith('1000.00000000') : accountWith('985.00000000'),
+      });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), { USDT: -1_500_000_000n });
+      expect(result.balanceDiscrepancies).toEqual([]);
+      expect(result.assessment.state).toBe('COMPLETE');
+    });
+
+    it('reports a zero delta against a zero booking as agreeing', async () => {
+      const built = reader({ account: () => accountWith('1000.00000000') });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), {});
+      expect(result.balanceDiscrepancies).toEqual([]);
+      expect(result.assessment.state).toBe('COMPLETE');
+    });
+
+    it('detects an unexplained increase', async () => {
+      const built = reader({
+        account: (call) =>
+          call === 0 ? accountWith('1000.00000000') : accountWith('1100.00000000'),
+      });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), {});
+      expect(result.balanceDiscrepancies).toEqual([
+        { asset: 'USDT', observedDelta: 10_000_000_000n, bookedDelta: 0n },
+      ]);
+      expect(result.assessment.state).not.toBe('COMPLETE');
+      expect(result.assessment.unmet).toContain(
+        'bracketing balance snapshots disagree with booked effects',
+      );
+    });
+
+    it('detects an unexplained decrease', async () => {
+      const built = reader({
+        account: (call) =>
+          call === 0 ? accountWith('1000.00000000') : accountWith('900.00000000'),
+      });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), {});
+      expect(result.balanceDiscrepancies[0]?.observedDelta).toBe(-10_000_000_000n);
+      expect(result.assessment.state).not.toBe('COMPLETE');
+    });
+
+    it('detects a booked effect with no matching observed movement', async () => {
+      // The other direction: the journal says capital moved and the account disagrees.
+      const built = reader({ account: () => accountWith('1000.00000000') });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), { USDT: -1_500_000_000n });
+      expect(result.balanceDiscrepancies).toEqual([
+        { asset: 'USDT', observedDelta: 0n, bookedDelta: -1_500_000_000n },
+      ]);
+      expect(result.assessment.state).not.toBe('COMPLETE');
+    });
+
+    it('detects an asset that appears only in the closing bracket', async () => {
+      // Comparing only assets present in both brackets is how a newly appearing balance goes
+      // unnoticed.
+      const built = reader({
+        account: (call) =>
+          call === 0
+            ? { ...ACCOUNT, balances: [] }
+            : { ...ACCOUNT, balances: [{ asset: 'BTC', free: '0.50000000', locked: '0' }] },
+      });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), {});
+      expect(result.balanceDiscrepancies).toEqual([
+        { asset: 'BTC', observedDelta: 50_000_000n, bookedDelta: 0n },
+      ]);
+    });
+
+    it('detects an asset that vanishes between the brackets', async () => {
+      const built = reader({
+        account: (call) =>
+          call === 0
+            ? { ...ACCOUNT, balances: [{ asset: 'BTC', free: '0.50000000', locked: '0' }] }
+            : { ...ACCOUNT, balances: [] },
+      });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), {});
+      expect(result.balanceDiscrepancies).toEqual([
+        { asset: 'BTC', observedDelta: -50_000_000n, bookedDelta: 0n },
+      ]);
+    });
+
+    it('treats a move between free and locked as no change in what is held', async () => {
+      const built = reader({
+        account: (call) =>
+          call === 0
+            ? { ...ACCOUNT, balances: [{ asset: 'USDT', free: '1000.00000000', locked: '0' }] }
+            : {
+                ...ACCOUNT,
+                balances: [{ asset: 'USDT', free: '900.00000000', locked: '100.00000000' }],
+              },
+      });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), {});
+      expect(result.balanceDiscrepancies).toEqual([]);
+    });
+
+    it('does not let equal balances establish any other condition', async () => {
+      // C4 is necessary and never sufficient. Equal brackets with an unknown resting order is
+      // still not a complete window.
+      const built = reader({
+        account: () => accountWith('1000.00000000'),
         openOrders: () => [
           {
             symbol: 'ETHUSDT',
@@ -502,50 +618,97 @@ describeIfDatabase('worker ingest catch-up', () => {
             updateTime: 1,
           },
         ],
-      }),
-    );
-    for (const [id, snapshot] of [
-      ['snap-open', result.opening],
-      ['snap-close', result.closing],
-    ] as const) {
-      await repository.recordSnapshot({
+      });
+      const result = await run(built, FULLY_OBSERVABLE, new Set(), {});
+      expect(result.balanceDiscrepancies).toEqual([]);
+      expect(result.assessment.state).not.toBe('COMPLETE');
+      expect(result.assessment.unmet).toContain(
+        'account-wide open-order scan found an order unknown to the journal',
+      );
+    });
+  });
+
+  describe('durability', () => {
+    it('persists both brackets and the assessed cut itself', async () => {
+      // Previously the test recorded these by hand after catchUp returned, so it proved the
+      // repository worked rather than that catchUp used it.
+      const result = await run(
+        reader({
+          openOrders: () => [
+            {
+              symbol: 'ETHUSDT',
+              orderId: 7,
+              clientOrderId: 'not-ours',
+              status: 'NEW',
+              updateTime: 1,
+            },
+          ],
+        }),
+      );
+
+      const cuts = await harness.admin.query<{
+        cut_id: string;
+        coverage_state: string;
+        unmet: string[];
+        opening_snapshot_id: string;
+        closing_snapshot_id: string;
+      }>(
+        'SELECT cut_id, coverage_state, unmet, opening_snapshot_id, closing_snapshot_id FROM venue_observation_cuts',
+      );
+      expect(cuts.rows[0]?.cut_id).toBe('cut-1');
+      expect(cuts.rows[0]?.coverage_state).toBe(result.assessment.state);
+      expect(cuts.rows[0]?.unmet).toEqual([...result.assessment.unmet]);
+      expect(cuts.rows[0]?.opening_snapshot_id).toBe('cut-1-open');
+
+      const snapshots = await harness.admin.query<{ snapshot_id: string; response_digest: string }>(
+        'SELECT snapshot_id, response_digest FROM venue_account_snapshots ORDER BY snapshot_id',
+      );
+      expect(snapshots.rows.map((row) => row.snapshot_id)).toEqual(['cut-1-close', 'cut-1-open']);
+      expect(snapshots.rows[1]?.response_digest).toBe(result.opening.provenance.responseDigest);
+    });
+
+    it('records the page evidence in the same transaction as the cursor', async () => {
+      // Advancing separately loses history silently: the cursor moves, the process dies before
+      // the trades are durable, and the next run resumes past a page nothing recorded.
+      const pages: Record<string, unknown[]> = {
+        null: Array.from({ length: 1000 }, (_unused, index) => trade(index + 1)),
+        '1001': [trade(1001)],
+      };
+      await run(reader({ myTrades: (fromId) => pages[String(fromId)] ?? [] }));
+
+      const observations = await harness.admin.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM raw_observations WHERE kind = 'venue_trade'`,
+      );
+      expect(observations.rows[0]?.count).toBe('1001');
+      const cursor = await repository.cursor({
         workspaceId: WORKSPACE,
         poolId: POOL_ID,
         epoch: 1,
-        snapshotId: id,
-        stableAccountId: snapshot.value.stableAccountId,
-        requestedAt: snapshot.provenance.requestedAt,
-        respondedAt: snapshot.provenance.respondedAt,
-        sourceTime: snapshot.provenance.sourceTime,
-        responseDigest: snapshot.provenance.responseDigest,
-        balances: snapshot.value.balances.map((balance) => ({
-          asset: balance.asset,
-          freeAtoms: balance.freeAtoms.toString(),
-          lockedAtoms: balance.lockedAtoms.toString(),
-        })),
+        symbol: 'BTCUSDT',
       });
-    }
-    await repository.recordCut({
-      workspaceId: WORKSPACE,
-      poolId: POOL_ID,
-      epoch: 1,
-      cutId: result.cutId,
-      windowFrom: result.opening.provenance.requestedAt,
-      windowTo: result.closing.provenance.respondedAt,
-      openingSnapshotId: 'snap-open',
-      closingSnapshotId: 'snap-close',
-      coverageState: result.assessment.state,
-      detectionScope: result.assessment.detectionScope,
-      unmet: result.assessment.unmet,
-      observedSymbols: ['BTCUSDT'],
+      expect(cursor?.nextFromId).toBe('1001');
     });
 
-    const stored = await harness.admin.query<{ coverage_state: string; unmet: string[] }>(
-      'SELECT coverage_state, unmet FROM venue_observation_cuts',
-    );
-    expect(stored.rows[0]?.coverage_state).toBe('INCOMPLETE');
-    expect(stored.rows[0]?.unmet).toContain(
-      'account-wide open-order scan found an order unknown to the journal',
-    );
+    it('leaves no cursor advance behind when the page evidence cannot be written', async () => {
+      // The rollback direction: a duplicate observation id is refused, and the cursor that
+      // would have moved with it does not.
+      const built = reader({
+        myTrades: () => Array.from({ length: 1000 }, (_unused, index) => trade(index + 1)),
+      });
+      await harness.admin.query(
+        `INSERT INTO raw_observations
+           (workspace_id, pool_id, epoch, observation_id, source, kind, source_ref, payload, payload_digest)
+         VALUES ($1, $2, 1, 'trade-BTCUSDT-1', 'operator', 'venue_trade', 'conflicting', '{}'::jsonb, 'd')`,
+        [WORKSPACE, POOL_ID],
+      );
+      await expect(run(built)).rejects.toBeTruthy();
+      const cursor = await repository.cursor({
+        workspaceId: WORKSPACE,
+        poolId: POOL_ID,
+        epoch: 1,
+        symbol: 'BTCUSDT',
+      });
+      expect(cursor).toBeNull();
+    });
   });
 });

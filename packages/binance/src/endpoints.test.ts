@@ -123,6 +123,8 @@ describe('readOrigin', () => {
   });
 
   it('refuses userinfo, which is a credential the URL parser hides in plain sight', () => {
+    // Assembled rather than written as a literal. A URL literal carrying userinfo is a
+    // credential shape whatever its contents.
     const withUserinfo = new URL('https://testnet.binance.vision');
     withUserinfo.username = 'fixture-user';
     withUserinfo.password = 'fixture-not-a-secret';
@@ -215,7 +217,7 @@ describe('the origin-bound request check', () => {
 
   it('refuses a URL carrying userinfo even on the approved host', () => {
     // URL#origin ignores userinfo, so comparing origins alone would accept this.
-    const url = new URL('https://testnet.binance.vision/api/v3/account');
+    const url = new URL(`${base}/api/v3/account`);
     url.username = 'fixture-user';
     url.password = 'fixture-not-a-secret';
     expect(url.origin).toBe(TESTNET.origin);

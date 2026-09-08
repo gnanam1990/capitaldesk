@@ -1,6 +1,13 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { VenueReadRepository } from './venue-read.js';
-import { DATABASE_URL, JournalHarness, POOL, WORKSPACE, sqlRefusal } from './test-harness.js';
+import {
+  ACCOUNT,
+  DATABASE_URL,
+  JournalHarness,
+  POOL,
+  WORKSPACE,
+  sqlRefusal,
+} from './test-harness.js';
 
 /**
  * Durable read state, against real PostgreSQL (module 05).
@@ -105,7 +112,9 @@ describeIfDatabase('venue read state', () => {
       ).toMatchObject({ ok: true });
     });
 
-    it('accepts an advance to the same position, which a repeated empty page produces', async () => {
+    it('refuses an advance to the same position, which records a page that was not read', async () => {
+      // An equal cursor rewrote the digest, the highest id and the version, so the evidence
+      // trail claimed a page had been read when the position had not moved.
       await repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
       expect(
         await repository.advance(SCOPE, {
@@ -113,14 +122,108 @@ describeIfDatabase('venue read state', () => {
           highestTradeId: '12',
           digest: DIGEST,
         }),
-      ).toMatchObject({ ok: true });
+      ).toEqual({ ok: false, reason: 'CURSOR_NOT_ADVANCING', stored: '13', proposed: '13' });
+      const stored = await repository.cursor(SCOPE);
+      expect(stored?.version).toBe(1);
+    });
+
+    it('refuses an equal advance at the table as well', async () => {
+      await repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST });
+      let refusal = { state: 'accepted', constraint: 'accepted' };
+      try {
+        await harness.admin.query(`UPDATE venue_trade_cursors SET advanced_by_digest = $1`, [
+          `sha256:${'c'.repeat(64)}`,
+        ]);
+      } catch (error) {
+        refusal = sqlRefusal(error);
+      }
+      expect(refusal.state).toBe('23001');
+    });
+
+    it('requires the cursor to be exactly one past the highest observed id', async () => {
+      // fromId is inclusive. Any other pair either re-reads a booked trade or skips one, and
+      // both look like a legitimate cursor afterwards.
+      for (const pair of [
+        { nextFromId: '13', highestTradeId: '11' },
+        { nextFromId: '13', highestTradeId: '13' },
+        { nextFromId: '13', highestTradeId: '20' },
+      ]) {
+        await expect(
+          repository.advance(SCOPE, { ...pair, digest: DIGEST }),
+          JSON.stringify(pair),
+        ).rejects.toThrow(/one past/);
+      }
+      // The positive control.
+      await expect(
+        repository.advance(SCOPE, { nextFromId: '13', highestTradeId: '12', digest: DIGEST }),
+      ).resolves.toMatchObject({ ok: true });
+    });
+
+    it('enforces the +1 invariant at the table too', async () => {
+      let refusal = { state: 'accepted', constraint: 'accepted' };
+      try {
+        await harness.admin.query(
+          `INSERT INTO venue_trade_cursors
+             (workspace_id, pool_id, epoch, symbol, next_from_id, highest_trade_id, advanced_by_digest)
+           VALUES ($1, $2, 1, 'BTCUSDT', '13', '11', $3)`,
+          [WORKSPACE, POOL, DIGEST],
+        );
+      } catch (error) {
+        refusal = sqlRefusal(error);
+      }
+      expect(refusal.constraint).toBe('venue_trade_cursors_next_is_one_past_highest');
+    });
+
+    it('refuses a digest that is not a sha256 reference, in both layers', async () => {
+      await expect(
+        repository.advance(SCOPE, {
+          nextFromId: '13',
+          highestTradeId: '12',
+          digest: 'trust me',
+        }),
+      ).rejects.toThrow(/sha256/);
+      let refusal = { state: 'accepted', constraint: 'accepted' };
+      try {
+        await harness.admin.query(
+          `INSERT INTO venue_trade_cursors
+             (workspace_id, pool_id, epoch, symbol, next_from_id, highest_trade_id, advanced_by_digest)
+           VALUES ($1, $2, 1, 'BTCUSDT', '13', '12', 'trust me')`,
+          [WORKSPACE, POOL],
+        );
+      } catch (error) {
+        refusal = sqlRefusal(error);
+      }
+      expect(refusal.constraint).toBe('venue_trade_cursors_digest_shape');
+    });
+
+    it('bounds a cursor to the atom magnitude this system supports', async () => {
+      // An unbounded digit string flows through the ::NUMERIC comparison in the forward-only
+      // trigger, where an absurd value is a hazard rather than a cursor.
+      const tooLong = '1'.repeat(79);
+      await expect(
+        repository.advance(SCOPE, {
+          nextFromId: tooLong,
+          highestTradeId: '1'.repeat(78),
+          digest: DIGEST,
+        }),
+      ).rejects.toThrow(/78-digit/);
+      // The positive control: exactly at the bound is accepted.
+      const atBound = '9'.repeat(77);
+      await expect(
+        repository.advance(SCOPE, {
+          nextFromId: (BigInt(atBound) + 1n).toString(),
+          highestTradeId: atBound,
+          digest: DIGEST,
+        }),
+      ).resolves.toMatchObject({ ok: true });
     });
 
     it('carries a cursor far beyond the safe integer range', async () => {
-      const huge = '90071992547409931234567890';
+      const highest = '90071992547409931234567889';
+      const huge = (BigInt(highest) + 1n).toString();
       await repository.advance(SCOPE, {
         nextFromId: huge,
-        highestTradeId: '90071992547409931234567889',
+        highestTradeId: highest,
         digest: DIGEST,
       });
       expect(await repository.cursor(SCOPE)).toMatchObject({ nextFromId: huge });
@@ -210,7 +313,7 @@ describeIfDatabase('venue read state', () => {
         poolId: POOL,
         epoch: 1,
         snapshotId: id,
-        stableAccountId: '354937868',
+        stableAccountId: ACCOUNT.stableAccountId,
         requestedAt: '2026-09-08T12:00:00.000Z',
         respondedAt: '2026-09-08T12:00:00.100Z',
         sourceTime: '2026-09-08T11:59:59.000Z',
@@ -224,7 +327,7 @@ describeIfDatabase('venue read state', () => {
       const stored = await harness.admin.query<{ stable_account_id: string; balances: unknown }>(
         'SELECT stable_account_id, balances FROM venue_account_snapshots',
       );
-      expect(stored.rows[0]?.stable_account_id).toBe('354937868');
+      expect(stored.rows[0]?.stable_account_id).toBe(ACCOUNT.stableAccountId);
       expect(stored.rows[0]?.balances).toEqual([
         { asset: 'USDT', freeAtoms: '100', lockedAtoms: '0' },
       ]);
@@ -238,7 +341,7 @@ describeIfDatabase('venue read state', () => {
           poolId: POOL,
           epoch: 1,
           snapshotId: 'snap-bad',
-          stableAccountId: '354937868',
+          stableAccountId: ACCOUNT.stableAccountId,
           requestedAt: '2026-09-08T12:00:00.000Z',
           respondedAt: '2026-09-08T11:59:00.000Z',
           sourceTime: null,
@@ -259,7 +362,7 @@ describeIfDatabase('venue read state', () => {
           poolId: POOL,
           epoch: 1,
           snapshotId: 'snap-bad',
-          stableAccountId: '354937868',
+          stableAccountId: ACCOUNT.stableAccountId,
           requestedAt: '2026-09-08T12:00:00.000Z',
           respondedAt: '2026-09-08T12:00:01.000Z',
           sourceTime: null,
@@ -359,6 +462,107 @@ describeIfDatabase('venue read state', () => {
         'SELECT coverage_state FROM venue_observation_cuts',
       );
       expect(stored.rows[0]?.coverage_state).toBe('UNSUPPORTED');
+    });
+
+    it('refuses a snapshot attributed to an account this pool does not govern', async () => {
+      let refusal = 'accepted';
+      try {
+        await repository.recordSnapshot({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+          snapshotId: 'snap-foreign',
+          stableAccountId: 'some-other-account',
+          requestedAt: '2026-09-08T12:00:00.000Z',
+          respondedAt: '2026-09-08T12:00:01.000Z',
+          sourceTime: null,
+          responseDigest: DIGEST,
+          balances: [],
+        });
+      } catch (error) {
+        refusal = sqlRefusal(error).state;
+      }
+      // Otherwise a reading from one account could be filed as a bracket of another's cut.
+      expect(refusal).toBe('23001');
+    });
+
+    it('refuses read state written to a closed epoch', async () => {
+      // A closed epoch is one a reset invalidated. Writing to it attributes post-reset
+      // evidence to the account that existed before.
+      await harness.admin.query(
+        `UPDATE baseline_epochs SET closed_at = now(), closed_reason = 'reset'
+          WHERE workspace_id = $1 AND pool_id = $2 AND epoch = 1`,
+        [WORKSPACE, POOL],
+      );
+      expect(
+        await repository.advance(SCOPE, {
+          nextFromId: '13',
+          highestTradeId: '12',
+          digest: DIGEST,
+        }),
+      ).toEqual({ ok: false, reason: 'EPOCH_CLOSED' });
+
+      let refusal = 'accepted';
+      try {
+        await snapshot('snap-closed');
+      } catch (error) {
+        refusal = sqlRefusal(error).state;
+      }
+      expect(refusal).toBe('23001');
+    });
+
+    it('writes both brackets and the cut atomically, and rolls all three back on failure', async () => {
+      const assessment = {
+        state: 'COMPLETE',
+        unmet: [] as string[],
+        detectionScope: 'FULL_WITHIN_PROVEN_UNIVERSE',
+      };
+      const bracket = (id: string) => ({
+        snapshotId: id,
+        stableAccountId: ACCOUNT.stableAccountId,
+        requestedAt: '2026-09-08T12:00:00.000Z',
+        respondedAt: '2026-09-08T12:00:01.000Z',
+        sourceTime: null,
+        responseDigest: DIGEST,
+        balances: [{ asset: 'USDT', freeAtoms: '100', lockedAtoms: '0' }],
+      });
+
+      await repository.recordAssessedCut({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        epoch: 1,
+        cutId: 'cut-atomic',
+        opening: bracket('cut-atomic-open'),
+        closing: bracket('cut-atomic-close'),
+        assessment,
+        observedSymbols: ['BTCUSDT'],
+      });
+      expect((await harness.admin.query('SELECT 1 FROM venue_account_snapshots')).rowCount).toBe(2);
+      expect((await harness.admin.query('SELECT 1 FROM venue_observation_cuts')).rowCount).toBe(1);
+
+      // Now a cut the table refuses. Its snapshots must not survive either: a cut with missing
+      // snapshots and snapshots nobody drew a conclusion from are both reachable if the writes
+      // are separate.
+      await expect(
+        repository.recordAssessedCut({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+          cutId: 'cut-rejected',
+          opening: bracket('cut-rejected-open'),
+          closing: bracket('cut-rejected-close'),
+          assessment: { ...assessment, unmet: ['a source observation is outside its class'] },
+          observedSymbols: ['BTCUSDT'],
+        }),
+      ).rejects.toMatchObject({ code: '23514' });
+      expect(
+        (
+          await harness.admin.query(
+            `SELECT 1 FROM venue_account_snapshots WHERE snapshot_id LIKE 'cut-rejected%'`,
+          )
+        ).rowCount,
+      ).toBe(0);
+      expect((await harness.admin.query('SELECT 1 FROM venue_observation_cuts')).rowCount).toBe(1);
     });
 
     it('refuses a cut whose brackets are not snapshots in the same scope', async () => {

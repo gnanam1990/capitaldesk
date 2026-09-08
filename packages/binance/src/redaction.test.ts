@@ -37,8 +37,8 @@ describe('redaction', () => {
 
     it('drops userinfo, which is a credential the URL parser hides in plain sight', () => {
       // Assembled rather than written as a literal. A URL literal carrying userinfo is a
-      // credential shape whatever its contents, and a secret scanner is right to flag one in
-      // a committed file.
+      // credential shape whatever its contents, and a secret scanner is right to flag one in a
+      // committed file.
       const url = new URL('https://testnet.binance.vision/api/v3/time');
       url.username = 'fixture-user';
       url.password = 'fixture-not-a-secret';

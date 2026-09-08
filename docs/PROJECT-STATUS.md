@@ -48,9 +48,9 @@ BLOCKED and is named as such rather than claimed.
 | Redacted logging                         | Implemented                      | `packages/observability`, 8 cases                                              |
 | Migration lifecycle                      | Implemented                      | `packages/db`, 22 integration cases on real PostgreSQL                         |
 | Dependency and credential boundaries     | Enforced by command              | `tools/`, 8 cases, verified to fail on real violations                         |
-| Binance read boundary (module 05)        | Implemented; venue auth BLOCKED  | `packages/binance`, 188 unit cases; `docs/evidence/binance-read-capability.md` |
-| Read cursors, snapshots and cuts         | Implemented                      | `packages/db` migration 0004, 22 integration cases on real PostgreSQL          |
-| Worker ingest catch-up                   | Implemented                      | `apps/worker`, 15 integration cases on real PostgreSQL                         |
+| Binance read boundary (module 05)        | Implemented; venue auth BLOCKED  | `packages/binance`, 204 unit cases; `docs/evidence/binance-read-capability.md` |
+| Read cursors, snapshots and cuts         | Implemented                      | `packages/db` migration 0004, 30 integration cases on real PostgreSQL          |
+| Worker ingest catch-up                   | Implemented                      | `apps/worker`, 26 integration cases on real PostgreSQL                         |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
@@ -80,9 +80,9 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run lint`                               | pass                                                        |
 | `pnpm run check:layering`                     | pass — 10 packages, 62 crossings checked                    |
 | `pnpm run check:secrets`                      | pass — 262 files scanned                                    |
-| `pnpm run test:unit`                          | **701 passed**, 0 skipped, 38 files                         |
+| `pnpm run test:unit`                          | **717 passed**, 0 skipped, 38 files                         |
 | `pnpm run test:property`                      | **13 passed**, seed 20260908                                |
-| `pnpm run test:integration`                   | **298 passed**, 23 files, against PostgreSQL 17.10          |
+| `pnpm run test:integration`                   | **317 passed**, 23 files, against PostgreSQL 17.10          |
 | `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
 | `pnpm run build`                              | pass — all packages and apps                                |
 
@@ -90,13 +90,13 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 
 | Suite       | Count | Where                                                                                                     |
 | ----------- | ----- | --------------------------------------------------------------------------------------------------------- |
-| unit        | 701   | contracts 284, binance 188, web 65, tools 39, api 38, config 35, domain 29, observability 23 (by package) |
+| unit        | 717   | contracts 284, binance 204, web 65, tools 39, api 38, config 35, domain 29, observability 23 (by package) |
 | property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                            |
-| integration | 298   | journal 141, auth 60, migrations 30, worker 21, CLI 20, identity scope 11, API 9, executor 6              |
+| integration | 317   | journal 149, auth 60, worker 32, migrations 30, CLI 20, identity scope 11, API 9, executor 6              |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 91
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), module 04's the 119
-integration cases in [docs/handoffs/04.md](handoffs/04.md), and module 05's the 188 unit and 37
+integration cases in [docs/handoffs/04.md](handoffs/04.md), and module 05's the 204 unit and 56
 integration cases in [docs/handoffs/05.md](handoffs/05.md) — not the workspace figures.
 
 Toolchain: Node 22.23.1, pnpm 11.10.0, TypeScript 5.9.3, Fastify 5.12.3, Next 16.3.4,
@@ -118,6 +118,10 @@ proof**, which is why the code reports execution as unavailable rather than assu
 
 ## Next action
 
-Run the full gate from a fresh checkout of the branch head, push, and open the M1 pull
-request for independent maintainer review. Not merged by the implementer. Modules 05, 06 and
-07 are unblocked by this milestone.
+The M2 pull request is open for independent maintainer review at the head recorded in its
+description. Not merged by the implementer.
+
+Module 05's deterministic and real-PostgreSQL work is complete; its authenticated venue
+boundary stays BLOCKED until a `VENUE_READ` credential exists. Modules 06 and 09 are unblocked
+by the market context and account snapshot this milestone provides. Module 15 remains blocked
+on the same missing credential.

@@ -1,3 +1,4 @@
+import { MAX_ATOMS, MAX_ATOM_DIGITS } from '@capitaldesk/contracts';
 import { z } from 'zod';
 import { schemaUnrecognized } from './failures.js';
 import type { ReadEndpointName } from './endpoints.js';
@@ -105,7 +106,20 @@ export function parseScaledAtoms(value: string, scale: number): bigint {
       `"${value}" carries more precision than the venue's declared scale of ${String(scale)}`,
     );
   }
-  const atoms = BigInt(whole + fraction.padEnd(scale, '0'));
+  const digits = whole + fraction.padEnd(scale, '0');
+  // The magnitude bound the money contract declares, checked on the digit string before
+  // BigInt sees it. `BigInt` itself is unbounded, so a pathological response could otherwise
+  // produce a value no column in this system can hold and no downstream arithmetic expects —
+  // discovered as a numeric overflow deep in the ledger rather than as a bad response here.
+  if (digits.replace(/^0+/, '').length > MAX_ATOM_DIGITS) {
+    throw new RangeError(
+      `"${value}" exceeds the ${String(MAX_ATOM_DIGITS)}-digit atom magnitude this system supports`,
+    );
+  }
+  const atoms = BigInt(digits);
+  if (atoms > MAX_ATOMS) {
+    throw new RangeError(`"${value}" exceeds the maximum atom magnitude`);
+  }
   return negative ? -atoms : atoms;
 }
 
@@ -138,11 +152,19 @@ export function parsePositiveAtoms(value: string, scale: number, what: string): 
  */
 function identityOf(value: unknown, what: string): string {
   if (typeof value === 'string') {
-    if (!/^\d+$/.test(value)) throw new TypeError(`${what} identity "${value}" is not an integer`);
+    // Canonical non-negative digits. A leading zero would give one id two spellings, and a
+    // sign has no meaning in an identity — a negative one compared as a cursor would order
+    // before every real trade.
+    if (!/^(0|[1-9]\d*)$/.test(value)) {
+      throw new TypeError(`${what} identity "${value}" is not a canonical non-negative integer`);
+    }
     return value;
   }
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new TypeError(`${what} identity is not an integer`);
+  }
+  if (value < 0) {
+    throw new RangeError(`${what} identity ${String(value)} is negative`);
   }
   if (!Number.isSafeInteger(value)) {
     throw new RangeError(`${what} identity ${String(value)} is beyond a safe integer`);

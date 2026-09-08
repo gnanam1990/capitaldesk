@@ -173,18 +173,9 @@ export class ReadOnlyTransport {
     } catch (error) {
       throw unavailable(name, redactText(error instanceof Error ? error.message : 'unknown', []));
     }
-    const respondedAt = instantFrom(this.#now(), name, 'the response instant');
-    // A result promises an ordered interval. A clock that moved backwards between the two
-    // reads produces a negative duration, and a negative duration in an evidence record is
-    // worse than no record: it looks like a measurement rather than a fault.
-    if (respondedAt.getTime() < requestedAt.getTime()) {
-      violate('CLOCK_SKEW_UNBOUNDED', 'the clock moved backwards during the request', {
-        endpoint: name,
-      });
-    }
-
     if (response.status >= 300 && response.status < 400) {
-      // Never followed. Where it points is not this reader's business.
+      // Never followed. Where it points is not this reader's business, and its body is not
+      // worth reading.
       throw unavailable(
         name,
         `the venue answered with a redirect (${String(response.status)})`,
@@ -192,12 +183,50 @@ export class ReadOnlyTransport {
       );
     }
 
-    const body = await response.text().catch(() => '');
+    // The body is read before the interval closes. Stamping `respondedAt` at the headers and
+    // then awaiting the body reports an interval that excludes however long the body took —
+    // which is the part that actually varies — while the provenance claims to describe the
+    // whole request.
+    let body: string;
+    let bodyDigest: string;
+    try {
+      // The exact bytes are hashed, then decoded separately. `response.text()` applies UTF-8
+      // decoding first, which silently strips a byte-order mark and replaces invalid sequences
+      // with U+FFFD — so a digest taken over the decoded string is a digest of something the
+      // venue did not send, and an independent verifier recomputing it from the wire would get
+      // a different value.
+      const bytes = Buffer.from(await response.arrayBuffer());
+      bodyDigest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+      body = new TextDecoder().decode(bytes);
+    } catch (error) {
+      // A body that could not be read is an unknown fact, not an empty one. Returning '' made
+      // a truncated response decode as "no trades" or "no open orders", which is the shape of
+      // answer that releases capital.
+      throw unavailable(
+        name,
+        `the response body could not be read: ${redactText(
+          error instanceof Error ? error.message : 'unknown',
+          [],
+        )}`,
+        response.status,
+      );
+    }
+
+    const respondedAt = instantFrom(this.#now(), name, 'the response instant');
+    // A result promises an ordered interval. A clock that moved backwards during the request
+    // produces a negative duration, and a negative duration in an evidence record is worse
+    // than no record: it looks like a measurement rather than a fault.
+    if (respondedAt.getTime() < requestedAt.getTime()) {
+      violate('CLOCK_SKEW_UNBOUNDED', 'the clock moved backwards during the request', {
+        endpoint: name,
+      });
+    }
+
     const result: ReadResult = {
       endpoint: name,
       status: response.status,
       body,
-      bodyDigest: `sha256:${createHash('sha256').update(body).digest('hex')}`,
+      bodyDigest,
       requestedAt,
       respondedAt,
       requestUrl: redactUrl(url),

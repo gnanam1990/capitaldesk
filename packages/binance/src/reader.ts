@@ -1,4 +1,9 @@
-import { violate, type Environment } from '@capitaldesk/contracts';
+import {
+  economicEnvironmentOfDeployment,
+  violate,
+  type DeploymentEnvironment,
+  type Environment,
+} from '@capitaldesk/contracts';
 import {
   decodeAccount,
   decodeExchangeInfo,
@@ -90,6 +95,16 @@ export interface ReaderIdentity {
 export interface ReaderOptions {
   readonly transport: ReadOnlyTransport;
   readonly identity: ReaderIdentity;
+  /**
+   * The deployment the transport was constructed for.
+   *
+   * Required so the two halves of the environment claim are compared rather than assumed. The
+   * reader stamps `identity.environment` onto every observation while the transport decides
+   * which host is contacted from its deployment; nothing previously connected them, so a
+   * `testnet` reader could stamp `production` onto facts read from the testnet host, or the
+   * reverse.
+   */
+  readonly deployment: DeploymentEnvironment;
 }
 
 function provenanceOf(
@@ -134,10 +149,34 @@ export interface TradePage {
 export class BinanceSpotReader {
   readonly #transport: ReadOnlyTransport;
   readonly #identity: ReaderIdentity;
+  /**
+   * The account this reader has actually proven, by reading it.
+   *
+   * Null until `accountSnapshot` succeeds. Every other authenticated read stamps an account id
+   * onto its provenance, and before this existed that id came from configuration rather than
+   * from evidence — so a misconfigured or rotated credential produced order and trade
+   * observations attributed to an account nothing had confirmed.
+   */
+  #provenAccountId: string | null = null;
 
   constructor(options: ReaderOptions) {
+    // The environment is claimed twice — once by this reader, once by the transport's
+    // deployment — and both end up in evidence. Refused at construction, before any request.
+    const implied = economicEnvironmentOfDeployment(options.deployment);
+    if (implied !== options.identity.environment) {
+      violate(
+        'IDENTITY_ENVIRONMENT_MISMATCH',
+        'the reader environment does not match the transport deployment',
+        { readerEnvironment: options.identity.environment, deployment: options.deployment },
+      );
+    }
     this.#transport = options.transport;
     this.#identity = options.identity;
+  }
+
+  /** The account id proven by a successful snapshot in this session, if any. */
+  get provenAccountId(): string | null {
+    return this.#provenAccountId;
   }
 
   /**
@@ -173,6 +212,8 @@ export class BinanceSpotReader {
     const result = await this.#transport.read('account', {});
     const account = decodeAccount(result.body, assetScales);
     this.#assertExpectedAccount(account.stableAccountId);
+    // From here the account is proven by evidence, not by configuration.
+    this.#provenAccountId = account.stableAccountId;
     return {
       value: account,
       provenance: provenanceOf(
@@ -203,6 +244,7 @@ export class BinanceSpotReader {
       'venueOrderId' in identity
         ? { symbol: identity.symbol, orderId: identity.venueOrderId }
         : { symbol: identity.symbol, origClientOrderId: identity.clientOrderId };
+    const provenAccountId = this.#requireProvenAccount('order');
     const result = await this.#transport.read('order', parameters);
     const order = decodeOrder(result.body, scales);
     if (order.symbol !== identity.symbol) {
@@ -212,11 +254,26 @@ export class BinanceSpotReader {
         returned: order.symbol,
       });
     }
+    // And about the exact order asked about. Checking only the symbol left the one thing that
+    // matters unchecked: this result is the sole evidence for a specific dispatch, and an
+    // answer about a different order would be recorded as that dispatch's outcome.
+    if ('venueOrderId' in identity && order.venueOrderId !== identity.venueOrderId) {
+      violate('IDENTITY_SCOPE_MISMATCH', 'the order returned has a different venue order id', {
+        requested: identity.venueOrderId,
+        returned: order.venueOrderId,
+      });
+    }
+    if ('clientOrderId' in identity && order.clientOrderId !== identity.clientOrderId) {
+      violate('IDENTITY_SCOPE_MISMATCH', 'the order returned has a different client order id', {
+        requested: identity.clientOrderId,
+        returned: order.clientOrderId ?? 'absent',
+      });
+    }
     return {
       value: order,
       provenance: provenanceOf(
         this.#identity,
-        this.#identity.expectedStableAccountId,
+        provenAccountId,
         result,
         'POINT_IN_TIME',
         order.updatedAt,
@@ -235,18 +292,12 @@ export class BinanceSpotReader {
    * than merely incomplete.
    */
   async openOrdersAccountWide(): Promise<Observation<readonly OpenOrderObservation[]>> {
+    const provenAccountId = this.#requireProvenAccount('openOrders');
     const result = await this.#transport.read('openOrders', {});
     const orders = decodeOpenOrders(result.body);
     return {
       value: orders,
-      provenance: provenanceOf(
-        this.#identity,
-        this.#identity.expectedStableAccountId,
-        result,
-        'COMPLETE',
-        null,
-        null,
-      ),
+      provenance: provenanceOf(this.#identity, provenAccountId, result, 'COMPLETE', null, null),
     };
   }
 
@@ -268,6 +319,7 @@ export class BinanceSpotReader {
     const parameters: Record<string, string> = { symbol, limit: String(limit) };
     if (options.fromId !== undefined) parameters['fromId'] = options.fromId;
 
+    const provenAccountId = this.#requireProvenAccount('myTrades');
     const result = await this.#transport.read('myTrades', parameters);
     const trades = decodeTrades(result.body, scales);
     for (const trade of trades) {
@@ -277,6 +329,24 @@ export class BinanceSpotReader {
           returned: trade.symbol,
         });
       }
+      // `fromId` is inclusive: "If fromId is set, it will get trades >= that fromId". A row
+      // below the cursor is outside the range that was asked for, and letting it through means
+      // the cursor would advance past history this page never actually covered.
+      if (options.fromId !== undefined && BigInt(trade.venueTradeId) < BigInt(options.fromId)) {
+        violate('EVIDENCE_CONTRADICTORY', 'a trade in this page precedes the requested cursor', {
+          fromId: options.fromId,
+          returned: trade.venueTradeId,
+        });
+      }
+    }
+    // More rows than were asked for is not a windfall. The page-size bound is how a full page
+    // is distinguished from the end of the range, so an over-long page would make that
+    // distinction meaningless and could advance the cursor past unproven history.
+    if (trades.length > limit) {
+      violate('EVIDENCE_CONTRADICTORY', 'the venue returned more trades than the page limit', {
+        limit: String(limit),
+        returned: String(trades.length),
+      });
     }
 
     // A full page may have been truncated at the limit, so it is never treated as the end.
@@ -293,13 +363,32 @@ export class BinanceSpotReader {
       value: { trades, nextFromId },
       provenance: provenanceOf(
         this.#identity,
-        this.#identity.expectedStableAccountId,
+        provenAccountId,
         result,
         full ? 'PARTIAL' : 'COMPLETE',
         latestTradeTime(trades),
         nextFromId,
       ),
     };
+  }
+
+  /**
+   * The account id proven in this session, or a refusal.
+   *
+   * An authenticated observation stamps an account onto evidence. Taking that from
+   * configuration means a credential pointing somewhere else produces facts filed under an
+   * account nobody confirmed — the exact failure ADR-0007 section 3 exists to prevent, one
+   * layer down.
+   */
+  #requireProvenAccount(endpoint: string): string {
+    if (this.#provenAccountId === null) {
+      violate(
+        'IDENTITY_UNSTABLE_ACCOUNT',
+        'no authenticated account has been proven for this reader yet',
+        { endpoint },
+      );
+    }
+    return this.#provenAccountId;
   }
 
   #assertExpectedAccount(observed: string): void {

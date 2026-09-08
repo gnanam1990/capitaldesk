@@ -70,6 +70,29 @@ export interface SessionEvidence {
   readonly allMovementTypesObservable: boolean;
 }
 
+/**
+ * The economic effects the journal booked inside the window, per asset, in atoms.
+ *
+ * ADR-0002 condition C4 is that the bracketing snapshots differ *by exactly the booked
+ * effects*. Without this input the condition cannot be evaluated at all — an earlier version
+ * substituted "no filter drift", which is a different fact entirely and let a changed balance
+ * with no matching booked effect report COMPLETE.
+ *
+ * Keyed by asset code, valued in atoms at that asset's declared scale. An asset absent from
+ * this map means the journal booked nothing for it, which is a claim about zero, not an
+ * absence of information — so an unexplained delta on it is still unexplained.
+ */
+export type BookedEffects = Readonly<Record<string, bigint>>;
+
+/** One asset whose observed movement does not match what the journal booked. */
+export interface BalanceDiscrepancy {
+  readonly asset: string;
+  /** Observed closing total minus opening total, free plus locked. */
+  readonly observedDelta: bigint;
+  /** What the journal says it booked. Zero when it booked nothing. */
+  readonly bookedDelta: bigint;
+}
+
 export interface SymbolBackfill {
   readonly symbol: string;
   readonly trades: readonly VenueTradeObservation[];
@@ -92,6 +115,8 @@ export interface CutResult {
   readonly unknownOpenOrders: readonly OpenOrderObservation[];
   /** Filters that changed between the opening and closing reads of a symbol. */
   readonly filterDrift: readonly string[];
+  /** Assets whose observed movement does not match the booked effects (condition C4). */
+  readonly balanceDiscrepancies: readonly BalanceDiscrepancy[];
 }
 
 export interface CatchUpOptions {
@@ -101,6 +126,14 @@ export interface CatchUpOptions {
   readonly session: SessionEvidence;
   /** Client order ids the journal has marked. Anything else resting is external activity. */
   readonly knownClientOrderIds: ReadonlySet<string>;
+  /**
+   * The per-asset effects the journal booked inside this window.
+   *
+   * Required, with no permissive default. A default of "nothing booked" would silently make
+   * every window with real activity look unexplained, and a default of "whatever was observed"
+   * would make the condition vacuous — which is what it effectively was.
+   */
+  readonly bookedEffects: BookedEffects;
   /** Bounded: a catch-up that pages forever is an outage, not a backfill. */
   readonly maxPagesPerSymbol?: number;
   readonly cutId: string;
@@ -116,7 +149,7 @@ const DEFAULT_MAX_PAGES = 20;
  * outside the window it claims to describe.
  */
 export async function catchUp(options: CatchUpOptions): Promise<CutResult> {
-  const { scope, reader, session } = options;
+  const { scope, reader, repository, session } = options;
   if (scope.observedSymbols.length === 0) {
     // An empty observed set cannot prove a universe; it asserts that nothing could have moved,
     // which is a claim that needs its own evidence.
@@ -147,6 +180,16 @@ export async function catchUp(options: CatchUpOptions): Promise<CutResult> {
 
   const filterDrift = driftBetween(openingContext, closingContext);
 
+  // ADR-0002 condition C4, actually evaluated: the brackets must differ by exactly what the
+  // journal booked, across every asset either side mentions. Free and locked are summed
+  // because a movement from one to the other is not a change in what the account holds, while
+  // a change in the total is.
+  const balanceDiscrepancies = reconcileBrackets(
+    opening.value,
+    closing.value,
+    options.bookedEffects,
+  );
+
   const conditions: CoverageConditions = {
     // U: the universe is proven only when every configured symbol was actually enumerated and
     // its backfill completed. A symbol we could not page is a symbol we cannot speak for.
@@ -154,16 +197,33 @@ export async function catchUp(options: CatchUpOptions): Promise<CutResult> {
     streamSessionUninterrupted: session.streamSessionUninterrupted,
     accountWideOpenOrderScanClean: unknownOpenOrders.length === 0,
     observedSymbolBackfillContiguous: backfills.every((backfill) => backfill.contiguous),
-    // C4: necessary, never sufficient. A filter change during the cut means the two brackets
-    // were taken under different market rules, so they cannot be compared as if they were not.
-    bracketingSnapshotsAgree: filterDrift.length === 0,
-    sourcesFresh: session.sourcesFresh,
+    // C4: necessary, never sufficient. Every asset's observed movement equals what the
+    // journal booked for it — no unexplained increase, no unexplained decrease, and no asset
+    // appearing or vanishing between the brackets without a booking to account for it.
+    bracketingSnapshotsAgree: balanceDiscrepancies.length === 0,
+    // A filter change means the brackets were taken under different market rules, so the
+    // sources they came from are not comparable within one window.
+    sourcesFresh: session.sourcesFresh && filterDrift.length === 0,
     allMovementTypesObservable: session.allMovementTypesObservable,
   };
 
   const assessment = assessCoverage(conditions, {
     assessed: { from: opening.provenance.requestedAt, to: closing.provenance.respondedAt },
     streamGap: session.streamGap,
+  });
+
+  // Both brackets and the verdict, in one transaction. Writing them separately leaves a cut
+  // with missing snapshots, or snapshots nobody drew a conclusion from, reachable through an
+  // ordinary crash.
+  await repository.recordAssessedCut({
+    workspaceId: scope.workspaceId,
+    poolId: scope.poolId,
+    epoch: scope.epoch,
+    cutId: options.cutId,
+    opening: snapshotRecordOf(`${options.cutId}-open`, opening),
+    closing: snapshotRecordOf(`${options.cutId}-close`, closing),
+    assessment,
+    observedSymbols: scope.observedSymbols,
   });
 
   return {
@@ -176,6 +236,62 @@ export async function catchUp(options: CatchUpOptions): Promise<CutResult> {
     detection: describeDetection(assessment),
     unknownOpenOrders,
     filterDrift,
+    balanceDiscrepancies,
+  };
+}
+
+/**
+ * Every asset whose observed movement does not match the booked effects.
+ *
+ * The union of assets is taken from both brackets and from the booked effects, so an asset
+ * that appears only in the closing snapshot, only in the opening one, or only in the journal
+ * is still reconciled. Restricting the comparison to assets present in both brackets is how a
+ * newly appearing balance goes unnoticed.
+ */
+function reconcileBrackets(
+  opening: AccountSnapshot,
+  closing: AccountSnapshot,
+  booked: BookedEffects,
+): readonly BalanceDiscrepancy[] {
+  const totals = (snapshot: AccountSnapshot): Map<string, bigint> => {
+    const byAsset = new Map<string, bigint>();
+    for (const balance of snapshot.balances) {
+      // Free plus locked: moving between them is not a change in what the account holds.
+      byAsset.set(
+        balance.asset,
+        (byAsset.get(balance.asset) ?? 0n) + balance.freeAtoms + balance.lockedAtoms,
+      );
+    }
+    return byAsset;
+  };
+  const before = totals(opening);
+  const after = totals(closing);
+  const assets = new Set([...before.keys(), ...after.keys(), ...Object.keys(booked)]);
+
+  const discrepancies: BalanceDiscrepancy[] = [];
+  for (const asset of [...assets].sort()) {
+    const observedDelta = (after.get(asset) ?? 0n) - (before.get(asset) ?? 0n);
+    const bookedDelta = booked[asset] ?? 0n;
+    if (observedDelta !== bookedDelta) {
+      discrepancies.push({ asset, observedDelta, bookedDelta });
+    }
+  }
+  return discrepancies;
+}
+
+function snapshotRecordOf(snapshotId: string, observed: Observation<AccountSnapshot>) {
+  return {
+    snapshotId,
+    stableAccountId: observed.value.stableAccountId,
+    requestedAt: observed.provenance.requestedAt,
+    respondedAt: observed.provenance.respondedAt,
+    sourceTime: observed.provenance.sourceTime,
+    responseDigest: observed.provenance.responseDigest,
+    balances: observed.value.balances.map((balance) => ({
+      asset: balance.asset,
+      freeAtoms: balance.freeAtoms.toString(),
+      lockedAtoms: balance.lockedAtoms.toString(),
+    })),
   };
 }
 
@@ -217,18 +333,44 @@ async function backfillSymbol(options: CatchUpOptions, symbol: string): Promise<
     });
     trades.push(...observed.value.trades);
 
-    if (observed.value.nextFromId !== null) {
-      // The cursor is persisted per page, not once at the end. A crash between pages then
-      // resumes where it stopped instead of re-reading a range whose evidence it discarded.
-      const advanced = await repository.advance(
-        { workspaceId: scope.workspaceId, poolId: scope.poolId, epoch: scope.epoch, symbol },
-        {
-          nextFromId: observed.value.nextFromId,
-          highestTradeId: (BigInt(observed.value.nextFromId) - 1n).toString(),
-          digest: observed.provenance.responseDigest,
+    // The page's evidence and the cursor move together, in one transaction. Advancing
+    // separately is the shape of bug that loses history silently: the cursor moves, the
+    // process dies before the trades are durable, and the next run resumes past a page nothing
+    // ever recorded. Neither half is useful without the other.
+    const recorded = await repository.recordPageAndAdvance({
+      workspaceId: scope.workspaceId,
+      poolId: scope.poolId,
+      epoch: scope.epoch,
+      symbol,
+      trades: observed.value.trades.map((trade) => ({
+        venueTradeId: trade.venueTradeId,
+        payload: {
+          symbol: trade.symbol,
+          venueTradeId: trade.venueTradeId,
+          venueOrderId: trade.venueOrderId,
+          baseAtoms: trade.baseAtoms.toString(),
+          quoteAtoms: trade.quoteAtoms.toString(),
+          commissionAsset: trade.commissionAsset,
+          commissionAtoms: trade.commissionAtoms.toString(),
+          tradedAt: new Date(trade.tradedAt).toISOString(),
+          isBuyer: trade.isBuyer,
+          isMaker: trade.isMaker,
         },
-      );
-      if (!advanced.ok) {
+        payloadDigest: observed.provenance.responseDigest,
+        tradedAt: new Date(trade.tradedAt).toISOString(),
+      })),
+      cursor:
+        observed.value.nextFromId === null
+          ? null
+          : {
+              nextFromId: observed.value.nextFromId,
+              highestTradeId: (BigInt(observed.value.nextFromId) - 1n).toString(),
+              digest: observed.provenance.responseDigest,
+            },
+    });
+
+    if (observed.value.nextFromId !== null) {
+      if (!recorded.ok) {
         // A cursor that will not advance is not a reason to keep paging: the next request
         // would return the same rows forever.
         break;
