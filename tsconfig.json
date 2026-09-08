@@ -20,6 +20,9 @@
       "path": "./packages/ledger"
     },
     {
+      "path": "./packages/planner"
+    },
+    {
       "path": "./packages/db"
     },
     {
