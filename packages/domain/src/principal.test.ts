@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type RequestedScope,
   ACTOR_ROLES,
   CAPABILITIES,
   NEVER_GRANTED,
@@ -35,7 +36,9 @@ const inWorkspace = { workspaceId: WORKSPACE };
 const inPool = { workspaceId: WORKSPACE, poolId: POOL };
 const inStrategy = { workspaceId: WORKSPACE, poolId: POOL, strategyId: STRATEGY };
 
-const allowed = (a: Principal, c: Capability, s = inStrategy): boolean =>
+// Annotated, not inferred: without this the default parameter narrows the type to the full
+// tuple and every deliberately partial scope below becomes a type error.
+const allowed = (a: Principal, c: Capability, s: RequestedScope = inStrategy): boolean =>
   authorize(a, c, s).allowed;
 
 describe('the permission matrix is complete and closed', () => {
