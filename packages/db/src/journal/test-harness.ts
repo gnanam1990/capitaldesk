@@ -34,6 +34,22 @@ export const ACCOUNT = {
 export const BTC = { code: 'BTC', scale: 'v1' } as const;
 export const USDT = { code: 'USDT', scale: 'v1' } as const;
 
+/**
+ * How long an assertion may wait for a lock before failing.
+ *
+ * Short on purpose: a test that blocks on a lock it did not expect should fail quickly and
+ * name the contention, not sit until the suite times out.
+ */
+const ASSERTION_LOCK_TIMEOUT = '5s';
+
+/**
+ * How long the schema migration may wait for the migrator's global advisory lock.
+ *
+ * Generous, because every suite migrates its own schema and they queue behind one lock; and
+ * still bounded, because a genuinely stuck migration must fail rather than hang the run.
+ */
+const MIGRATION_LOCK_WAIT = '60s';
+
 export interface Backend {
   readonly client: Client;
   readonly pid: number;
@@ -51,7 +67,7 @@ export class JournalHarness {
   async open(): Promise<void> {
     this.admin = new Client({ connectionString: DATABASE_URL });
     await this.admin.connect();
-    await this.admin.query(`SET lock_timeout = '5s'`);
+    await this.admin.query(`SET lock_timeout = '${ASSERTION_LOCK_TIMEOUT}'`);
     await this.admin.query(`SET statement_timeout = '20s'`);
     this.pool = new Pool({
       connectionString: DATABASE_URL,
@@ -65,10 +81,24 @@ export class JournalHarness {
     await this.admin.query(`DROP SCHEMA IF EXISTS ${this.schema} CASCADE`);
     await this.admin.query(`CREATE SCHEMA ${this.schema}`);
     await this.admin.query(`SET search_path TO ${this.schema}`);
-    await migrate(this.admin, await loadMigrations(MIGRATIONS_DIR), {
-      appliedBy: 'vitest',
-      buildId: 'journal-test',
-    });
+    // The migrator takes a global advisory lock so concurrent runs cannot interleave, and
+    // `lock_timeout` applies to that wait like any other. With the suites migrating their
+    // schemas in parallel, a waiter could exceed the 5-second assertion timeout and fail with
+    // `lock_timeout` — a scheduling artefact reported as a test failure, which is exactly the
+    // intermittent failure this suite showed.
+    //
+    // The migration wait gets its own generous bound and the assertion timeout is restored
+    // immediately after. It is still bounded: a genuinely stuck migration fails rather than
+    // hanging the run.
+    await this.admin.query(`SET lock_timeout = '${MIGRATION_LOCK_WAIT}'`);
+    try {
+      await migrate(this.admin, await loadMigrations(MIGRATIONS_DIR), {
+        appliedBy: 'vitest',
+        buildId: 'journal-test',
+      });
+    } finally {
+      await this.admin.query(`SET lock_timeout = '${ASSERTION_LOCK_TIMEOUT}'`);
+    }
     await this.admin.query(
       `INSERT INTO workspaces (workspace_id, display_name) VALUES ($1,'Journal'), ($2,'Other')`,
       [WORKSPACE, OTHER_WORKSPACE],
@@ -209,7 +239,7 @@ export class JournalHarness {
     await withDeadline(this.pool.end(), 5000, 'closing the pool').catch(() => undefined);
     let dropFailure: Error | undefined;
     try {
-      await this.admin.query(`SET lock_timeout = '5s'`);
+      await this.admin.query(`SET lock_timeout = '${ASSERTION_LOCK_TIMEOUT}'`);
       await this.admin.query(`DROP SCHEMA IF EXISTS ${this.schema} CASCADE`);
     } catch (error) {
       dropFailure = error instanceof Error ? error : new Error(String(error));

@@ -77,7 +77,7 @@ export async function loadMigrations(directory: string): Promise<readonly Migrat
  * Derived from a fixed string rather than a random number so every deployment of every build
  * computes the same value and therefore contends on the same lock.
  */
-const MIGRATION_LOCK_KEY = 0x0ca9_1de5; // "capitaldesk" abbreviated; any stable constant works.
+export const MIGRATION_LOCK_KEY = 0x0ca9_1de5; // "capitaldesk" abbreviated; any stable constant works.
 
 /**
  * Validate a pre-existing bookkeeping table before trusting it.
