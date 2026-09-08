@@ -69,11 +69,18 @@ An ordinary Spot API key does not prove access to an Agentic managed account. Th
 Trading agents must not have another write path to the governed account. If agents retain direct credentials, CapitalDesk cannot promise exclusive enforcement. Out-of-band manual or external changes are still possible; detecting one quarantines affected execution until the account and claims are reconciled.
 
 > **Amended by ADR-0002 — owner operating constraint.** Binance provides no account-wide
-> completed-trade endpoint, so this release **detects** any unexplained balance movement
-> account-wide but **attributes** activity only within the declared observed symbol set.
-> Complete attribution therefore holds only while no external trading occurs on the governed
-> account. A violation is always detected and quarantines the pool; it is not always
-> explained. Deposits, withdrawals and internal transfers are unobservable in the v1 testnet
+> completed-trade endpoint, so the set of symbols that traded during an unobserved interval
+> cannot be discovered afterwards. What this release provides:
+>
+> - A movement that changes a governed asset's **net** balance across a checkpoint window is
+>   detected by the bracketing reconciliation, and quarantines the pool.
+> - A set of movements that **offsets to zero** is detected only if the events were observed,
+>   or if they occurred on a symbol whose trades can be enumerated.
+> - Any interruption of the account event stream makes the window `UNSUPPORTED`, which blocks
+>   governed dispatch until an owner adjudicates.
+>
+> There is therefore **no unconditional detection guarantee**, and the product must not claim
+> one. Deposits, withdrawals and internal transfers are unobservable in the v1 testnet
 > surface. State this limitation to operators; do not describe the product as reconciling all
 > external activity.
 

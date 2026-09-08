@@ -17,6 +17,7 @@ export * from './plan-digest.js';
 export * from './dispatch-envelope.js';
 export * from './fee-policy.js';
 export * from './observation.js';
+export * from './risk.js';
 export * from './credentials.js';
 export * from './lifecycle.js';
 

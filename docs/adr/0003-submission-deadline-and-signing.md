@@ -53,7 +53,7 @@ Let `signedAtLocal = signedTimestampMs - venueClockOffsetMs`.
   `signedAtLocal + validityMs - clockSkewBudgetMs - transmissionLatencyBudgetMs`.
   The latest LOCAL instant at which the venue is certain to accept.
 
-A first draft of this decision bound the *local* cutoff to the deadline. That was wrong, and
+A first draft of this decision bound the _local_ cutoff to the deadline. That was wrong, and
 maintainer review demonstrated it: with `signedTimestamp = deadline - 900ms`,
 `recvWindow = 1000ms` and `skew = 100ms` the check passed while the venue, at zero true skew,
 would still accept 100ms after the approval lapsed. Binding the worst case closes the

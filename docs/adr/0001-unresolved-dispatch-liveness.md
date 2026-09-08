@@ -10,7 +10,7 @@
 The reviewed contract handles an ambiguous dispatch safely and incompletely. After
 `DISPATCH_MARKED` it forbids a resend, forbids releasing the reservation, and forbids
 rebaseline. That is correct. But it supplies no way for any sequence of observations to
-*resolve* the attempt. The reviewer's sequence makes this concrete: commit the marker,
+_resolve_ the attempt. The reviewer's sequence makes this concrete: commit the marker,
 crash before the first network byte, restart, query the client order id, receive NOT_FOUND
 forever. One attempt then blocks the pool permanently, and escalating to a person does not
 create the missing evidence.
@@ -32,7 +32,7 @@ The dispatch attempt lifecycle becomes:
 PREPARED -> DISPATCH_MARKED -> SEND_ATTEMPTED -> ACKNOWLEDGED | REJECTED | UNKNOWN
 ```
 
-`SEND_ATTEMPTED` is committed durably *immediately before* the first network byte, on a
+`SEND_ATTEMPTED` is committed durably _immediately before_ the first network byte, on a
 single-threaded send path where that write is strictly ordered before the socket write.
 
 This creates a decidable distinction the original contract lacked. An attempt that reached
@@ -89,7 +89,7 @@ liability remains visible and attributed to its original epoch.
   choice.
 - One extra durable write per dispatch, on the latency-critical path. Accepted: it converts
   an unbounded class of permanent blocks into a provable outcome.
-- `-1021` timestamp rejections (ADR-0003) also produce decisive evidence for a *specific*
+- `-1021` timestamp rejections (ADR-0003) also produce decisive evidence for a _specific_
   attempt. They prove that attempt was not accepted; they do not prove no order exists, and
   never resolve a different outstanding UNKNOWN.
 

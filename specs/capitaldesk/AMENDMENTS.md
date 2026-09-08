@@ -27,14 +27,22 @@ here. This file is the index; each amended section in the documents carries an i
 Three amendments **narrow a promise** rather than adding a capability, and those are the ones
 to read first:
 
-- **ADR-0002** removes an implied account-wide external-trade *attribution* guarantee that the
-  upstream API cannot support. Detection of any unexplained movement remains account-wide;
-  attribution is bounded to the declared observed symbol set, and the owner operating
-  constraint is now stated in the PRD.
+- **ADR-0002** removes an implied account-wide external-trade guarantee that the upstream API
+  cannot support. A net balance change across a window is detected by the bracketing
+  reconciliation; a set of movements that offsets to zero outside a proven symbol universe is
+  not. An interrupted stream session yields `UNSUPPORTED` rather than a gap to be filled
+  later, because the evidence needed to close it cannot be fetched from the venue at all. The
+  owner operating constraint is now stated in the PRD.
 - **ADR-0005** states plainly that some data-loss cases leave strategy attribution
   unrecoverable, and requires an explicit owner decision rather than a guessed FIFO order.
-- **ADR-0010** disables BNB fee routing until its documented fallback is bounded, and records
-  that the T-055 oracle supports the rounding method without proving the general solver.
+- **ADR-0010** marks the standard fee policy `UNVERIFIED` rather than proven: summing per-fill
+  ceilings describes a realized fee, not an a-priori bound, until the number of fills is
+  itself bounded by an evidenced minimum fill size. No shipped policy can authorize a real
+  dispatch today. BNB routing is refused outright, and the T-055 oracle is recorded as
+  supporting the rounding method without proving the general solver.
+- **ADR-0009** measures pool concentration across every owner rather than one strategy, after
+  review showed the per-strategy form could be defeated by splitting a holding between
+  strategies — an ownership reassignment that moves no funds and changes no market risk.
 
 No amendment weakens an invariant. Where the honest resolution was that a guarantee cannot be
 provided, the promise was narrowed and the limitation written down.
@@ -47,7 +55,7 @@ The amendments add scenarios beyond the original 58. They extend rather than rep
 |---|---|---|
 | T-059 | Post-marker crash with a fenced sender reaches NOT_SENT_PROVEN and releases | 0001 |
 | T-060 | The same without a fence stays UNKNOWN and never releases | 0001 |
-| T-061 | Coverage predicate: each of the five conditions failing in turn | 0002 |
+| T-061 | Coverage predicate: each condition failing in turn, and the adverse offsetting-trade counterexample | 0002 |
 | T-062 | Bracketing snapshots agreeing alone does not establish coverage | 0002 |
 | T-063 | A paused transmitter cannot be accepted after the submission deadline, at every permitted clock offset | 0003 |
 | T-064 | An unknown venue status quarantines instead of being mapped | 0004 |
@@ -55,5 +63,6 @@ The amendments add scenarios beyond the original 58. They extend rather than rep
 | T-066 | Lifecycle action effects resolved at marked and unmarked plan states | 0006 |
 | T-067 | Owner deferral survives a newer revision from the same strategy | 0006, 0008 |
 | T-068 | Late opposing intent invalidates before the marker, queues after it | 0008 |
-| T-069 | Concentration is UNCOMPUTABLE when any denominator asset is unpriceable | 0009 |
-| T-070 | A fee policy without a proven cumulative bound refuses dispatch | 0010 |
+| T-069 | Concentration is UNCOMPUTABLE when any denominator asset is unpriceable, and invariant under reassignment | 0009 |
+| T-070 | A fee policy without a derived pre-trade bound refuses dispatch, and a status alone never authorizes one | 0010 |
+| T-071 | Migration status never writes, and a divergent applied history refuses migration | — |

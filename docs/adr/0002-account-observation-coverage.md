@@ -12,76 +12,92 @@ intervening economic observations" before financial finality, and correctly reje
 equal balances as proof. It never says how that proof is constructed: no cursor, no
 reconnect backfill universe, no retention limit, no acceptance predicate.
 
-It also contains a trap the review named precisely: one *tradable* symbol must not silently
-become one *observed* symbol. An external order on another symbol can consume the shared
+It also contains a trap the review named precisely: one _tradable_ symbol must not silently
+become one _observed_ symbol. An external order on another symbol can consume the shared
 quote or fee asset.
 
 Critically, Binance's Spot REST API has no account-wide completed-trade endpoint —
-`myTrades` requires a symbol. So an account-wide *attribution* guarantee is not available to
+`myTrades` requires a symbol. So an account-wide _attribution_ guarantee is not available to
 us at all, and claiming one would be dishonest.
 
 ## Decision
 
-### 1. The coverage predicate
+### 1. Prove the universe, not the transport
 
-Coverage over a window `[t0, t1]` is `COMPLETE` only when all five conditions hold:
+Coverage over a window `[t0, t1]` is `COMPLETE` only when all of the following hold:
 
-1. **Stream continuity.** The user-data stream was connected across the whole window with no
-   missed heartbeat, or every gap was backfilled by REST.
-2. **Account-wide open-order scan.** `GET /api/v3/openOrders` with no symbol, taken at `t1`,
-   contains no order unknown to our journal. This endpoint *is* account-wide, so an unknown
-   resting order is always detectable.
-3. **Trade backfill.** For every symbol in the declared observed set, trades were backfilled
-   by `fromId` cursor with no gap down to the last booked trade id.
-4. **Bracketing snapshots agree.** Balance snapshots at `t0` and `t1` differ by exactly the
-   sum of booked economic effects between them. This is necessary and *not* sufficient:
-   conditions 1-3 supply the coverage, condition 4 only cross-checks it. Equal balances alone
-   never establish anything.
-5. **Freshness.** Every source observation used is inside its declared freshness class.
+- **U — movement universe proven.** Every symbol and movement type that could have moved a
+  governed asset during the window is enumerable and was enumerated.
+- **C1 — uninterrupted stream session.** One listen-key session spanned the window with no
+  reconnect, server close or missed keepalive. This is _session-scoped, not sequence-proven_:
+  there is no account-wide event cursor, so it bounds when we were listening and never
+  asserts that nothing was dropped while we were.
+- **C2 — account-wide open-order scan** at `t1` shows no order unknown to the journal.
+- **C3 — observed-symbol backfill** paged contiguously to an already-booked trade. Trade ids
+  are per-symbol and are not a dense account-local sequence, so completeness is established
+  by cursor pagination and never by assuming consecutive ids.
+- **C4 — bracketing snapshots agree** with the booked effects. Necessary, never sufficient.
+- **C5 — freshness.** Every source used is inside its declared freshness class.
 
-Any failure yields `GAP_OPEN`, `BACKFILLING`, `INCOMPLETE` or `UNSUPPORTED`, and governed
-dispatch is blocked. There is no delay that substitutes for the predicate.
+An earlier version of this decision used five booleans, one of which was "the stream was
+connected". A connected socket is not proof of lossless account history, and maintainer
+review demonstrated the consequence: a disconnected window with two offsetting completed
+trades on a symbol outside the observed set, no resting order left behind and equal balances
+at both brackets satisfied every boolean and reported `COMPLETE`. The error was treating
+continuity of a transport as completeness of history.
 
-### 2. The guarantee is narrowed, honestly
+### 2. When the universe cannot be proven, the answer is UNSUPPORTED
 
-We do **not** claim account-wide external-trade attribution, because the upstream API does
-not offer it. What v1 actually provides:
+Binance Spot has no account-wide completed-trade enumeration — `myTrades` requires a symbol —
+so the set of symbols that traded during an unobserved interval cannot be discovered
+afterwards. An interrupted session therefore cannot be repaired by fetching more data, and it
+is `UNSUPPORTED` rather than `INCOMPLETE`: not a backlog item, but a state requiring owner
+adjudication. `GET /api/v3/openOrders` with no symbol _is_ account-wide, so an unknown
+**resting** order remains always discoverable; a closed one does not.
 
-- **Detection** of any unexplained balance movement, account-wide, via condition 4.
-- **Attribution** of activity only within the declared observed symbol set.
-- On detection without attribution: pool-wide quarantine and an evidence-linked incident.
+### 3. Detection is stated as a limitation, not a guarantee
 
-The owner-facing operating constraint is therefore explicit: complete attribution holds only
-while no external trading occurs on the governed account. A violation is always *detected*
-and quarantines the pool; it is not always *explained*. This is a real product limitation and
-belongs in the PRD, the console and the export, not buried in an adapter.
+There is no unconditional detection promise anywhere in the product. What holds:
 
-### 3. Unobservable movement types
+- A movement that changes a governed asset's **net** balance across the window is detected by
+  the bracketing reconciliation.
+- A set of movements that **offsets to zero** is detected only if the events were observed, or
+  if they occurred on a symbol whose trades can be enumerated.
+- Outside that, coverage is `UNSUPPORTED` and the pool does not execute.
+
+`describeDetection` returns exactly this, and the console, the exports and the operator
+documentation use it rather than composing their own wording.
+
+### 4. Unobservable movement types
 
 Deposits, withdrawals and internal transfers are not observable in the v1 testnet surface.
 Where such a movement is possible and unobservable, coverage is `UNSUPPORTED` and any
 unexplained increase quarantines rather than being adopted as HOUSE inventory.
 
-### 4. Cursors, retention and disconnection
+### 5. Cursors and retention
 
-Trade cursors (`fromId` per symbol) and the last-applied stream event id are persisted with
-the pool. On disconnect coverage becomes `GAP_OPEN` and dispatch is blocked immediately, not
-at the next checkpoint. If the gap predates supported history retention or cannot be paged,
-coverage becomes `UNSUPPORTED_COVERAGE_GAP` and the pool quarantines. No global upstream
-sequence guarantee is claimed anywhere.
+Per-symbol trade cursors and the last-applied stream event id are persisted with the pool. On
+disconnect, dispatch is blocked immediately rather than at the next checkpoint. If a gap
+predates supported history retention or cannot be paged, coverage is `UNSUPPORTED`. No global
+upstream sequence guarantee is claimed, and none is assumed.
 
 ## Consequences
 
 - The declared observed symbol set must include every symbol that can move a governed asset,
   and is owner-visible configuration rather than an implementation detail.
-- Marketing and the console must state the operating constraint. "CapitalDesk detects any
-  external movement and attributes activity on your observed symbols" is true; "CapitalDesk
-  reconciles all external activity" is not.
+- Any interruption of the event stream ends the window's usefulness for governed dispatch.
+  Operationally this makes stream continuity a first-class concern rather than a background
+  detail.
+- Nothing in the product may say that all external activity is detected. The accurate
+  statement is that a net balance change across a window is detected by the bracketing
+  reconciliation, and that offsetting activity outside a proven universe is not — which is
+  why such a window blocks execution rather than passing quietly.
 
 ## Tests
 
-Offline external trade on a different quote-sharing symbol (detected, quarantined,
-unattributed); offsetting movements with equal final balances (condition 4 alone must not
-pass); missing stream segment with and without a successful backfill; an external lock;
-history older than retention; a positive recovery after each recoverable interruption.
-Extends T-034, T-041, T-042.
+The adverse counterexample above, asserted against the real predicate: an interrupted window
+with offsetting trades outside the observed set must not report `COMPLETE`, must report
+`UNSUPPORTED`, must block dispatch and must narrow its stated detection scope. Each remaining
+condition failed in turn with the specific unmet condition named. Bracketing agreement alone
+must not pass. A positive supported case where every condition holds. Extends T-034, T-041,
+T-042; new scenarios T-061, T-062.

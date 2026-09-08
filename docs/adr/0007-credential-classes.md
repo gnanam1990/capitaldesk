@@ -16,11 +16,11 @@ to give the worker the executor's credential.
 
 ### 1. Three classes with separate mounts
 
-| Class | Venue permission | Mounted into | Never into |
-|---|---|---|---|
-| `VENUE_READ` | USER_DATA (read) | worker account reader | api, executor, web |
-| `VENUE_TRADE` | TRADE | executor only | api, worker, web |
-| `OWNER_SESSION` | none (session signing) | api only | worker, executor, web |
+| Class           | Venue permission       | Mounted into          | Never into            |
+| --------------- | ---------------------- | --------------------- | --------------------- |
+| `VENUE_READ`    | USER_DATA (read)       | worker account reader | api, executor, web    |
+| `VENUE_TRADE`   | TRADE                  | executor only         | api, worker, web      |
+| `OWNER_SESSION` | none (session signing) | api only              | worker, executor, web |
 
 `AGENT_PROPOSAL` credentials are hashed application credentials and are never venue secrets.
 
@@ -45,7 +45,7 @@ trading another is worse than not trading.
 
 `tools/check-secret-boundary.ts` enforces the source-tree half statically, and
 `tools/check-layering.ts` prevents the API, worker or console importing the executor by
-package name *or* by relative path. Both are static checks. They are not proof of process
+package name _or_ by relative path. Both are static checks. They are not proof of process
 isolation, which requires separate container users, mounts and service identities, and is
 verified by the runtime boundary tests in module 12.
 

@@ -13,7 +13,7 @@ stream also reports `TRADE_PREVENTION` execution reports carrying prevented quan
 
 A narrow IOC submission policy does not prove these are impossible: other account or
 trade-group activity can produce them. The underlying mistake is conflating two schemas —
-what we are permitted to *submit* is not the same set as what we might *observe*.
+what we are permitted to _submit_ is not the same set as what we might _observe_.
 
 ## Decision
 

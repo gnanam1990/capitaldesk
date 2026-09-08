@@ -349,13 +349,16 @@ Financial finality requires: known terminal order, cumulative filled quantity/qu
 > the last booked trade; (4) bracketing balance snapshots differing by exactly the booked
 > effects — necessary, never sufficient; (5) every source inside its freshness class.
 >
-> The guarantee is narrowed honestly: Binance offers no account-wide completed-trade endpoint,
-> so v1 **detects** any unexplained movement account-wide but **attributes** activity only
-> within the declared observed symbol set. Complete attribution holds only while no external
-> trading occurs on the governed account; a violation is always detected and quarantines the
-> pool, and is not always explained. Deposits, withdrawals and internal transfers are
-> unobservable in the v1 testnet surface, so coverage is `UNSUPPORTED` where such a movement is
-> possible. No global upstream sequence guarantee is claimed.
+> The guarantee is narrowed honestly. Binance offers no account-wide completed-trade endpoint,
+> so the symbols that traded during an unobserved interval cannot be discovered afterwards.
+> Net balance changes across a window are detected by the bracketing reconciliation; movements
+> that offset to zero are detected only if their events were observed or their symbol can be
+> enumerated. An interrupted stream session therefore yields `UNSUPPORTED`, not `INCOMPLETE`:
+> the evidence needed to close it cannot be fetched at all. There is no unconditional
+> detection guarantee. Deposits, withdrawals and internal transfers are unobservable in the v1
+> testnet surface. No global upstream event cursor is assumed, and trade ids are treated as
+> per-symbol and non-dense: backfill completeness comes from contiguous cursor pagination,
+> never from assuming consecutive ids.
 
 REST and streams are not assumed to be one atomic snapshot. During v1 reconciliation, pause governed dispatch, catch up exact known order/trade ranges, take before/after account snapshots and verify no intervening economic observations. Record snapshot request intervals, source timestamps, trade cursors and the justified cut. Matching repeated balances alone is not proof of complete history; a missing reliable cut remains INCOMPLETE.
 
