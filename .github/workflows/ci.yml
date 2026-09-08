@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push supersedes an in-flight run for the same ref, except on main where every
+# commit's result is kept.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # Reported in health endpoints and stamped into evidence, so a result is always traceable
+  # to the exact commit that produced it.
+  CAPITALDESK_BUILD_ID: ${{ github.sha }}
+
+jobs:
+  verify:
+    name: Verify (fresh checkout)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # Version comes from packageManager in package.json.
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # --frozen-lockfile: a dependency that drifted from the lockfile fails here rather
+      # than silently changing what was tested.
+      - run: pnpm install --frozen-lockfile
+
+      # Deliberately individual steps rather than `pnpm verify`, so a failure names the gate
+      # that failed instead of one opaque red cross. The order matters: typed linting
+      # resolves cross-package types from emitted declarations.
+      - run: pnpm run format:check
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm run check:layering
+      - run: pnpm run check:secrets
+      - run: pnpm run test:unit
+      - run: pnpm run test:property
+      - run: pnpm run build
+
+  integration:
+    name: Integration (real PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # A real PostgreSQL server, matching the version developed against. Integration evidence
+    # is never produced against a mock, and this job is separate so a green unit run can
+    # never be mistaken for database coverage.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: capitaldesk
+          POSTGRES_PASSWORD: capitaldesk
+          POSTGRES_DB: capitaldesk_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U capitaldesk"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CAPITALDESK_TEST_DATABASE_URL: postgres://capitaldesk:capitaldesk@localhost:5432/capitaldesk_test
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+
+      # The suite skips itself when no database is configured. Assert it did not skip, so a
+      # broken service container cannot be reported as passing integration coverage.
+      - name: Run integration suite
+        run: pnpm run test:integration --reporter=json --outputFile=integration-results.json
+
+      - name: Assert integration tests actually ran
+        run: |
+          node -e '
+            const r = require("./integration-results.json");
+            const total = r.numTotalTests ?? 0;
+            const passed = r.numPassedTests ?? 0;
+            const skipped = (r.numPendingTests ?? 0) + (r.numTodoTests ?? 0);
+            console.log(`integration: ${passed} passed, ${skipped} skipped, ${total} total`);
+            if (total === 0 || passed === 0) {
+              console.error("no integration test executed; a skipped suite is not coverage");
+              process.exit(1);
+            }
+            if (skipped > 0) {
+              console.error(`${skipped} integration tests skipped; the database must be reachable`);
+              process.exit(1);
+            }
+          '
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-results
+          path: integration-results.json
+          retention-days: 14
