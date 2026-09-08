@@ -1,0 +1,83 @@
+/*
+ * CapitalDesk design tokens — ADR-0011.
+ *
+ * An editorial financial workspace: warm mineral surfaces, precise typographic hierarchy,
+ * restrained deep-teal actions, crisp hairlines. Tokens are semantic; components never
+ * repeat a raw hex value, so a contrast correction happens in one place.
+ *
+ * Light is the required first theme. A night theme is deliberately absent until the full
+ * owner workflow and the light theme are verified.
+ */
+:root {
+  /* --- surfaces ------------------------------------------------------------------- */
+  --cd-canvas: #f5f6f2;
+  --cd-panel: #ffffff;
+  --cd-nav: #eaede7;
+  --cd-sunken: #eff1ec;
+
+  /* --- ink ------------------------------------------------------------------------ */
+  --cd-ink: #172c29;
+  --cd-ink-muted: #52645d;
+  /* Darkened from the starting direction's #52645d for small metadata text, which needs
+     4.5:1 against the navigation surface rather than against the panel. */
+  --cd-ink-subtle: #46564f;
+
+  /* --- action --------------------------------------------------------------------- */
+  --cd-action: #087568;
+  --cd-action-hover: #06635a;
+  --cd-action-ink: #ffffff;
+  --cd-focus: #0b5f79;
+
+  /* --- lines and accents ---------------------------------------------------------- */
+  --cd-border: #d5ded5;
+  --cd-border-strong: #b9c6bb;
+  --cd-celadon: #ddebcf;
+
+  /* --- semantic state ------------------------------------------------------------- */
+  /* Every state below is always accompanied by a text label and an icon. Colour is never
+     the only carrier of an economic fact (UI-UX section 10). */
+  --cd-ok: #1b5e34;
+  --cd-ok-surface: #e6f2e8;
+  --cd-warn: #8a5a06;
+  --cd-warn-surface: #fbf1dd;
+  --cd-danger: #a02020;
+  --cd-danger-surface: #fbe9e7;
+  --cd-unknown: #4a4a6a;
+  --cd-unknown-surface: #ececf4;
+
+  /* --- type ----------------------------------------------------------------------- */
+  --cd-font-sans:
+    'Manrope Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --cd-font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', monospace;
+
+  /* --- spacing: 4px base ---------------------------------------------------------- */
+  --cd-s1: 4px;
+  --cd-s2: 8px;
+  --cd-s3: 12px;
+  --cd-s4: 16px;
+  --cd-s5: 24px;
+  --cd-s6: 32px;
+  --cd-s7: 48px;
+  --cd-s8: 64px;
+
+  --cd-radius: 8px;
+  --cd-radius-lg: 12px;
+  --cd-hairline: 1px solid var(--cd-border);
+
+  --cd-motion: 160ms;
+  --cd-ease: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --cd-motion: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@capitaldesk/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Owner console. Reaches data through the API only; never imports the database or the executor.",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev --port 3100",
+    "start": "next start --port 3100",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@capitaldesk/config": "workspace:*",
+    "@capitaldesk/contracts": "workspace:*",
+    "@fontsource-variable/manrope": "catalog:",
+    "@fontsource/ibm-plex-mono": "catalog:",
+    "next": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "typescript": "catalog:"
+  }
+}
