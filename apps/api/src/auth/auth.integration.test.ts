@@ -126,6 +126,17 @@ describeIfDatabase('identity and access', () => {
       [WORKSPACE, POOL],
     );
     await pool.query(
+      `UPDATE pools SET selected_symbol='BTCUSDT', base_asset_code='BTC', base_asset_scale='v1',
+                        quote_asset_code='USDT', quote_asset_scale='v1',
+                        max_target_base_atoms=1000000, active_policy_version=1
+        WHERE workspace_id=$1 AND pool_id=$2`,
+      [WORKSPACE, POOL],
+    );
+    await pool.query(`INSERT INTO baseline_epochs (workspace_id,pool_id,epoch) VALUES ($1,$2,1)`, [
+      WORKSPACE,
+      POOL,
+    ]);
+    await pool.query(
       `INSERT INTO strategies (workspace_id, strategy_id, pool_id, display_name) VALUES
         ($1,$2,$3,'A'), ($1,$4,$3,'B')`,
       [WORKSPACE, STRATEGY, POOL, OTHER_STRATEGY],
@@ -1472,6 +1483,73 @@ describeIfDatabase('identity and access', () => {
   });
 
   // ------------------------------------------------------------------------------------
+  describe('versioned target proposal routes', () => {
+    const target = {
+      intentId: 'intent-api-1',
+      symbol: 'BTCUSDT',
+      targetBaseQtyAtoms: '600',
+      maxBuyPrice: '62000',
+      minSellPrice: '59000',
+      maxQuoteDebitAtoms: '5000000',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      strategyRevision: '1',
+      policyVersion: '1',
+    } as const;
+
+    it('accepts an agent target once and replays the stored response', async () => {
+      const request = {
+        method: 'POST' as const,
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${STRATEGY}/intents`,
+        headers: {
+          authorization: `Bearer ${agentToken}`,
+          'idempotency-key': 'api-target-once',
+        },
+        payload: target,
+      };
+      const first = await app.inject(request);
+      const replay = await app.inject(request);
+      expect(first.statusCode).toBe(201);
+      expect(first.json()).toMatchObject({ disposition: 'CURRENT', replayed: false });
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json()).toMatchObject({ disposition: 'CURRENT', replayed: true });
+      expect(
+        (
+          await pool.query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM strategy_intents WHERE intent_id='intent-api-1'`,
+          )
+        ).rows[0]?.count,
+      ).toBe('1');
+    });
+
+    it('rejects numeric money and a cross-strategy proposal before persistence', async () => {
+      const numeric = await app.inject({
+        method: 'POST',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${STRATEGY}/intents`,
+        headers: { authorization: `Bearer ${agentToken}`, 'idempotency-key': 'numeric-money' },
+        payload: { ...target, targetBaseQtyAtoms: 600 },
+      });
+      const crossScope = await app.inject({
+        method: 'POST',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${OTHER_STRATEGY}/intents`,
+        headers: { authorization: `Bearer ${agentToken}`, 'idempotency-key': 'cross-target' },
+        payload: target,
+      });
+      const unsupportedOrder = await app.inject({
+        method: 'POST',
+        url: `/v1/workspaces/${WORKSPACE}/pools/${POOL}/strategies/${STRATEGY}/intents`,
+        headers: {
+          authorization: `Bearer ${agentToken}`,
+          'idempotency-key': 'unsupported-order',
+        },
+        payload: { ...target, orderType: 'MARKET', timeInForce: 'GTC' },
+      });
+      expect(numeric.statusCode).toBe(400);
+      expect(crossScope.statusCode).toBe(404);
+      expect(unsupportedOrder.statusCode).toBe(400);
+      expect((await pool.query('SELECT 1 FROM strategy_intents')).rowCount).toBe(0);
+    });
+  });
+
   describe('secrets never reach audit records or responses', () => {
     it('records the denial without the credential material', async () => {
       await app.inject({

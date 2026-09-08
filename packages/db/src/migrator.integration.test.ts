@@ -136,7 +136,8 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
     it('preserves every epoch’s own figures instead of guessing one', async () => {
       const files = await loadMigrations(MIGRATIONS_DIR);
       const before = files.filter((file) => file.version < '0005');
-      expect(before.length).toBe(files.length - 1);
+      const through0005 = files.filter((file) => file.version < '0006');
+      expect(before.length).toBe(through0005.length - 1);
 
       await migrate(client, before, { appliedBy: 'vitest', buildId: 'pre-0005' });
       await seedRotatedHistory();
@@ -146,7 +147,10 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
       expect(await houseClaims()).toEqual([{ epoch: null, atoms: '1400' }]);
 
       // The upgrade itself must succeed against exactly this database.
-      const result = await migrate(client, files, { appliedBy: 'vitest', buildId: 'to-0005' });
+      const result = await migrate(client, through0005, {
+        appliedBy: 'vitest',
+        buildId: 'to-0005',
+      });
       expect(result.applied).toEqual(['0005_baseline']);
 
       // Both epochs survive, each with its own figures. Neither was dropped, and neither was
@@ -172,6 +176,7 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
       // migration would silently make every posting rewritable from then on — a far worse
       // defect than the one it set out to fix.
       const files = await loadMigrations(MIGRATIONS_DIR);
+      const through0005 = files.filter((file) => file.version < '0006');
       await migrate(
         client,
         files.filter((file) => file.version < '0005'),
@@ -181,7 +186,7 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
         },
       );
       await seedRotatedHistory();
-      await migrate(client, files, { appliedBy: 'vitest', buildId: 'to-0005' });
+      await migrate(client, through0005, { appliedBy: 'vitest', buildId: 'to-0005' });
 
       const enabled = await client.query<{ tgenabled: string }>(
         `SELECT tgenabled FROM pg_trigger
@@ -203,6 +208,7 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
       // The point of the per-epoch projection is authority, not presentation. After the
       // upgrade the closed epoch's 1000 must not cover a withdrawal in epoch 2.
       const files = await loadMigrations(MIGRATIONS_DIR);
+      const through0005 = files.filter((file) => file.version < '0006');
       await migrate(
         client,
         files.filter((file) => file.version < '0005'),
@@ -212,7 +218,7 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
         },
       );
       await seedRotatedHistory();
-      await migrate(client, files, { appliedBy: 'vitest', buildId: 'to-0005' });
+      await migrate(client, through0005, { appliedBy: 'vitest', buildId: 'to-0005' });
 
       let refusal = 'accepted';
       try {
