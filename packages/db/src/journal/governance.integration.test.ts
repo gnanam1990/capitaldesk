@@ -237,6 +237,9 @@ describeIfDatabase('governance lease', () => {
       await governance.release({ workspaceId: WORKSPACE, poolId: POOL, reason: 'closing' }),
     ).toEqual({
       ok: true,
+      plansInvalidated: 0,
+      reservationsReleased: 0,
+      attemptsVoided: 0,
     });
     // The released row remains as history.
     const rows = await harness.admin.query<{ released_reason: string | null }>(

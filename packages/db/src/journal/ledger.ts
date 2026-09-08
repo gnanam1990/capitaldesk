@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { currentEpochOf } from './dispatch.js';
+import { currentEpochOf, requireAuthorityPool, type AuthorityRefusal } from './dispatch.js';
 import { serializable, serializableOn, type Queryable } from './transaction.js';
 
 /**
@@ -80,12 +80,12 @@ export type ReserveOutcome =
     }
   | { readonly ok: false; readonly reason: 'NONPOSITIVE_AMOUNT' }
   | { readonly ok: false; readonly reason: 'SOURCE_ALREADY_POSTED'; readonly ledgerTxnId: string }
-  | { readonly ok: false; readonly reason: 'UNKNOWN_POOL' }
   | {
       readonly ok: false;
       readonly reason: 'EPOCH_NOT_CURRENT';
       readonly currentEpoch: number | null;
-    };
+    }
+  | AuthorityRefusal;
 
 export type ReleaseOutcome =
   | { readonly ok: true; readonly revision: number }
@@ -468,11 +468,12 @@ async function reserveBody(client: Queryable, input: ReserveInput): Promise<Rese
   // behind a committed change fails serialization and re-runs from a fresh snapshot, where it
   // reads the reduced availability. Two readers of the same opening balance cannot both
   // commit against it (T-013).
-  const pool = await client.query(
-    'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
-    [input.workspaceId, input.poolId],
-  );
-  if (pool.rowCount !== 1) return { ok: false, reason: 'UNKNOWN_POOL' };
+  //
+  // The same lock also carries the authority gate. A reservation is new economic authority
+  // over the owner's capital, so it needs a pool that may create authority and a live
+  // governance lease, exactly as marking a dispatch does.
+  const authority = await requireAuthorityPool(client, input);
+  if (!authority.ok) return authority;
 
   // Under the same lock rotation takes: a reservation against a closed epoch would commit
   // capital to a baseline that no longer governs.

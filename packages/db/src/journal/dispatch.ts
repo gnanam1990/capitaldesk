@@ -34,7 +34,8 @@ export type SealPlanOutcome =
       readonly ok: false;
       readonly reason: 'EPOCH_NOT_CURRENT';
       readonly currentEpoch: number | null;
-    };
+    }
+  | AuthorityRefusal;
 
 /**
  * The pool's open epoch, read under the caller's lock.
@@ -69,21 +70,21 @@ export type PrepareOutcome =
       readonly ok: false;
       readonly reason: 'EPOCH_NOT_CURRENT';
       readonly currentEpoch: number | null;
-    };
+    }
+  | AuthorityRefusal;
 
 export type MarkOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: 'NOT_PREPARED' }
   | { readonly ok: false; readonly reason: 'ATTEMPT_VOIDED'; readonly voidedReason: string }
-  | { readonly ok: false; readonly reason: 'POOL_NOT_DISPATCHABLE'; readonly state: string }
   | { readonly ok: false; readonly reason: 'PLAN_NOT_DISPATCHABLE'; readonly state: PlanState }
-  | { readonly ok: false; readonly reason: 'NO_ACTIVE_LEASE' }
   | { readonly ok: false; readonly reason: 'SIGNED_REQUEST_MISSING' }
   | {
       readonly ok: false;
       readonly reason: 'EPOCH_NOT_CURRENT';
       readonly currentEpoch: number | null;
-    };
+    }
+  | AuthorityRefusal;
 
 export interface MarkInput {
   readonly workspaceId: string;
@@ -103,8 +104,57 @@ export interface MarkInput {
   };
 }
 
-/** The only pool states from which a dispatch may be marked. */
-const DISPATCHABLE_POOL_STATES: readonly string[] = ['READY', 'AWAITING_APPROVAL', 'IN_FLIGHT'];
+/**
+ * The only pool states in which new economic or dispatch authority may be created.
+ *
+ * BOOTSTRAPPING has no baseline yet; HALTED and QUARANTINED are the states an operator or the
+ * reconciler put the pool into precisely to stop new authority. Recording reconciliation and
+ * compensating evidence is deliberately *not* gated on this: a halted pool still has to be
+ * able to account for the liabilities it already carries.
+ */
+export const AUTHORITY_POOL_STATES: readonly string[] = ['READY', 'AWAITING_APPROVAL', 'IN_FLIGHT'];
+
+export type AuthorityRefusal =
+  | { readonly ok: false; readonly reason: 'POOL_NOT_DISPATCHABLE'; readonly state: string }
+  | { readonly ok: false; readonly reason: 'NO_ACTIVE_LEASE' }
+  | { readonly ok: false; readonly reason: 'UNKNOWN_POOL' };
+
+/**
+ * Lock the pool and require that it may create authority right now.
+ *
+ * Every path that creates approval, reservation or dispatch authority calls this under the
+ * same lock that release and rotation take. Marking checked it; sealing, reserving and
+ * preparing did not, so after a lease was released a probe still sealed a plan, reserved 500
+ * atoms and prepared an attempt in a halted, ungoverned pool.
+ */
+export async function requireAuthorityPool(
+  client: Queryable,
+  scope: { readonly workspaceId: string; readonly poolId: string },
+): Promise<AuthorityRefusal | { readonly ok: true; readonly state: string }> {
+  const pool = await client.query<{
+    state: string;
+    venue: string;
+    environment: string;
+    stable_account_id: string;
+  }>(
+    `SELECT state, venue, environment, stable_account_id FROM pools
+      WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE`,
+    [scope.workspaceId, scope.poolId],
+  );
+  const row = pool.rows[0];
+  if (row === undefined) return { ok: false, reason: 'UNKNOWN_POOL' };
+  if (!AUTHORITY_POOL_STATES.includes(row.state)) {
+    return { ok: false, reason: 'POOL_NOT_DISPATCHABLE', state: row.state };
+  }
+  const lease = await client.query(
+    `SELECT 1 FROM governance_leases
+      WHERE venue = $1 AND environment = $2 AND stable_account_id = $3
+        AND workspace_id = $4 AND pool_id = $5 AND released_at IS NULL`,
+    [row.venue, row.environment, row.stable_account_id, scope.workspaceId, scope.poolId],
+  );
+  if (lease.rowCount !== 1) return { ok: false, reason: 'NO_ACTIVE_LEASE' };
+  return { ok: true, state: row.state };
+}
 
 export type SendAttemptedOutcome =
   { readonly ok: true } | { readonly ok: false; readonly reason: 'NOT_MARKED' };
@@ -168,10 +218,8 @@ export class DispatchRepository {
     readonly state: PlanState;
   }): Promise<SealPlanOutcome> {
     return serializable(this.pool, async (client): Promise<SealPlanOutcome> => {
-      await client.query(
-        'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
-        [input.workspaceId, input.poolId],
-      );
+      const authority = await requireAuthorityPool(client, input);
+      if (!authority.ok) return authority;
       const currentEpoch = await currentEpochOf(client, input);
       if (currentEpoch !== input.epoch) {
         return { ok: false, reason: 'EPOCH_NOT_CURRENT', currentEpoch };
@@ -246,11 +294,10 @@ export class DispatchRepository {
     readonly dispatchToken: string;
   }): Promise<PrepareOutcome> {
     return serializable(this.pool, async (client): Promise<PrepareOutcome> => {
-      // Same lock and the same epoch check as sealing, so rotation cannot slip between them.
-      await client.query(
-        'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
-        [input.workspaceId, input.poolId],
-      );
+      // Same lock, authority check and epoch check as sealing, so neither rotation nor a
+      // lease release can slip between them.
+      const authority = await requireAuthorityPool(client, input);
+      if (!authority.ok) return authority;
       const currentEpoch = await currentEpochOf(client, input);
       if (currentEpoch !== input.epoch) {
         return { ok: false, reason: 'EPOCH_NOT_CURRENT', currentEpoch };
@@ -433,36 +480,9 @@ async function markBody(
     return { ok: false, reason: 'SIGNED_REQUEST_MISSING' };
   }
 
-  // The pool row first, and in the same order every other economic writer takes it.
-  const pool = await client.query<{
-    state: string;
-    venue: string;
-    environment: string;
-    stable_account_id: string;
-  }>(
-    `SELECT state, venue, environment, stable_account_id FROM pools
-      WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE`,
-    [input.workspaceId, input.poolId],
-  );
-  const poolRow = pool.rows[0];
-  if (poolRow === undefined) return { ok: false, reason: 'NOT_PREPARED' };
-  if (!DISPATCHABLE_POOL_STATES.includes(poolRow.state)) {
-    return { ok: false, reason: 'POOL_NOT_DISPATCHABLE', state: poolRow.state };
-  }
-
-  const lease = await client.query(
-    `SELECT 1 FROM governance_leases
-      WHERE venue = $1 AND environment = $2 AND stable_account_id = $3
-        AND workspace_id = $4 AND pool_id = $5 AND released_at IS NULL`,
-    [
-      poolRow.venue,
-      poolRow.environment,
-      poolRow.stable_account_id,
-      input.workspaceId,
-      input.poolId,
-    ],
-  );
-  if (lease.rowCount !== 1) return { ok: false, reason: 'NO_ACTIVE_LEASE' };
+  // The same gate sealing, reserving and preparing use, in the same lock order.
+  const authority = await requireAuthorityPool(client, input);
+  if (!authority.ok) return authority;
 
   const attempt = await client.query<{
     state: DispatchAttemptState;

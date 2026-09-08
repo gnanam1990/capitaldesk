@@ -200,7 +200,7 @@ describeIfDatabase('epoch currency is required wherever authority is created', (
     // Retiring the lease alone left the pool READY, and an approved plan could still mark.
     expect(
       await governance.release({ workspaceId: WORKSPACE, poolId: POOL, reason: 'closing' }),
-    ).toEqual({ ok: true });
+    ).toEqual({ ok: true, plansInvalidated: 0, reservationsReleased: 0, attemptsVoided: 0 });
     const pool = await harness.admin.query<{ state: string }>('SELECT state FROM pools');
     expect(pool.rows[0]?.state).toBe('HALTED');
 

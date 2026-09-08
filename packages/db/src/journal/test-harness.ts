@@ -46,6 +46,7 @@ export class JournalHarness {
   /** The controlling connection: never blocked deliberately, so it can observe and cancel. */
   admin!: Client;
   private extras: Backend[] = [];
+  private pinned: { pool: Pool; pid: number }[] = [];
 
   async open(): Promise<void> {
     this.admin = new Client({ connectionString: DATABASE_URL });
@@ -95,13 +96,18 @@ export class JournalHarness {
        VALUES ($1,$2,'strategy-a','A'), ($1,$2,'strategy-b','B')`,
       [workspaceId, poolId],
     );
+    // A READY pool with no governance lease can create no authority at all: sealing,
+    // reserving, preparing and marking all require one. Seeding an ungoverned pool by
+    // default would make most fixtures test the refusal path by accident, so the default
+    // pool is governed and a test that wants the ungoverned case releases the lease itself.
+    await this.seedGovernanceLease(workspaceId, poolId);
   }
 
   /** The active governance lease a dispatch marker requires. */
   async seedGovernanceLease(workspaceId = WORKSPACE, poolId = POOL): Promise<void> {
     await this.admin.query(
       `INSERT INTO governance_leases (lease_id, venue, environment, stable_account_id, workspace_id, pool_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (lease_id) DO NOTHING`,
       [
         `lease-${poolId}`,
         ACCOUNT.venue,
@@ -125,6 +131,27 @@ export class JournalHarness {
   }
 
   /**
+   * A `Pool` pinned to exactly one backend, with that backend's pid.
+   *
+   * A repository built on it runs every statement on one known connection, which is what a
+   * lock-contention test needs: `harness.pool` hands out any of eight backends, so the pid a
+   * test observed would not be the pid the next statement used. Closed by `cleanup()`.
+   */
+  async pinnedRepositoryPool(): Promise<{ pool: Pool; pid: number }> {
+    const pool = new Pool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${this.schema}`,
+      max: 1,
+      // The single backend must persist across statements, or the pid moves under the test.
+      idleTimeoutMillis: 0,
+    });
+    const pid = (await pool.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid;
+    if (pid === undefined) throw new Error('could not read the pinned backend pid');
+    this.pinned.push({ pool, pid });
+    return { pool, pid };
+  }
+
+  /**
    * Call from afterEach. Cancels first, closes concurrently, bounded - and then proves it.
    *
    * A bounded `client.end()` does not stop a checked-out backend that is still blocked, and
@@ -135,22 +162,28 @@ export class JournalHarness {
   async cleanup(): Promise<void> {
     const pending = this.extras;
     this.extras = [];
-    if (pending.length > 0) {
+    const pinned = this.pinned;
+    this.pinned = [];
+    const cancellable = [...pending.map((b) => b.pid), ...pinned.map((p) => p.pid)];
+    if (cancellable.length > 0) {
       await this.admin
-        .query('SELECT pg_cancel_backend(pid) FROM unnest($1::int[]) AS pid', [
-          pending.map((backend) => backend.pid),
-        ])
+        .query('SELECT pg_cancel_backend(pid) FROM unnest($1::int[]) AS pid', [cancellable])
         .catch(() => undefined);
     }
     await Promise.allSettled(
       pending.map((backend) => withDeadline(backend.client.end(), 5000, `closing ${backend.pid}`)),
     );
+    await Promise.allSettled(
+      pinned.map((entry) =>
+        withDeadline(entry.pool.end(), 5000, `closing pinned pool ${String(entry.pid)}`),
+      ),
+    );
     await this.admin.query('ROLLBACK').catch(() => undefined);
 
-    if (pending.length > 0) {
+    if (cancellable.length > 0) {
       // Terminate, not cancel: a backend that survived `end()` is holding something, and the
       // schema drop would block on it.
-      const pids = pending.map((backend) => backend.pid);
+      const pids = cancellable;
       await this.admin
         .query('SELECT pg_terminate_backend(pid) FROM unnest($1::int[]) AS pid', [pids])
         .catch(() => undefined);

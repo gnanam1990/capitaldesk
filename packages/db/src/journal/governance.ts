@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Pool } from 'pg';
 import { PLAN_IN_FLIGHT_STATES } from './dispatch.js';
+import { invalidateUnmarkedPlans } from './restore.js';
 import { serializable, serializableOn, type Queryable } from './transaction.js';
 
 /**
@@ -52,7 +53,13 @@ export type AcquireGovernanceOutcome =
     };
 
 export type ReleaseGovernanceOutcome =
-  | { readonly ok: true }
+  | {
+      readonly ok: true;
+      /** Unmarked plans invalidated by this release, per ADR-0006 `INVALIDATE_UNMARKED`. */
+      readonly plansInvalidated: number;
+      readonly reservationsReleased: number;
+      readonly attemptsVoided: number;
+    }
   | { readonly ok: false; readonly reason: 'NO_ACTIVE_LEASE' }
   | {
       readonly ok: false;
@@ -139,14 +146,26 @@ export class GovernanceRepository {
       );
       // A pool without a lease governs nothing. Leaving it READY let an approved plan keep
       // dispatching and its claims keep moving after the lease was retired, so the pool is
-      // halted in the same transaction - and every dispatch path independently requires an
-      // active lease, so neither guard stands alone.
+      // halted in the same transaction - and every path that creates approval, reservation
+      // or dispatch authority independently requires both an allowed pool state and a live
+      // lease, so neither guard stands alone.
       await client.query(
         `UPDATE pools SET state = 'HALTED', version = version + 1, updated_at = now()
           WHERE workspace_id = $1 AND pool_id = $2`,
         [input.workspaceId, input.poolId],
       );
-      return { ok: true };
+      // Release resolves what it withdraws authority from rather than halting around it.
+      // The two accepted lifecycle rules compose here: this release is refused outright
+      // while a dispatch is in flight, exactly as `ACCOUNT_UNLINK` is, and because it halts
+      // the pool it carries `POOL_HALT`'s `INVALIDATE_UNMARKED` effect - unmarked plans are
+      // invalidated and their reservations returned in this same transaction, so no plan is
+      // left permanently unapprovable while still holding the owner's capital.
+      const invalidated = await invalidateUnmarkedPlans(client, {
+        reason: `governance lease released: ${input.reason}`,
+        releaseKind: 'lease-release',
+        scope: { workspaceId: input.workspaceId, poolId: input.poolId },
+      });
+      return { ok: true, ...invalidated };
     });
   }
 
