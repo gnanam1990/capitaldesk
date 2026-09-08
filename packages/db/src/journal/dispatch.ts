@@ -159,32 +159,29 @@ export async function requireAuthorityPool(
 export type SendAttemptedOutcome =
   { readonly ok: true } | { readonly ok: false; readonly reason: 'NOT_MARKED' };
 
-/**
- * Evidence that a marked attempt could not have sent (ADR-0001 condition 2).
- *
- * `NOT_SENT_PROVEN` releases reservations, so it is the one dispatch outcome that turns
- * uncertainty into a release. It requires all of it: the sender fenced, an account-wide scan
- * and trade backfill covering the whole uncertainty window with no record of the client order
- * id, and coverage COMPLETE over that window.
- */
-export interface NotSentEvidence {
-  readonly senderFenced: boolean;
-  readonly openOrderScanClear: boolean;
-  readonly tradeBackfillClear: boolean;
-  readonly coverageComplete: boolean;
-}
-
 export type ResolveOutcome =
   | { readonly ok: true }
-  | {
-      readonly ok: false;
-      readonly reason: 'SEND_ATTEMPTED_CANNOT_BE_UNSENT';
-    }
-  | {
-      readonly ok: false;
-      readonly reason: 'NOT_SENT_EVIDENCE_INCOMPLETE';
-      readonly missing: readonly string[];
-    }
+  /**
+   * `NOT_SENT_PROVEN` is in the domain state machine but unreachable in module 04.
+   *
+   * It is the one dispatch outcome that releases a held reservation, so it is the one that
+   * must not be reachable on a caller's word. This method used to take four booleans -
+   * `senderFenced`, `openOrderScanClear`, `tradeBackfillClear`, `coverageComplete` - check
+   * they were all true, and then discard them: nothing was stored, nothing referenced a real
+   * observation, and no later reader could audit why the capital was released.
+   *
+   * The evidence ADR-0001 requires is produced by the reconciler in module 15: a fenced
+   * sender, an account-wide open-order scan and trade backfill covering the whole uncertainty
+   * window with no record of the client order id, and COMPLETE coverage over that window.
+   * Until a forward migration adds columns binding this attempt to those durable evidence
+   * rows, the honest answer is that module 04 cannot prove a non-send, so it refuses. The
+   * database refuses the same transition independently, including from a raw UPDATE.
+   *
+   * When module 15 lands, reinstating this must also reinstate the rule that an attempt which
+   * recorded `SEND_ATTEMPTED` can never be proven unsent, by any route including
+   * `SEND_ATTEMPTED -> UNKNOWN -> NOT_SENT_PROVEN`.
+   */
+  | { readonly ok: false; readonly reason: 'NOT_SENT_PROVEN_UNAVAILABLE' }
   | { readonly ok: false; readonly reason: 'UNKNOWN_ATTEMPT' }
   | {
       readonly ok: false;
@@ -378,15 +375,15 @@ export class DispatchRepository {
     readonly poolId: string;
     readonly attemptId: string;
     readonly to: DispatchAttemptState;
-    /** Required, and only permitted, when resolving to NOT_SENT_PROVEN. */
-    readonly notSentEvidence?: NotSentEvidence;
   }): Promise<ResolveOutcome> {
+    // Refused before the row is even read, so no caller can believe an evidence argument
+    // would change the answer. See ResolveOutcome for why, and what module 15 must supply.
+    if (input.to === 'NOT_SENT_PROVEN') {
+      return Promise.resolve({ ok: false, reason: 'NOT_SENT_PROVEN_UNAVAILABLE' });
+    }
     return serializable(this.pool, async (client): Promise<ResolveOutcome> => {
-      const attempt = await client.query<{
-        state: DispatchAttemptState;
-        send_attempted_at: Date | null;
-      }>(
-        'SELECT state, send_attempted_at FROM dispatch_attempts WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 FOR UPDATE',
+      const attempt = await client.query<{ state: DispatchAttemptState }>(
+        'SELECT state FROM dispatch_attempts WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3 FOR UPDATE',
         [input.workspaceId, input.poolId, input.attemptId],
       );
       const row = attempt.rows[0];
@@ -394,29 +391,6 @@ export class DispatchRepository {
       if (!DISPATCH_ATTEMPT_TRANSITIONS[row.state].includes(input.to))
         return { ok: false, reason: 'TRANSITION_REFUSED', from: row.state };
 
-      if (input.to === 'NOT_SENT_PROVEN') {
-        // An attempt that recorded SEND_ATTEMPTED wrote that row immediately before the first
-        // network byte. Nothing observed afterwards can prove it was not sent, and the
-        // contract's table allowed SEND_ATTEMPTED -> UNKNOWN -> NOT_SENT_PROVEN, which would
-        // have released a known-send liability.
-        if (row.send_attempted_at !== null) {
-          return { ok: false, reason: 'SEND_ATTEMPTED_CANNOT_BE_UNSENT' };
-        }
-        const evidence = input.notSentEvidence;
-        const missing = (
-          [
-            ['senderFenced', evidence?.senderFenced],
-            ['openOrderScanClear', evidence?.openOrderScanClear],
-            ['tradeBackfillClear', evidence?.tradeBackfillClear],
-            ['coverageComplete', evidence?.coverageComplete],
-          ] as const
-        )
-          .filter(([, held]) => held !== true)
-          .map(([name]) => name);
-        if (missing.length > 0) {
-          return { ok: false, reason: 'NOT_SENT_EVIDENCE_INCOMPLETE', missing };
-        }
-      }
       await client.query(
         `UPDATE dispatch_attempts
             SET state = $4, resolved_at = CASE WHEN $5::boolean THEN now() ELSE resolved_at END

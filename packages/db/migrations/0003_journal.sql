@@ -326,6 +326,22 @@ BEGIN
   IF NEW.state = OLD.state THEN
     RETURN NEW;
   END IF;
+  -- NOT_SENT_PROVEN stays in the domain state machine below, because it is the outcome
+  -- ADR-0001 defines for a marked attempt that provably never sent. No writer can reach it in
+  -- this schema version. It is the one dispatch outcome that releases a held reservation, and
+  -- the evidence ADR-0001 requires for it -- a fenced sender, an account-wide open-order scan
+  -- and trade backfill covering the whole uncertainty window with no record of the client
+  -- order id, and COMPLETE coverage over that window -- is produced by the reconciler in
+  -- module 15, which does not exist yet. There are no columns here that reference those
+  -- durable evidence rows, so any transition into this state would release the owner's
+  -- capital on a caller's unverifiable word. A raw UPDATE did exactly that. The database
+  -- refuses it outright until a forward migration binds the evidence.
+  IF NEW.state = 'NOT_SENT_PROVEN' THEN
+    RAISE EXCEPTION
+      'dispatch attempt % cannot reach NOT_SENT_PROVEN: this schema version records no authoritative non-send evidence to justify it',
+      OLD.attempt_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
   permitted := CASE OLD.state
     WHEN 'PREPARED'        THEN NEW.state IN ('DISPATCH_MARKED')
     WHEN 'DISPATCH_MARKED' THEN NEW.state IN ('SEND_ATTEMPTED', 'UNKNOWN', 'NOT_SENT_PROVEN')

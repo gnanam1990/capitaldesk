@@ -274,67 +274,34 @@ describeIfDatabase('a send attempt can never be proven unsent', () => {
     await harness.cleanup();
   });
 
-  const resolve = (
-    to: 'UNKNOWN' | 'NOT_SENT_PROVEN',
-    evidence?: Parameters<DispatchRepository['resolve']>[0]['notSentEvidence'],
-  ) =>
-    dispatch.resolve({
-      workspaceId: WORKSPACE,
-      poolId: POOL,
-      attemptId: 'a1',
-      to,
-      ...(evidence === undefined ? {} : { notSentEvidence: evidence }),
+  const resolve = (to: 'UNKNOWN' | 'NOT_SENT_PROVEN') =>
+    dispatch.resolve({ workspaceId: WORKSPACE, poolId: POOL, attemptId: 'a1', to });
+
+  it('refuses NOT_SENT_PROVEN from a marked attempt, because it cannot prove a non-send', async () => {
+    // The fourth review round removed the four caller-supplied booleans this used to accept
+    // and discard. Module 04 records no authoritative non-send evidence, so the honest answer
+    // is a refusal. review-round-4-not-sent.integration.test.ts holds the full case.
+    expect(await resolve('NOT_SENT_PROVEN')).toEqual({
+      ok: false,
+      reason: 'NOT_SENT_PROVEN_UNAVAILABLE',
     });
+    expect(
+      (await harness.admin.query<{ state: string }>('SELECT state FROM dispatch_attempts')).rows[0]
+        ?.state,
+    ).toBe('DISPATCH_MARKED');
+  });
 
-  const COMPLETE = {
-    senderFenced: true,
-    openOrderScanClear: true,
-    tradeBackfillClear: true,
-    coverageComplete: true,
-  };
-
-  it('refuses NOT_SENT_PROVEN after a send was attempted, whatever the evidence claims', async () => {
-    // SEND_ATTEMPTED is committed immediately before the first network byte. Nothing observed
-    // afterwards can prove the bytes never left, and the transition table permitted
-    // SEND_ATTEMPTED -> UNKNOWN -> NOT_SENT_PROVEN, which would release a known-send liability.
+  it('refuses it from UNKNOWN too, whichever route the caller takes', async () => {
     await dispatch.recordSendAttempted({ workspaceId: WORKSPACE, poolId: POOL, attemptId: 'a1' });
     await resolve('UNKNOWN');
-    expect(await resolve('NOT_SENT_PROVEN', COMPLETE)).toEqual({
+    expect(await resolve('NOT_SENT_PROVEN')).toEqual({
       ok: false,
-      reason: 'SEND_ATTEMPTED_CANNOT_BE_UNSENT',
+      reason: 'NOT_SENT_PROVEN_UNAVAILABLE',
     });
     expect(
       (await harness.admin.query<{ state: string }>('SELECT state FROM dispatch_attempts')).rows[0]
         ?.state,
     ).toBe('UNKNOWN');
-  });
-
-  it('requires every piece of fencing and coverage evidence', async () => {
-    await resolve('UNKNOWN');
-    expect(await resolve('NOT_SENT_PROVEN')).toMatchObject({
-      ok: false,
-      reason: 'NOT_SENT_EVIDENCE_INCOMPLETE',
-      missing: ['senderFenced', 'openOrderScanClear', 'tradeBackfillClear', 'coverageComplete'],
-    });
-    expect(
-      await resolve('NOT_SENT_PROVEN', { ...COMPLETE, coverageComplete: false }),
-    ).toMatchObject({
-      ok: false,
-      missing: ['coverageComplete'],
-    });
-    expect(
-      (await harness.admin.query<{ state: string }>('SELECT state FROM dispatch_attempts')).rows[0]
-        ?.state,
-    ).toBe('UNKNOWN');
-  });
-
-  it('permits it for a marked attempt that never sent, with complete evidence', async () => {
-    await resolve('UNKNOWN');
-    expect(await resolve('NOT_SENT_PROVEN', COMPLETE)).toEqual({ ok: true });
-    expect(
-      (await harness.admin.query<{ state: string }>('SELECT state FROM dispatch_attempts')).rows[0]
-        ?.state,
-    ).toBe('NOT_SENT_PROVEN');
   });
 
   it('refuses a marker with no signed request, and the table refuses one too', async () => {

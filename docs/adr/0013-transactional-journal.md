@@ -245,12 +245,35 @@ Releasing a governance lease halts the pool in the same transaction. Retiring th
 left the pool READY, and an approved plan could still mark; marking independently requires an
 active lease, so neither guard depends on the other.
 
-### 13. NOT_SENT_PROVEN requires evidence, and never follows a send
+### 13. NOT_SENT_PROVEN stays in the contract and is unreachable in this module
 
-`SEND_ATTEMPTED` is committed immediately before the first network byte, so nothing observed
-afterwards can prove the bytes never left. That transition is refused outright. For an attempt
-that never sent, the release requires all of ADR-0001's conditions — sender fenced, open-order
-scan and trade backfill clear, coverage complete — and names which are missing.
+**Amended by the fourth review round.** The first version of this section claimed the module
+required all of ADR-0001's conditions before releasing. It did not. `resolve` took four
+caller-supplied booleans — `senderFenced`, `openOrderScanClear`, `tradeBackfillClear`,
+`coverageComplete` — checked they were all `true`, and then discarded them. Nothing was
+stored, nothing referenced an actual observation, and no later reader could audit why a
+reservation had been released. A raw `UPDATE` reached the state with no evidence at all.
+
+`NOT_SENT_PROVEN` is the one dispatch outcome that releases a held reservation, so it is the
+one that must not be reachable on anybody's word. The evidence ADR-0001 requires is produced
+by the reconciler in **module 15**, which does not exist yet, and binding it needs columns
+that reference durable evidence rows.
+
+The resolution is fail-closed:
+
+- The state stays in `DISPATCH_ATTEMPT_TRANSITIONS` and in the table's CHECK, because the
+  outcome exists in the domain and module 15 will implement it.
+- `DispatchRepository.resolve` refuses it with `NOT_SENT_PROVEN_UNAVAILABLE` before reading
+  the row, and takes no evidence argument at all.
+- `refuse_dispatch_regression` refuses every transition into it, so a raw `UPDATE` from any
+  writer fails with `restrict_violation`. The marked-state CHECK refuses an `INSERT` that
+  starts there.
+
+Module 15 must add a forward migration binding an attempt to the authoritative evidence rows
+before re-enabling the transition, and must reinstate the rule that an attempt which recorded
+`SEND_ATTEMPTED` can never be proven unsent — including through
+`SEND_ATTEMPTED -> UNKNOWN -> NOT_SENT_PROVEN`. T-059 and T-060 remain **not implemented**
+until then.
 
 The marker also persists the marking process's start time. Boot id and pid do not identify a
 process, because pids are reused without a reboot, so the host record on its own was not
