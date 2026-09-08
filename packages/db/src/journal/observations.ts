@@ -100,7 +100,17 @@ export interface RecordFillInput {
 }
 
 export type RecordOutcome = { readonly kind: 'recorded' } | { readonly kind: 'already-recorded' };
-export type RecordFillOutcome = RecordOutcome | { readonly kind: 'unknown-order' };
+
+export type RecordFillOutcome =
+  | { readonly kind: 'recorded' }
+  /** Byte-for-byte the same fill already recorded. */
+  | { readonly kind: 'already-recorded' }
+  | { readonly kind: 'unknown-order' }
+  /**
+   * The same scoped trade id carrying different economic facts. Immutable evidence does not
+   * change; the contradiction is recorded for the incident path.
+   */
+  | { readonly kind: 'conflict'; readonly changed: readonly string[]; readonly conflictId: string };
 
 export type RecordOrderOutcome =
   | { readonly kind: 'recorded' }
@@ -123,6 +133,17 @@ export type RecordOrderOutcome =
       readonly kind: 'conflict';
       readonly current: VenueOrderStatus;
       readonly incoming: VenueOrderStatus;
+      readonly conflictId: string;
+    }
+  /**
+   * The venue order is already correlated to one of our dispatch attempts and the incoming
+   * observation names a different one. One venue order cannot belong to two local attempts,
+   * and keeping the first silently would hide that something correlated wrongly.
+   */
+  | {
+      readonly kind: 'correlation-conflict';
+      readonly current: string;
+      readonly incoming: string;
       readonly conflictId: string;
     };
 
@@ -305,8 +326,12 @@ export class ObservationRepository {
    */
   recordOrder(input: RecordOrderInput): Promise<RecordOrderOutcome> {
     return serializable(this.pool, async (client): Promise<RecordOrderOutcome> => {
-      const existing = await client.query<{ status: VenueOrderStatus; version: number }>(
-        `SELECT status, version FROM venue_orders
+      const existing = await client.query<{
+        status: VenueOrderStatus;
+        version: number;
+        client_order_id: string | null;
+      }>(
+        `SELECT status, version, client_order_id FROM venue_orders
           WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4 AND venue_order_id = $5
           FOR UPDATE`,
         [input.workspaceId, input.poolId, input.epoch, input.symbol, input.venueOrderId],
@@ -328,11 +353,49 @@ export class ObservationRepository {
         );
         return { kind: 'recorded' };
       }
+      // One venue order cannot belong to two of our dispatch attempts. `coalesce` kept the
+      // first correlation and ignored a different one, on both the duplicate and the
+      // progressed path, so a mis-correlation would never have surfaced.
+      if (
+        input.clientOrderId !== undefined &&
+        stored.client_order_id !== null &&
+        stored.client_order_id !== input.clientOrderId
+      ) {
+        const conflict = await client.query<{ conflict_id: string }>(
+          `INSERT INTO evidence_conflicts
+             (workspace_id, pool_id, epoch, subject_kind, subject_ref, stored, incoming)
+           VALUES ($1, $2, $3, 'order-correlation', $4, $5::jsonb, $6::jsonb)
+           RETURNING conflict_id::text`,
+          [
+            input.workspaceId,
+            input.poolId,
+            input.epoch,
+            `${input.symbol}/${input.venueOrderId}`,
+            JSON.stringify({ clientOrderId: stored.client_order_id }),
+            JSON.stringify({ clientOrderId: input.clientOrderId, status: input.status }),
+          ],
+        );
+        return {
+          kind: 'correlation-conflict',
+          current: stored.client_order_id,
+          incoming: input.clientOrderId,
+          conflictId: conflict.rows[0]?.conflict_id ?? '',
+        };
+      }
+
       if (stored.status === input.status) {
         await client.query(
-          `UPDATE venue_orders SET last_observed_at = now()
+          `UPDATE venue_orders
+              SET last_observed_at = now(), client_order_id = coalesce(client_order_id, $6)
             WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4 AND venue_order_id = $5`,
-          [input.workspaceId, input.poolId, input.epoch, input.symbol, input.venueOrderId],
+          [
+            input.workspaceId,
+            input.poolId,
+            input.epoch,
+            input.symbol,
+            input.venueOrderId,
+            input.clientOrderId ?? null,
+          ],
         );
         return { kind: 'duplicate' };
       }
@@ -369,6 +432,7 @@ export class ObservationRepository {
       await client.query(
         `UPDATE venue_orders
             SET status = $6, version = $7, last_observed_at = now(),
+                -- Only ever filled in. A different one was refused as a conflict above.
                 client_order_id = coalesce(client_order_id, $8)
           WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4 AND venue_order_id = $5`,
         [
@@ -386,6 +450,16 @@ export class ObservationRepository {
     });
   }
 
+  /**
+   * Record an authoritative fill.
+   *
+   * `ON CONFLICT DO NOTHING` reported any second statement about a trade id as an ordinary
+   * duplicate, including one carrying different quantities, a different commission or a
+   * different time. That is contradictory immutable economic evidence, and discarding it
+   * silently is exactly what the allocator must never be built on. The stored tuple is
+   * compared field by field; an exact repeat dedupes, and any difference is recorded as
+   * conflict evidence without touching the stored fill.
+   */
   recordFill(input: RecordFillInput): Promise<RecordFillOutcome> {
     return serializable(this.pool, async (client): Promise<RecordFillOutcome> => {
       const order = await client.query(
@@ -394,12 +468,82 @@ export class ObservationRepository {
         [input.workspaceId, input.poolId, input.epoch, input.symbol, input.venueOrderId],
       );
       if (order.rowCount !== 1) return { kind: 'unknown-order' };
-      const inserted = await client.query(
+
+      const commissionAsset = `${input.commission.asset.code}:${input.commission.asset.scale}`;
+      const stored = await client.query<{
+        observation_id: string;
+        base_atoms: string;
+        quote_atoms: string;
+        commission_asset: string;
+        commission_atoms: string;
+        traded_at: Date;
+      }>(
+        `SELECT observation_id, base_atoms::text, quote_atoms::text, commission_asset,
+                commission_atoms::text, traded_at
+           FROM venue_fills
+          WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4
+            AND venue_order_id = $5 AND venue_trade_id = $6
+          FOR UPDATE`,
+        [
+          input.workspaceId,
+          input.poolId,
+          input.epoch,
+          input.symbol,
+          input.venueOrderId,
+          input.venueTradeId,
+        ],
+      );
+      const existing = stored.rows[0];
+      if (existing !== undefined) {
+        const changed = [
+          ['observationId', existing.observation_id, input.observationId],
+          ['baseAtoms', existing.base_atoms, input.baseAtoms.toString()],
+          ['quoteAtoms', existing.quote_atoms, input.quoteAtoms.toString()],
+          ['commissionAsset', existing.commission_asset, commissionAsset],
+          ['commissionAtoms', existing.commission_atoms, input.commission.atoms.toString()],
+          ['tradedAt', existing.traded_at.toISOString(), input.tradedAt.toISOString()],
+        ]
+          .filter(([, was, now]) => was !== now)
+          .map(([field]) => field as string);
+        if (changed.length === 0) return { kind: 'already-recorded' };
+
+        const conflict = await client.query<{ conflict_id: string }>(
+          `INSERT INTO evidence_conflicts
+             (workspace_id, pool_id, epoch, subject_kind, subject_ref, stored, incoming)
+           VALUES ($1, $2, $3, 'fill', $4, $5::jsonb, $6::jsonb)
+           RETURNING conflict_id::text`,
+          [
+            input.workspaceId,
+            input.poolId,
+            input.epoch,
+            `${input.symbol}/${input.venueOrderId}/${input.venueTradeId}`,
+            JSON.stringify({
+              observationId: existing.observation_id,
+              baseAtoms: existing.base_atoms,
+              quoteAtoms: existing.quote_atoms,
+              commissionAsset: existing.commission_asset,
+              commissionAtoms: existing.commission_atoms,
+              tradedAt: existing.traded_at.toISOString(),
+            }),
+            JSON.stringify({
+              observationId: input.observationId,
+              baseAtoms: input.baseAtoms.toString(),
+              quoteAtoms: input.quoteAtoms.toString(),
+              commissionAsset,
+              commissionAtoms: input.commission.atoms.toString(),
+              tradedAt: input.tradedAt.toISOString(),
+              changed,
+            }),
+          ],
+        );
+        return { kind: 'conflict', changed, conflictId: conflict.rows[0]?.conflict_id ?? '' };
+      }
+
+      await client.query(
         `INSERT INTO venue_fills
            (workspace_id, pool_id, epoch, symbol, venue_order_id, venue_trade_id, observation_id,
             base_atoms, quote_atoms, commission_asset, commission_atoms, traded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10, $11::numeric, $12)
-         ON CONFLICT (workspace_id, pool_id, epoch, symbol, venue_order_id, venue_trade_id) DO NOTHING`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10, $11::numeric, $12)`,
         [
           input.workspaceId,
           input.poolId,
@@ -410,12 +554,12 @@ export class ObservationRepository {
           input.observationId,
           input.baseAtoms.toString(),
           input.quoteAtoms.toString(),
-          `${input.commission.asset.code}:${input.commission.asset.scale}`,
+          commissionAsset,
           input.commission.atoms.toString(),
           input.tradedAt,
         ],
       );
-      return inserted.rowCount === 1 ? { kind: 'recorded' } : { kind: 'already-recorded' };
+      return { kind: 'recorded' };
     });
   }
 }

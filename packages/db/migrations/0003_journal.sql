@@ -415,7 +415,7 @@ CREATE TABLE evidence_conflicts (
   FOREIGN KEY (workspace_id, pool_id, epoch)
     REFERENCES baseline_epochs (workspace_id, pool_id, epoch),
   CONSTRAINT evidence_conflicts_subject_known
-    CHECK (subject_kind IN ('observation', 'order-status'))
+    CHECK (subject_kind IN ('observation', 'order-status', 'order-correlation', 'fill'))
 );
 
 CREATE INDEX evidence_conflicts_by_subject
