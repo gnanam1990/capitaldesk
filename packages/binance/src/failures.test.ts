@@ -129,6 +129,33 @@ describe('typed read failures', () => {
       );
     });
 
+    /**
+     * The inputs being sound does not make the result sound.
+     *
+     * A clock already near the ECMAScript time-value limit (8.64e15 ms) plus a legitimate
+     * three-day defer lands outside it, and `new Date` answers with an Invalid Date whose
+     * getTime() is NaN. Persisted, that reads as "never" — the opposite of a wait.
+     */
+    it('refuses a defer that would land outside representable time', () => {
+      const nearLimit = new Date(8.64e15 - 1000);
+      expect(Number.isNaN(nearLimit.getTime())).toBe(false);
+      expect(() =>
+        deferUntil(rateLimited('account', 418, MAX_RETRY_AFTER_SECONDS), nearLimit),
+      ).toThrow(ContractViolation);
+      expect(() =>
+        deferUntil(rateLimited('account', 418, MAX_RETRY_AFTER_SECONDS), nearLimit),
+      ).toThrow(/representable time/);
+    });
+
+    it('still computes a defer that only just fits, so the guard is a bound and not a ban', () => {
+      // The positive control: one second inside the limit is a real instant and is returned.
+      const nearLimit = new Date(8.64e15 - 2000);
+      const until = deferUntil(rateLimited('account', 429, 1), nearLimit);
+      expect(until).not.toBeNull();
+      expect(Number.isNaN(until?.getTime() ?? Number.NaN)).toBe(false);
+      expect(until?.getTime()).toBe(8.64e15 - 1000);
+    });
+
     it('stays a real instant at the far end of the range', () => {
       const far = deferUntil(rateLimited('account', 418, MAX_RETRY_AFTER_SECONDS), NOW);
       expect(far).not.toBeNull();
@@ -138,6 +165,42 @@ describe('typed read failures', () => {
 
     it('is undefined for a failure class that is not a rate limit', () => {
       expect(deferUntil(unavailable('account', 'timeout'), NOW)).toBeNull();
+    });
+  });
+
+  /**
+   * `rateLimited` is exported, so `parseRetryAfter` is not the only route a number takes into
+   * a failure. Leaving the bound in the parser alone let a caller construct a failure that
+   * scheduled a retry in the past, or one whose instant was not a time at all.
+   */
+  describe('the defer bound holds on every route in, not just the header parser', () => {
+    const NOW = new Date('2026-09-08T12:00:00.000Z');
+
+    it('discards a negative, fractional or non-finite duration handed in directly', () => {
+      for (const seconds of [-1, -0.5, 0.5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        const failure = rateLimited('account', 429, seconds);
+        expect(failure.retryAfterSeconds, String(seconds)).toBeNull();
+        // It falls back to the conservative floor rather than scheduling in the past.
+        expect(deferUntil(failure, NOW)?.getTime(), String(seconds)).toBe(NOW.getTime() + 30_000);
+      }
+    });
+
+    it('discards a duration above the documented ban bound handed in directly', () => {
+      expect(rateLimited('account', 418, MAX_RETRY_AFTER_SECONDS + 1).retryAfterSeconds).toBeNull();
+      expect(rateLimited('account', 418, Number.MAX_SAFE_INTEGER).retryAfterSeconds).toBeNull();
+    });
+
+    it('keeps every value inside the documented range, including both ends', () => {
+      expect(rateLimited('account', 429, 0).retryAfterSeconds).toBe(0);
+      expect(rateLimited('account', 418, MAX_RETRY_AFTER_SECONDS).retryAfterSeconds).toBe(259_200);
+    });
+
+    it('never schedules a defer at or before the instant it was computed from', () => {
+      for (const seconds of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 1e18]) {
+        const until = deferUntil(rateLimited('account', 429, seconds), NOW);
+        expect(until, String(seconds)).not.toBeNull();
+        expect((until?.getTime() ?? 0) > NOW.getTime(), String(seconds)).toBe(true);
+      }
     });
   });
 

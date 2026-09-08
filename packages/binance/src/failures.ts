@@ -81,9 +81,21 @@ export function parseRetryAfter(value: string | null | undefined): number | null
   // Strictly digits: this rejects '-5', '1.5', '1e3', 'NaN' and 'Infinity' without relying on
   // Number() coercion, which accepts all but the first.
   if (!/^\d+$/.test(text)) return null;
-  const seconds = Number(text);
-  if (!Number.isSafeInteger(seconds)) return null;
-  if (seconds > MAX_RETRY_AFTER_SECONDS) return null;
+  return usableDeferSeconds(Number(text));
+}
+
+/**
+ * The one place a defer duration is judged, whatever route it arrived by.
+ *
+ * `parseRetryAfter` is not the only way a number reaches a failure: `rateLimited` is exported
+ * and a caller can pass one directly. Leaving the bound in the parser alone meant
+ * `rateLimited('account', 429, -1)` scheduled a retry in the past and `Infinity` produced an
+ * Invalid Date, which is stored as null and reads as "never" — the opposite of a wait.
+ */
+export function usableDeferSeconds(seconds: number | null | undefined): number | null {
+  if (seconds === null || seconds === undefined) return null;
+  if (!Number.isInteger(seconds)) return null;
+  if (seconds < 0 || seconds > MAX_RETRY_AFTER_SECONDS) return null;
   return seconds;
 }
 
@@ -104,7 +116,19 @@ export function deferUntil(failure: ReadFailure, now: Date): Date | null {
   }
   const key = failure.status === 418 ? '418' : failure.status === 429 ? '429' : 'other';
   const seconds = failure.retryAfterSeconds ?? DEFAULT_DEFER_SECONDS[key];
-  return new Date(base + seconds * 1000);
+  const epoch = base + seconds * 1000;
+  const until = new Date(epoch);
+  // The inputs being sound does not make the result sound: a clock already near the ECMAScript
+  // time-value limit plus a legitimate three-day defer lands outside it, and `new Date` answers
+  // with an Invalid Date whose `getTime()` is NaN. Persisted, that reads as "never", which is
+  // the opposite of a wait. Refuse it here rather than storing it.
+  if (!Number.isFinite(epoch) || Number.isNaN(until.getTime())) {
+    violate('CLOCK_SKEW_UNBOUNDED', 'the computed defer instant is not a representable time', {
+      endpoint: failure.endpoint,
+      seconds: String(seconds),
+    });
+  }
+  return until;
 }
 
 /**
@@ -125,10 +149,13 @@ export function rateLimited(
   status: number,
   retryAfterSeconds: number | null,
 ): ReadFailure {
+  // Every route into a failure passes through the same bound. An out-of-range value becomes
+  // null, which means "the venue gave no usable instruction" and makes the caller apply its
+  // conservative floor — never a negative wait, and never a non-finite one.
   return new ReadFailure(
     'SOURCE_RATE_LIMITED',
     `${endpoint} was rate limited with HTTP ${String(status)}`,
-    { endpoint, status, retryAfterSeconds },
+    { endpoint, status, retryAfterSeconds: usableDeferSeconds(retryAfterSeconds) },
   );
 }
 
