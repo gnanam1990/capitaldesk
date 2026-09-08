@@ -8,7 +8,7 @@ import {
   TableRegion,
 } from '../../components/Console';
 import { Icon } from '../../components/Icons';
-import { ACCOUNT_ID, PLAN_DIGEST } from '../../lib/preview-data';
+import { ACCOUNT_ID, PLAN_DIGEST, previewMode } from '../../lib/preview-data';
 
 const MANIFEST = `manifestVersion: capitaldesk-evidence/v1
 environment: testnet
@@ -29,9 +29,15 @@ export default function EvidencePage() {
         title="Evidence that says exactly what it proves."
         summary="Exports preserve exact decimal text, account epoch, source coverage and unresolved liabilities. Digest integrity is not a venue signature."
         action={
-          <button className="cd-button" type="button" disabled>
-            Prepare export
-          </button>
+          previewMode(process.env) ? (
+            <a
+              className="cd-button"
+              download="capitaldesk-sample-evidence.txt"
+              href={`data:text/plain;charset=utf-8,${encodeURIComponent('SIMULATED DEMO DATA — NOT VENUE EVIDENCE\nAll values and digests below are illustrative fixtures.\n\n' + MANIFEST)}`}
+            >
+              Download sample manifest
+            </a>
+          ) : undefined
         }
       />
       <PreviewGate>

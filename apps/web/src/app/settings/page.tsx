@@ -12,9 +12,9 @@ export default function SettingsPage() {
         <div className="cd-stack">
           <div className="cd-grid">
             <Panel
-              title="Account capability"
-              eyebrow="Binance Spot Testnet"
-              action={<StateChip tone="warn">OBSERVATION ONLY</StateChip>}
+              title="Demo account capability"
+              eyebrow="Illustrative Binance Spot account"
+              action={<StateChip tone="neutral">SIMULATED</StateChip>}
             >
               <FactList
                 facts={[
@@ -39,7 +39,7 @@ export default function SettingsPage() {
                   [
                     'VENUE_READ',
                     <StateChip key="read" tone="ok">
-                      MOUNTED
+                      SAMPLE ONLY
                     </StateChip>,
                   ],
                   [

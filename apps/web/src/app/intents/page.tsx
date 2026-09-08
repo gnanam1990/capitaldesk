@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import {
   PageIntro,
   Panel,
@@ -17,9 +18,9 @@ export default function IntentsPage() {
         title="Three intents. Two directions. One explicit conflict."
         summary="Targets are absolute desired ownership, not instructions to buy the same delta again. Revisions and source age remain inspectable."
         action={
-          <button className="cd-button cd-button--quiet" type="button" disabled>
-            New intent unavailable
-          </button>
+          <Link className="cd-button" href="/demo">
+            Try interactive demo
+          </Link>
         }
       />
       <PreviewGate>
@@ -35,8 +36,8 @@ export default function IntentsPage() {
             </div>
           </div>
           <Panel
-            title="Live intent queue"
-            eyebrow="Price snapshot age 1.2s"
+            title="Scenario intent queue"
+            eyebrow="Deterministic fixture snapshot"
             action={<StateChip tone="warn">1 CONFLICT</StateChip>}
           >
             <TableRegion label="Intent revisions">
@@ -96,9 +97,9 @@ export default function IntentsPage() {
                       owner reinstatement.
                     </small>
                   </div>
-                  <button className="cd-button cd-button--quiet" type="button" disabled>
-                    Defer target
-                  </button>
+                  <Link className="cd-button cd-button--quiet" href="/demo">
+                    Try demo deferral
+                  </Link>
                 </li>
                 <li>
                   <div>
@@ -108,9 +109,7 @@ export default function IntentsPage() {
                       evidence.
                     </small>
                   </div>
-                  <button className="cd-button cd-button--quiet" type="button" disabled>
-                    Open revision
-                  </button>
+                  <StateChip tone="neutral">DESIGN PREVIEW</StateChip>
                 </li>
               </ul>
             </Panel>

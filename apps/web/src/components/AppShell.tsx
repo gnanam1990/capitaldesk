@@ -22,11 +22,13 @@ export function AppShell({
   accountAlias,
   environment,
   epoch,
+  demo = false,
 }: {
   children: ReactNode;
   accountAlias: string;
   environment: string;
   epoch: number;
+  demo?: boolean;
 }) {
   const path = usePathname();
   return (
@@ -36,9 +38,21 @@ export function AppShell({
           <Mark size={27} />
           <span>CapitalDesk</span>
         </Link>
-        <div className="cd-desk-label">Owner operations</div>
+        <div className="cd-desk-label">{demo ? 'Shared-capital demo' : 'Owner operations'}</div>
         <nav aria-label="Primary">
           <ul className="cd-nav-list">
+            {demo ? (
+              <li>
+                <Link
+                  className="cd-nav-item"
+                  href="/demo"
+                  aria-current={path === '/demo' ? 'page' : undefined}
+                >
+                  <Icon name="plans" width="18" height="18" />
+                  <span>Interactive demo</span>
+                </Link>
+              </li>
+            ) : null}
             {NAVIGATION.map((item) => {
               const active =
                 path === item.href || (item.href !== '/' && path.startsWith(item.href));
@@ -51,7 +65,9 @@ export function AppShell({
                   >
                     <Icon name={item.icon} width="18" height="18" />
                     <span>{item.label}</span>
-                    {item.href === '/plans' ? <span className="cd-nav-count">1</span> : null}
+                    {demo && item.href === '/plans' ? (
+                      <span className="cd-nav-count">1</span>
+                    ) : null}
                   </Link>
                 </li>
               );
@@ -59,19 +75,26 @@ export function AppShell({
           </ul>
         </nav>
         <div className="cd-nav-foot">
-          <span className="cd-kicker">Account context</span>
-          <strong className="cd-mono">{accountAlias}</strong>
+          <span className="cd-kicker">{demo ? 'Demo context' : 'Account context'}</span>
+          <strong className="cd-mono">{demo ? 'CapitalDesk sample desk' : accountAlias}</strong>
           <span>
-            {environment.toUpperCase()} · EPOCH {epoch}
+            {demo
+              ? 'SAMPLE DATA · NO LIVE ORDERS'
+              : `${environment.toUpperCase()} · EPOCH ${epoch}`}
           </span>
         </div>
       </aside>
       <div className="cd-workspace">
         <header className="cd-topbar">
-          <div className="cd-account-facts" aria-label="Current account context">
-            <span className="cd-mode">{environment.toUpperCase()}</span>
-            <span className="cd-mono">{accountAlias}</span>
-            <span>Baseline epoch {epoch}</span>
+          <div
+            className="cd-account-facts"
+            aria-label={demo ? 'Demo workspace context' : 'Current account context'}
+          >
+            <span className="cd-mode">{demo ? 'DEMO' : environment.toUpperCase()}</span>
+            <span className="cd-mono">{demo ? 'BTC / USDT · SAMPLE DESK' : accountAlias}</span>
+            <span>
+              {demo ? 'Simulated account · no live connection' : `Baseline epoch ${epoch}`}
+            </span>
           </div>
           <CommandPalette />
         </header>

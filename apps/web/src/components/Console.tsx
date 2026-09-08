@@ -29,13 +29,13 @@ export function PageIntro({
 
 export function PreviewBanner() {
   return (
-    <aside className="cd-preview-banner" aria-label="Development preview disclosure">
-      <Icon name="alert" width="19" height="19" />
+    <aside className="cd-preview-banner" aria-label="Demo data disclosure">
+      <Icon name="evidence" width="19" height="19" />
       <div>
-        <strong>Development preview · fixture evidence</strong>
+        <strong>Demo workspace · fixture evidence</strong>
         <span>
-          These records demonstrate interface states. They are not account observations, venue
-          fills, spendable claims, or execution proof.
+          Explore sample strategies, capital and recovery evidence. Values are simulated and are not
+          live account observations, venue fills, spendable claims, or execution proof.
         </span>
       </div>
     </aside>
@@ -51,11 +51,10 @@ export function PreviewGate({ children }: { children: ReactNode }) {
           <Icon name="shield" width="26" height="26" />
         </div>
         <span className="cd-kicker">Live data unavailable</span>
-        <h2 id="unavailable-title">This view needs the owner API contract.</h2>
+        <h2 id="unavailable-title">Live account data is not connected.</h2>
         <p>
-          No operational records are rendered because the typed SDK for this route is not present in
-          this branch. Set <code>CAPITALDESK_UI_PREVIEW=true</code> only to inspect labelled
-          interface fixtures.
+          This workspace cannot load operational records yet. Return to the overview to check
+          service readiness. A separately configured demo workspace provides labelled sample data.
         </p>
         <Link className="cd-button cd-button--quiet" href="/">
           Return to readiness
