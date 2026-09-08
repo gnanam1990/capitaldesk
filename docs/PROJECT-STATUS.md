@@ -62,7 +62,7 @@ BLOCKED and is named as such rather than claimed.
 | Binance read boundary (module 05)        | Implemented; venue auth BLOCKED  | `packages/binance`, 204 unit cases; `docs/evidence/binance-read-capability.md` |
 | Read cursors, snapshots and cuts         | Implemented                      | `packages/db` migration 0004, 42 integration cases on real PostgreSQL          |
 | Worker ingest catch-up                   | Implemented                      | `apps/worker`, 31 integration cases on real PostgreSQL                         |
-| Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 49 unit + 6 property; migration 0005, 31 integration cases   |
+| Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 61 unit + 6 property; migration 0005, 65 integration cases   |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
@@ -70,7 +70,7 @@ BLOCKED and is named as such rather than claimed.
 | Same-origin console routing              | Implemented, proxy verified      | `apps/web/src/app/api-routing.ts`, 6 unit cases                                |
 | Transactional journal (module 04)        | Implemented (module 04)          | `packages/db/src/journal`, 46 integration cases on real PostgreSQL             |
 | CI                                       | Fresh checkout + real PostgreSQL | `.github/workflows/ci.yml`                                                     |
-| Economic core (M1-M3)                    | Not started                      | —                                                                              |
+| Economic core (M1-M3)                    | In progress; module 06 complete  | Opening inventory, epoch claims and owner allocations                          |
 | Venue integration                        | **Blocked**, see below           | —                                                                              |
 
 ## Commands and results at this head
@@ -92,9 +92,9 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run lint`                               | pass                                                        |
 | `pnpm run check:layering`                     | pass — 10 packages, 62 crossings checked                    |
 | `pnpm run check:secrets`                      | pass — 262 files scanned                                    |
-| `pnpm run test:unit`                          | **766 passed**, 0 skipped, 42 files                         |
+| `pnpm run test:unit`                          | **778 passed**, 0 skipped, 43 files                         |
 | `pnpm run test:property`                      | **19 passed**, seed 20260908                                |
-| `pnpm run test:integration`                   | **365 passed**, 24 files, against PostgreSQL 17.10          |
+| `pnpm run test:integration`                   | **405 passed**, 25 files, against PostgreSQL 17.10          |
 | `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
 | `pnpm run build`                              | pass — all packages and apps                                |
 
@@ -102,9 +102,9 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 
 | Suite       | Count | Where                                                                                                   |
 | ----------- | ----- | ------------------------------------------------------------------------------------------------------- |
-| unit        | 766   | contracts 284, binance 204, web 65, ledger 49, tools 39, api 38, config 35, domain 29, observability 23 |
+| unit        | 778   | contracts 284, binance 204, web 65, ledger 61, tools 39, api 38, config 35, domain 29, observability 23 |
 | property    | 19    | contracts 13 (`money.property.test.ts`), ledger 6 (`conservation.property.test.ts`)                     |
-| integration | 365   | journal 192, auth 60, worker 37, migrations 30, CLI 20, identity scope 11, API 9, executor 6            |
+| integration | 405   | journal 226, auth 60, worker 37, migrations 36, CLI 20, identity scope 11, API 9, executor 6            |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 91
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), module 04's the 119
