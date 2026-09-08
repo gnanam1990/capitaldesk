@@ -29,15 +29,45 @@ const SENSITIVE_KEY_FRAGMENTS: readonly string[] = [
   'session',
 ];
 
+/**
+ * Query parameter names whose values are redacted inside any URL-shaped string.
+ *
+ * Matched as a *fragment* of the parameter name, so aliases are covered without enumerating
+ * every spelling: `access_token`, `refreshToken`, `client_secret`, `api-key` and
+ * `X-Api-Key` all contain one of these fragments. An earlier version listed exact names and
+ * leaked every alias that was not on the list.
+ */
+const SENSITIVE_QUERY_FRAGMENTS = [
+  'secret',
+  'token',
+  'apikey',
+  'api_key',
+  'api-key',
+  'password',
+  'passwd',
+  'credential',
+  'signature',
+  'sig',
+  'auth',
+  'session',
+  'key',
+];
+
 /** Value shapes that are redacted regardless of the key they arrived under. */
 const SENSITIVE_VALUE_PATTERNS: readonly RegExp[] = [
   // Binance API keys and secrets are 64-character alphanumerics.
   /\b[A-Za-z0-9]{64}\b/g,
   // Bearer/Basic authorization payloads.
   /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-  // Signed URL query parameters.
-  /([?&](?:signature|token|apiKey|api_key|secret)=)[^&\s]+/gi,
 ];
+
+/** Query parameters whose *name* contains a sensitive fragment, in any URL-shaped string. */
+const QUERY_PARAMETER_PATTERN = /([?&])([A-Za-z0-9._~%-]+)(=)([^&\s"']*)/g;
+
+function isSensitiveParameterName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return SENSITIVE_QUERY_FRAGMENTS.some((fragment) => lower.includes(fragment));
+}
 
 function isSensitiveKey(key: string): boolean {
   const lower = key.toLowerCase();
@@ -45,11 +75,15 @@ function isSensitiveKey(key: string): boolean {
 }
 
 export function redactText(text: string): string {
-  let output = text;
+  let output = text.replace(
+    QUERY_PARAMETER_PATTERN,
+    (match, separator: string, name: string, equals: string, value: string) =>
+      isSensitiveParameterName(name) && value.length > 0
+        ? `${separator}${name}${equals}${REDACTED}`
+        : match,
+  );
   for (const pattern of SENSITIVE_VALUE_PATTERNS) {
-    output = output.replace(pattern, (_match, prefix?: string) =>
-      typeof prefix === 'string' ? `${prefix}${REDACTED}` : REDACTED,
-    );
+    output = output.replace(pattern, () => REDACTED);
   }
   return output;
 }
