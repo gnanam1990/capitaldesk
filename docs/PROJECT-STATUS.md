@@ -4,18 +4,23 @@ The single authoritative record of what is built, what is proven and what is blo
 Updated with every milestone. Where a claim is not backed by a command in this document, it
 is not a claim.
 
-- **Milestone:** M2 — the verified Binance read boundary (module 05).
-- **Branch:** `feat/m2-binance-read-adapter`, branched from `main` at
-  `f2f4d593308464d77b82e9dc395e95256afa17c9`.
+- **Milestone:** M3 — the account baseline and strategy claim ledger (module 06).
+- **Branch:** `feat/m3-baseline-ledger`, branched from `main` at
+  `21935cc17b9d26bd69ab407667a841bddcc64ed1`.
 - **Pull request:** opened for maintainer review; the head SHA is recorded in the pull request
   description rather than here.
 - **Previous milestones:** M0 merged as
   [#1](https://github.com/gnanam1990/capitaldesk/pull/1); M1 merged as
-  [#2](https://github.com/gnanam1990/capitaldesk/pull/2) at `f2f4d59`.
+  [#2](https://github.com/gnanam1990/capitaldesk/pull/2) at `f2f4d59`; M2 merged as
+  [#3](https://github.com/gnanam1990/capitaldesk/pull/3) at `21935cc`, from reviewed head
+  `013f733` whose final totals were 717 unit, 13 property and 334 integration.
 - **Module 03:** complete — see [docs/handoffs/03.md](handoffs/03.md).
 - **Module 04:** complete — see [docs/handoffs/04.md](handoffs/04.md).
 - **Module 05:** PARTIAL — deterministic and real-PostgreSQL paths complete; the authenticated
   venue boundary is BLOCKED on a missing credential. See [docs/handoffs/05.md](handoffs/05.md).
+- **Module 06:** PARTIAL — the baseline, the claim model and owner allocations are complete and
+  proven; T-014 and the full T-012 sweep need module 14. See
+  [docs/handoffs/06.md](handoffs/06.md).
 
 ## What this milestone is, and is not
 
@@ -23,13 +28,19 @@ M0 resolved the ten reviewed contract findings and built the executable foundati
 the authority model underneath the economic core: who the owner is, what an agent may propose,
 and the scope every object lookup is bound by.
 
-M2 adds the read boundary: narrow, origin-bound, credential-class-restricted readers for the
-selected account and symbol, durable per-symbol trade cursors, and the worker catch-up that
-assembles a bracketed observation cut and asks the shared coverage predicate for a verdict.
+M3 adds the economic core's first half: an opening position bound to one authenticated account
+and one epoch, and a per-asset claim model in which every governed unit has exactly one
+explicit owner. Opening inventory belongs to HOUSE until the owner allocates it, and an
+allocation moves an internal claim between HOUSE and one strategy — never between strategies,
+and never anything at the venue.
 
-There is still **no economic behaviour**: no planner, no approvals, no dispatch and no write
-adapter of any kind. The read boundary cannot express a write — it has one verb, and it takes
-an endpoint name rather than a URL.
+M2 added the read boundary it consumes: narrow, origin-bound, credential-class-restricted
+readers, durable per-symbol trade cursors, and the worker catch-up that assembles a bracketed
+observation cut and asks the shared coverage predicate for a verdict.
+
+There is still **no planner, no approvals and no dispatch**, and no write adapter of any kind.
+The read boundary cannot express a write — it has one verb, and it takes an endpoint name
+rather than a URL. Module 06 moves internal claims only; nothing it does reaches a venue.
 
 **Five public, non-economic reads** of `testnet.binance.vision` were performed and are recorded
 in [docs/evidence/binance-read-capability.md](evidence/binance-read-capability.md). No
@@ -51,6 +62,7 @@ BLOCKED and is named as such rather than claimed.
 | Binance read boundary (module 05)        | Implemented; venue auth BLOCKED  | `packages/binance`, 204 unit cases; `docs/evidence/binance-read-capability.md` |
 | Read cursors, snapshots and cuts         | Implemented                      | `packages/db` migration 0004, 42 integration cases on real PostgreSQL          |
 | Worker ingest catch-up                   | Implemented                      | `apps/worker`, 31 integration cases on real PostgreSQL                         |
+| Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 49 unit + 6 property; migration 0005, 31 integration cases   |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
@@ -80,19 +92,19 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run lint`                               | pass                                                        |
 | `pnpm run check:layering`                     | pass — 10 packages, 62 crossings checked                    |
 | `pnpm run check:secrets`                      | pass — 262 files scanned                                    |
-| `pnpm run test:unit`                          | **717 passed**, 0 skipped, 38 files                         |
-| `pnpm run test:property`                      | **13 passed**, seed 20260908                                |
-| `pnpm run test:integration`                   | **334 passed**, 23 files, against PostgreSQL 17.10          |
+| `pnpm run test:unit`                          | **766 passed**, 0 skipped, 42 files                         |
+| `pnpm run test:property`                      | **19 passed**, seed 20260908                                |
+| `pnpm run test:integration`                   | **365 passed**, 24 files, against PostgreSQL 17.10          |
 | `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
 | `pnpm run build`                              | pass — all packages and apps                                |
 
 The three test numbers are **workspace totals**, not per-area figures. The split by file:
 
-| Suite       | Count | Where                                                                                                     |
-| ----------- | ----- | --------------------------------------------------------------------------------------------------------- |
-| unit        | 717   | contracts 284, binance 204, web 65, tools 39, api 38, config 35, domain 29, observability 23 (by package) |
-| property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908                                            |
-| integration | 334   | journal 161, auth 60, worker 37, migrations 30, CLI 20, identity scope 11, API 9, executor 6              |
+| Suite       | Count | Where                                                                                                   |
+| ----------- | ----- | ------------------------------------------------------------------------------------------------------- |
+| unit        | 766   | contracts 284, binance 204, web 65, ledger 49, tools 39, api 38, config 35, domain 29, observability 23 |
+| property    | 19    | contracts 13 (`money.property.test.ts`), ledger 6 (`conservation.property.test.ts`)                     |
+| integration | 365   | journal 192, auth 60, worker 37, migrations 30, CLI 20, identity scope 11, API 9, executor 6            |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 91
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), module 04's the 119
@@ -118,10 +130,11 @@ proof**, which is why the code reports execution as unavailable rather than assu
 
 ## Next action
 
-The M2 pull request is open for independent maintainer review at the head recorded in its
+The M3 pull request is open for independent maintainer review at the head recorded in its
 description. Not merged by the implementer.
 
-Module 05's deterministic and real-PostgreSQL work is complete; its authenticated venue
-boundary stays BLOCKED until a `VENUE_READ` credential exists. Modules 06 and 09 are unblocked
-by the market context and account snapshot this milestone provides. Module 15 remains blocked
-on the same missing credential.
+Module 06's own work is complete; T-014 and the full T-012 sweep need module 14's fill
+allocator and are recorded as not implemented rather than counted. Modules 07, 09 and 10 are
+unblocked by the claim model this milestone provides. A live bootstrap still cannot run,
+because obtaining a COMPLETE observation cut needs the `VENUE_READ` credential that does not
+exist — the refusal is correct behaviour, and the block is upstream in module 05.
