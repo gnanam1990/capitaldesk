@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -12,7 +13,9 @@ import { describe, expect, it } from 'vitest';
  * text below it.
  */
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+// fileURLToPath, not URL.pathname: the latter yields a percent-encoded, leading-slash path
+// on Windows ("/C:/Users/..."), so readFileSync throws ENOENT and the whole suite fails there.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const tokensCss = readFileSync(path.join(HERE, 'tokens.css'), 'utf8');
 const globalsCss = readFileSync(path.join(HERE, 'globals.css'), 'utf8');
 

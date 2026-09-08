@@ -1,22 +1,9 @@
 import type { ReactNode } from 'react';
 import { loadWebPublicConfig } from '@capitaldesk/config';
 import { StatusPill, type StatusTone } from '../components/StatusPill';
+import { healthUrl, parseReadiness, resolveDeploymentFacts, type Readiness } from './readiness';
 
 export const dynamic = 'force-dynamic';
-
-interface ReadinessReport {
-  status: 'ready' | 'not_ready';
-  buildId: string;
-  contractsVersion: string;
-  deploymentEnvironment: string;
-  accountAlias: string;
-  baselineEpoch: number;
-  dependencies: Array<{ name: string; state: string; detail: string }>;
-  execution: { available: false; reason: string };
-}
-
-type Readiness =
-  { kind: 'reachable'; report: ReadinessReport } | { kind: 'unreachable'; detail: string };
 
 /**
  * The console shows what the API actually reported.
@@ -26,11 +13,20 @@ type Readiness =
  */
 async function fetchReadiness(apiBaseUrl: string): Promise<Readiness> {
   try {
-    const response = await fetch(`${apiBaseUrl}/health/ready`, {
+    const response = await fetch(healthUrl(apiBaseUrl), {
       cache: 'no-store',
       signal: AbortSignal.timeout(3000),
     });
-    return { kind: 'reachable', report: (await response.json()) as ReadinessReport };
+    // A 503 with a valid not_ready report is a reachable API reporting a real state, not a
+    // transport failure, and must not be presented as one.
+    const report = parseReadiness(await response.json());
+    if (report === null) {
+      return {
+        kind: 'unreachable',
+        detail: 'the API returned a response this console cannot read',
+      };
+    }
+    return { kind: 'reachable', report };
   } catch (error) {
     return {
       kind: 'unreachable',
@@ -60,6 +56,7 @@ function Fact({ label, value, mono }: { label: string; value: string; mono?: boo
 export default async function OverviewPage() {
   const config = loadWebPublicConfig();
   const readiness = await fetchReadiness(config.apiBaseUrl);
+  const facts = resolveDeploymentFacts(config, readiness);
 
   const apiTone: StatusTone =
     readiness.kind === 'unreachable'
@@ -78,7 +75,7 @@ export default async function OverviewPage() {
           implemented.
         </p>
         <div className="cd-pills">
-          <StatusPill tone="neutral">{config.deploymentEnvironment.toUpperCase()}</StatusPill>
+          <StatusPill tone="neutral">{facts.deploymentEnvironment.toUpperCase()}</StatusPill>
           <StatusPill tone={apiTone}>
             {readiness.kind === 'unreachable'
               ? 'API unreachable'
@@ -90,16 +87,31 @@ export default async function OverviewPage() {
       </header>
 
       <div className="cd-grid">
-        <Panel title="Deployment">
+        <Panel
+          title={
+            facts.source === 'api'
+              ? 'Deployment (reported by API)'
+              : 'Deployment (console configuration)'
+          }
+        >
           <dl style={{ margin: 0, display: 'grid' }}>
-            <Fact label="Account alias" value={config.accountAlias} mono />
-            <Fact label="Environment" value={config.deploymentEnvironment} mono />
-            <Fact label="Baseline epoch" value={String(config.baselineEpoch)} mono />
-            <Fact label="Build" value={config.buildId} mono />
+            <Fact label="Account alias" value={facts.accountAlias} mono />
+            <Fact label="Environment" value={facts.deploymentEnvironment} mono />
+            <Fact label="Baseline epoch" value={facts.baselineEpoch} mono />
+            <Fact label="Build" value={facts.buildId} mono />
           </dl>
+          {facts.mismatches.length > 0 ? (
+            <p className="cd-note" role="status">
+              This console&apos;s configuration disagrees with the API on{' '}
+              {facts.mismatches.join(', ')}. The API&apos;s values are shown above. A console
+              pointed at an API it was not configured for is a deployment fault, not a display
+              detail.
+            </p>
+          ) : null}
           <p style={{ fontSize: 13, color: 'var(--cd-ink-subtle)', margin: 'var(--cd-s3) 0 0' }}>
-            An alias is an operator label, not an account identity. Identity is the venue&apos;s own
-            stable account id, established only after an authenticated read.
+            {facts.source === 'api'
+              ? 'Reported by the API. An alias is an operator label, not an account identity: identity is the venue\u2019s own stable account id, established only after an authenticated read.'
+              : 'This console\u2019s own configuration, shown because the API did not answer. It has not been observed and does not describe the API.'}
           </p>
         </Panel>
 
