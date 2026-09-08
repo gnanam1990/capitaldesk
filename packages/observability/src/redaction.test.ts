@@ -13,12 +13,21 @@ const KEY_SHAPED = ['aB3dEfGh1jKlMnOpQrStUvWxYz234567', 'HgFeDcBa9876543210ZyXwV
   '',
 );
 
+/**
+ * A JWT-shaped fixture, also assembled at runtime.
+ *
+ * Written as a literal it is indistinguishable from a leaked bearer token to a secret
+ * scanner, and repeatedly produced a finding that a human then had to dismiss as a false
+ * positive. Same rule as KEY_SHAPED: invented material never appears as one string.
+ */
+const BEARER_SHAPED = ['eyJhbGciOiJIUzI1NiJ9', 'cGF5bG9hZA', 'c2lnbmF0dXJl'].join('.');
+
 describe('redaction', () => {
   it('removes values under sensitive key names', () => {
     const output = redact({
       apiKey: KEY_SHAPED,
       api_secret: 'anything',
-      Authorization: 'Bearer abc.def',
+      Authorization: `Bearer ${BEARER_SHAPED}`,
       cookie: 'session=1',
       signature: 'deadbeef',
       symbol: 'BTCUSDT',
@@ -75,6 +84,8 @@ describe('redaction', () => {
   });
 
   it('leaves a Bearer token unusable', () => {
-    expect(redactText('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload')).toContain(REDACTED);
+    const text = redactText(`Authorization: Bearer ${BEARER_SHAPED}`);
+    expect(text).toContain(REDACTED);
+    expect(text).not.toContain(BEARER_SHAPED);
   });
 });
