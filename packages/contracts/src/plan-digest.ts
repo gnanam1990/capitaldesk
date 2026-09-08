@@ -166,12 +166,33 @@ export function assertPlanPayloadFieldsFrozen(plan: SealedPlanPayload): void {
     checkAmount(entry.requestedGrossBase, `${path}.requestedGrossBase`);
   });
 
+  const seenStrategies = new Set<string>();
   plan.strategyCaps.forEach((cap, index) => {
     const path = `$.strategyCaps[${index}]`;
     assertOnlyKnownKeys(cap, STRATEGY_CAPS_KEYS, path);
     checkAmount(cap.maxDebit, `${path}.maxDebit`);
+
+    if (seenStrategies.has(cap.strategyId)) {
+      violate('IDENTITY_MALFORMED', 'a strategy may appear at most once in the cap table', {
+        strategyId: cap.strategyId,
+      });
+    }
+    seenStrategies.add(cap.strategyId);
+
+    // Duplicate fee assets have no meaning — which of the two caps applies? — and they made
+    // canonicalisation order-dependent, because the comparator returns the same answer for
+    // equal keys. Two orderings of the same caps produced two digests for one plan.
+    const seenAssets = new Set<string>();
     cap.maxCommission.forEach((commission, commissionIndex) => {
       checkAmount(commission, `${path}.maxCommission[${commissionIndex}]`);
+      const asset = formatAssetKey(commission.asset);
+      if (seenAssets.has(asset)) {
+        violate('IDENTITY_MALFORMED', 'a fee asset may appear at most once per strategy cap', {
+          strategyId: cap.strategyId,
+          asset,
+        });
+      }
+      seenAssets.add(asset);
     });
   });
 }
@@ -234,7 +255,13 @@ export function planDigestPayload(plan: SealedPlanPayload): CanonicalValue {
         strategyId: cap.strategyId,
         maxDebit: encodeAmount(cap.maxDebit),
         maxCommission: [...cap.maxCommission]
-          .sort((a, b) => (formatAssetKey(a.asset) < formatAssetKey(b.asset) ? -1 : 1))
+          .sort((a, b) => {
+            // A total comparator. Returning 1 for equal keys made the sort input-order
+            // dependent, so identical caps could canonicalise two ways.
+            const left = formatAssetKey(a.asset);
+            const right = formatAssetKey(b.asset);
+            return left < right ? -1 : left > right ? 1 : 0;
+          })
           .map(encodeAmount),
       })),
     allocationAlgorithmVersion: plan.allocationAlgorithmVersion,

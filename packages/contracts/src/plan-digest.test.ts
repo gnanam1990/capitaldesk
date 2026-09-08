@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { amount, assetKey } from './money.js';
+import { amount, assetKey, type AssetAmount } from './money.js';
 import { poolId, venueAccountKey } from './identity.js';
 import { priceFromDecimal } from './price.js';
 import {
@@ -189,6 +189,64 @@ describe('plan digest', () => {
         pool: { ...plan.pool, shadowEpoch: 9 },
       } as SealedPlanPayload;
       expect(() => planDigest(smuggled)).toThrow(/shadowEpoch/);
+    });
+  });
+
+  // --- regression: PR 1 review, duplicate fee assets reordered the digest ---------------
+  // The comparator returned the same answer for equal asset keys, so sorting was
+  // input-order dependent: two orderings of identical caps produced two digests for one plan.
+  describe('cap tables must be unambiguous', () => {
+    const withCommissions = (commissions: AssetAmount[]): SealedPlanPayload => {
+      const plan = validPlan();
+      return {
+        ...plan,
+        strategyCaps: [
+          { ...plan.strategyCaps[0]!, maxCommission: commissions },
+          plan.strategyCaps[1]!,
+        ],
+      };
+    };
+
+    it('refuses a duplicate fee asset in one strategy cap', () => {
+      expect(() => planDigest(withCommissions([amount(BTC, 1_000n), amount(BTC, 2_000n)]))).toThrow(
+        /fee asset may appear at most once/,
+      );
+    });
+
+    it('refuses a duplicate fee asset regardless of the order it is written in', () => {
+      expect(() => planDigest(withCommissions([amount(BTC, 2_000n), amount(BTC, 1_000n)]))).toThrow(
+        /fee asset may appear at most once/,
+      );
+    });
+
+    it('refuses a duplicate even when the two caps are identical', () => {
+      expect(() => planDigest(withCommissions([amount(BTC, 1_000n), amount(BTC, 1_000n)]))).toThrow(
+        /fee asset may appear at most once/,
+      );
+    });
+
+    it('refuses a duplicate strategy row in the cap table', () => {
+      const plan = validPlan();
+      const duplicated = { ...plan, strategyCaps: [plan.strategyCaps[0]!, plan.strategyCaps[0]!] };
+      expect(() => planDigest(duplicated)).toThrow(/strategy may appear at most once/);
+    });
+
+    it('canonicalises distinct fee assets identically whatever order they arrive in', () => {
+      const ascending = withCommissions([amount(BTC, 1_000n), amount(USDT, 5n)]);
+      const descending = withCommissions([amount(USDT, 5n), amount(BTC, 1_000n)]);
+      expect(planDigest(ascending)).toBe(planDigest(descending));
+    });
+
+    it('canonicalises strategy caps identically whatever order they arrive in', () => {
+      const plan = validPlan();
+      const reversed = { ...plan, strategyCaps: [plan.strategyCaps[1]!, plan.strategyCaps[0]!] };
+      expect(planDigest(reversed)).toBe(planDigest(plan));
+    });
+
+    it('still distinguishes genuinely different cap amounts', () => {
+      const a = withCommissions([amount(BTC, 1_000n)]);
+      const b = withCommissions([amount(BTC, 1_001n)]);
+      expect(planDigest(a)).not.toBe(planDigest(b));
     });
   });
 

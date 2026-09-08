@@ -343,11 +343,19 @@ Financial finality requires: known terminal order, cumulative filled quantity/qu
 
 ### Account observation boundary
 
-> **Amended by ADR-0002.** Coverage is `COMPLETE` only when all five conditions hold:
-> (1) stream continuity across the window or a backfilled gap; (2) an account-wide open-order
-> scan at `t1` showing no unknown order; (3) per-symbol trade backfill by cursor with no gap to
-> the last booked trade; (4) bracketing balance snapshots differing by exactly the booked
-> effects — necessary, never sufficient; (5) every source inside its freshness class.
+> **Amended by ADR-0002.** Coverage is `COMPLETE` only when all six conditions hold:
+> **(U)** the movement universe is proven — every symbol and movement type that could have
+> moved a governed asset in the window is enumerable and was enumerated, and this is never
+> inferred from an uninterrupted socket; (1) one uninterrupted stream session spanned the
+> window, or its gap is closed by a recovery certificate covering that gap; (2) an
+> account-wide open-order scan at `t1` showing no unknown order; (3) per-symbol trade backfill
+> by contiguous cursor pagination to an already-booked trade, never by assuming trade ids are
+> a dense sequence; (4) bracketing balance snapshots differing by exactly the booked effects —
+> necessary, never sufficient; (5) every source inside its freshness class.
+>
+> Condition U is the one the amendment exists for: without it, "one tradable symbol" silently
+> becomes "observe only that symbol". Stating five conditions here while the ADR stated six
+> would have left implementers following the version that omits it.
 >
 > The guarantee is narrowed honestly. Binance offers no account-wide completed-trade endpoint,
 > so the symbols that traded during an unobserved interval cannot be discovered afterwards.

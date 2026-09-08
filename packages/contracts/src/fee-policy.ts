@@ -12,6 +12,12 @@ import { isStrictUtcInstant } from './time.js';
 export const FEE_COMMISSION_ROUTES = [
   /** Commission is charged in the asset received: base on BUY, quote on SELL. */
   'RECEIVED_ASSET',
+  /**
+   * Commission is charged in the quote asset on both sides. Not Binance's standard schedule;
+   * it exists because the reviewed golden example uses it, and an allocator reading `route`
+   * would otherwise debit base on a BUY where the fixture debits quote.
+   */
+  'QUOTE_ALWAYS',
   /** Commission is charged in BNB at a discounted rate, with a documented fallback. */
   'BNB_DISCOUNT',
   /** Commission is charged in a third asset chosen by the venue. */
@@ -108,7 +114,9 @@ export const STANDARD_NO_BNB_V1: FeePolicy = Object.freeze({
  */
 export const QUOTE_FEE_FIXTURE_V1: FeePolicy = Object.freeze({
   version: 'QUOTE_FEE_FIXTURE_V1',
-  route: 'RECEIVED_ASSET',
+  // QUOTE_ALWAYS, not RECEIVED_ASSET: this fixture charges quote commission on a BUY, and
+  // labelling it RECEIVED_ASSET would have told an allocator to debit base instead.
+  route: 'QUOTE_ALWAYS',
   // Proven only because the fixture fixes the fill partition: the deterministic scenario
   // states exactly which fills occur, so the number of fills is known rather than bounded.
   // That is why this policy is refused outside the local environment.

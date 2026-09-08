@@ -23,6 +23,14 @@ function evidence(overrides: Partial<FeeBoundEvidence> = {}): FeeBoundEvidence {
 const FIXTURE_SETTINGS = [...QUOTE_FEE_FIXTURE_V1.requiredAccountSettings];
 
 describe('fee policy capability', () => {
+  // --- regression: PR 1 review, the fixture route was mislabelled ----------------------
+  // The golden example charges quote commission on a BUY, which RECEIVED_ASSET does not
+  // describe. An allocator reading `route` would have debited the wrong asset.
+  it('labels the fixture route as quote-always, matching what it actually charges', () => {
+    expect(QUOTE_FEE_FIXTURE_V1.route).toBe('QUOTE_ALWAYS');
+    expect(STANDARD_NO_BNB_V1.route).toBe('RECEIVED_ASSET');
+  });
+
   it('resolves known policies and refuses unknown ones', () => {
     expect(feePolicy('STANDARD_NO_BNB_V1').route).toBe('RECEIVED_ASSET');
     expect(() => feePolicy('MADE_UP')).toThrow(/FEE_ASSET_UNSUPPORTED/);
