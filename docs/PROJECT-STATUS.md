@@ -7,7 +7,8 @@ is not a claim.
 - **Milestone:** M0 — integration gate and executable foundation (prompts 00-02, plus the
   workspace half of 01 and the shell foundation of 21).
 - **Branch:** `feat/m0-contract-resolution-and-foundation`
-- **Pull request:** opened for maintainer review; not merged, not self-merged.
+- **Pull request:** [#1](https://github.com/gnanam1990/capitaldesk/pull/1) — open for maintainer review; not merged, not self-merged.
+- **Tested head:** `200e8fc75db5b71571ac947ab5c8847654b176a0`
 - **Baseline:** `main` holds the reviewed specification pack only.
 
 ## What this milestone is, and is not
@@ -59,7 +60,18 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run test:unit`        | **230 passed**, 0 skipped, 14 files                                               |
 | `pnpm run test:property`    | **13 passed**, seed 20260908                                                      |
 | `pnpm run test:integration` | **22 passed** against PostgreSQL 17.10; 22 skipped when no database is configured |
-| `pnpm run build`            | pass — all packages and apps                                                      |
+
+The three numbers above are **workspace totals**, not per-area figures. The split by file:
+
+| Suite       | Count | Where                                                             |
+| ----------- | ----- | ----------------------------------------------------------------- |
+| unit        | 231   | contracts 186, config 20, web 17, observability 8, tools 8, api 5 |
+| property    | 13    | `packages/contracts/src/money.property.test.ts`, seed 20260908    |
+| integration | 22    | migrations 18, API health 4                                       |
+
+No area's evidence is the workspace total. The contracts package is not proved by 231 tests,
+and the migration runner is not proved by 22 — four of those exercise the API.
+| `pnpm run build` | pass — all packages and apps |
 
 Toolchain: Node 22.23.1, pnpm 11.10.0, TypeScript 5.9.3, Fastify 5.12.3, Next 16.3.4,
 React 19.2.8, Vitest 4.1.11, zod 4.5.4, PostgreSQL 17.10 (Homebrew, local).

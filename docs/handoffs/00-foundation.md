@@ -3,6 +3,11 @@
 **Status: PARTIAL.** Every deliverable owned by this milestone is complete and verified.
 Venue integration is BLOCKED, and nothing in this milestone claims otherwise.
 
+- **Tested head:** `200e8fc75db5b71571ac947ab5c8847654b176a0`
+- **Pull request:** [#1](https://github.com/gnanam1990/capitaldesk/pull/1)
+- **Covers modules:** 00, 01, 02, and the shell foundation of 21. The per-module handoffs
+  [00](00.md), [01](01.md) and [02](02.md) point here rather than repeating this record.
+
 ## What was built
 
 | Path                       | What it is                                                                                                                                                                                              |
@@ -45,13 +50,29 @@ pnpm run format:check                 pass
 pnpm run typecheck                    pass
 pnpm run lint                         pass (from a cold tree)
 pnpm run check:layering               pass — 8 packages, 26 crossings
-pnpm run check:secrets                pass — 147 files scanned
-pnpm run test:unit                    230 passed, 0 skipped, 14 files
-pnpm run test:property                13 passed, seed 20260908
-pnpm run test:integration             22 passed (PostgreSQL 17.10)
-pnpm run test:integration (no db)     22 skipped — reported as skipped, never as coverage
+pnpm run check:secrets                pass — 153 files scanned
+pnpm run test:unit                    231 passed, 0 skipped, 15 files
+pnpm run test:property                 13 passed, seed 20260908
+pnpm run test:integration              22 passed (PostgreSQL 17.10)
+pnpm run test:integration (no db)      22 skipped — reported as skipped, never as coverage
 pnpm run build                        pass
 ```
+
+Those are **workspace totals**. Scoped by area, so no module claims evidence it does not have:
+
+| Area                     | unit               | property | integration |
+| ------------------------ | ------------------ | -------- | ----------- |
+| `packages/contracts`     | 186 across 9 files | 13       | —           |
+| `packages/config`        | 20                 | —        | —           |
+| `packages/observability` | 8                  | —        | —           |
+| `packages/db`            | —                  | —        | 18          |
+| `apps/api`               | 5                  | —        | 4           |
+| `apps/web`               | 17                 | —        | —           |
+| `tools`                  | 8                  | —        | —           |
+| **total**                | **231**            | **13**   | **22**      |
+
+CI at this head: both jobs green — `Verify (fresh checkout)` and
+`Integration (real PostgreSQL)`.
 
 ### Evidence classes, kept apart
 
