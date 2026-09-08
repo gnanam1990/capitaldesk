@@ -35,6 +35,9 @@ describeIfDatabase('migration runner against real PostgreSQL', () => {
   });
 
   afterAll(async () => {
+    // The per-test reset below recreates the schema after dropping it, so without this the
+    // last one outlived the run. Every suite leaves the database as it found it.
+    await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
     await client.end();
   });
 

@@ -9,17 +9,25 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty",
     "start": "node dist/main.js",
-    "dev": "tsx watch src/main.ts"
+    "dev": "tsx watch src/main.ts",
+    "enroll": "node dist/cli/enroll-cli.js"
   },
   "dependencies": {
     "@capitaldesk/config": "workspace:*",
     "@capitaldesk/contracts": "workspace:*",
+    "@capitaldesk/domain": "workspace:*",
     "@capitaldesk/observability": "workspace:*",
+    "@fastify/cookie": "catalog:",
+    "@fastify/csrf-protection": "catalog:",
+    "@fastify/rate-limit": "catalog:",
+    "@node-rs/argon2": "catalog:",
     "fastify": "catalog:",
+    "fastify-plugin": "catalog:",
     "pg": "catalog:",
     "pino": "catalog:"
   },
   "devDependencies": {
+    "@capitaldesk/db": "workspace:*",
     "@types/pg": "catalog:",
     "typescript": "catalog:"
   }

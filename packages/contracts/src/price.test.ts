@@ -27,12 +27,13 @@ describe('price', () => {
   // --- regression: PR 1 review, trailing zeros produced different digests -------------
   describe('one economic price has one representation', () => {
     it('formats equivalent prices identically', () => {
-      for (const [a, b] of [
+      const pairs: ReadonlyArray<readonly [string, string]> = [
         ['20000', '20000.00'],
         ['0', '0.000'],
         ['19900.5', '19900.50'],
         ['1', '1.00000000'],
-      ]) {
+      ];
+      for (const [a, b] of pairs) {
         expect(formatPrice(priceFromDecimal(BTC, USDT, a)), `${a} vs ${b}`).toBe(
           formatPrice(priceFromDecimal(BTC, USDT, b)),
         );

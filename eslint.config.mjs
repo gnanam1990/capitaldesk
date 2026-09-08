@@ -51,8 +51,16 @@ export default tseslint.config(
   {
     // Test files, tooling and root config are typed by tsconfig.tools.json: they are
     // deliberately outside the build projects so they cannot reach a published dist/.
-    files: ['**/*.test.ts', '**/*.test.tsx', 'tools/**/*.ts', 'vitest.config.ts'],
+    files: [
+      '**/*.test.ts',
+      '**/*.test.tsx',
+      'tools/**/*.ts',
+      'vitest.config.ts',
+      'apps/*/scripts/**/*.mjs',
+    ],
     languageOptions: {
+      // Build scripts run in Node, so the Node globals are defined for them.
+      globals: { process: 'readonly', console: 'readonly' },
       parserOptions: {
         projectService: false,
         project: ['./tsconfig.tools.json'],

@@ -57,8 +57,20 @@ createdb capitaldesk_test
 CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm run test:integration
 ```
 
-Without that variable the suite reports itself as **skipped**, never as passed. CI fails if
-it skips.
+Without that variable the gate **refuses to run** and exits non-zero. It used to let vitest
+skip every database suite and exit 0, which reported a passing integration gate with 226 of
+241 tests skipped and no PostgreSQL anywhere. The preflight now stands in front of it and
+names the variable to set; it never prints the value.
+
+To run only the process-level suites, which need no database, use the explicitly named
+non-gate command:
+
+```sh
+pnpm run test:process-only
+```
+
+That command is not the integration gate and must not be quoted as integration evidence. CI
+runs the gate with a real PostgreSQL service and additionally fails if anything skips.
 
 ## Running
 

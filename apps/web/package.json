@@ -5,16 +5,17 @@
   "type": "module",
   "description": "Owner console. Reaches data through the API only; never imports the database or the executor.",
   "scripts": {
-    "build": "next build",
-    "dev": "next dev --port 3100",
-    "start": "next start --port 3100",
-    "typecheck": "next typegen && tsc --noEmit"
+    "build": "node ./scripts/with-env.mjs build",
+    "dev": "node ./scripts/with-env.mjs dev --port 3100",
+    "start": "node ./scripts/with-env.mjs start --port 3100",
+    "typecheck": "node ./scripts/with-env.mjs typegen && tsc --noEmit"
   },
   "dependencies": {
     "@capitaldesk/config": "workspace:*",
     "@capitaldesk/contracts": "workspace:*",
     "@fontsource-variable/manrope": "catalog:",
     "@fontsource/ibm-plex-mono": "catalog:",
+    "@next/env": "catalog:",
     "next": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"

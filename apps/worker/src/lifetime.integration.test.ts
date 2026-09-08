@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 /**
  * Integration evidence for process lifetime.
@@ -25,6 +26,21 @@ const ENV = {
   CAPITALDESK_BUILD_ID: 'lifetime-test',
   DATABASE_URL: 'postgres://localhost:5432/capitaldesk_test',
 };
+
+/**
+ * These tests spawn the compiled entrypoint deliberately: only a real process can show that
+ * a pending top-level await does not keep Node alive. That makes the build a prerequisite,
+ * so its absence is reported as a missing prerequisite rather than as four confusing
+ * assertion failures. `pnpm run test:integration` builds first for this reason.
+ */
+beforeAll(() => {
+  if (!existsSync(ENTRYPOINT)) {
+    throw new Error(
+      `built entrypoint missing at ${ENTRYPOINT}. Run \`pnpm run build\` or \`tsc -b\` first; ` +
+        'pnpm run test:integration does this for you.',
+    );
+  }
+});
 
 const running: import('node:child_process').ChildProcess[] = [];
 

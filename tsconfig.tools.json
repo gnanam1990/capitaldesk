@@ -4,13 +4,17 @@
     "composite": false,
     "declaration": false,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": false,
+    "declarationMap": false
   },
   "include": [
     "tools/**/*.ts",
     "vitest.config.ts",
     "eslint.config.mjs",
     "packages/*/src/**/*.test.ts",
-    "apps/*/src/**/*.test.ts"
+    "apps/*/src/**/*.test.ts",
+    "apps/*/scripts/**/*.mjs"
   ]
 }
