@@ -7,6 +7,8 @@ import authPlugin from './auth/plugin.js';
 import { registerAuthRoutes } from './auth/routes.js';
 import { IdentityRepository } from './auth/repository.js';
 import { resolveOwnerSessionSecret } from './auth/session-secret.js';
+import { IntentRepository } from '@capitaldesk/db';
+import { registerIntentRoutes } from './intents/routes.js';
 
 /**
  * Probe PostgreSQL with every step bounded.
@@ -105,7 +107,7 @@ export function buildServer(config: ApiConfig, dependencies: ServerDependencies 
     // Fastify's default ajv strips unknown properties. Rejecting them instead makes a body
     // that carries an identity field a visible error rather than a silently ignored one, so
     // an attempt to smuggle a role or a workspace id fails loudly.
-    ajv: { customOptions: { removeAdditional: false } },
+    ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   }) as unknown as FastifyInstance;
 
   const startedAt = Date.now();
@@ -124,8 +126,9 @@ export function buildServer(config: ApiConfig, dependencies: ServerDependencies 
     return report;
   });
 
-  if (dependencies.identityPool !== undefined) {
-    const repository = new IdentityRepository(dependencies.identityPool);
+  const identityPool = dependencies.identityPool;
+  if (identityPool !== undefined) {
+    const repository = new IdentityRepository(identityPool);
     const secureCookies = config.deploymentEnvironment !== 'local';
     void app
       .register(authPlugin, {
@@ -143,12 +146,11 @@ export function buildServer(config: ApiConfig, dependencies: ServerDependencies 
           environment: config.deploymentEnvironment,
           secureCookies,
         });
+        registerIntentRoutes(app, { repository: new IntentRepository(identityPool) });
       });
   }
 
-  // Beyond identity there is deliberately no /v1 surface yet. Routes arrive with the domain behaviour they
-  // expose (prompts 03, 07, 17); an endpoint that returns a plausible shape without the
-  // behaviour behind it would be a false claim of capability.
+  // Unknown routes fail with the stable transport envelope.
   app.setNotFoundHandler((request, reply) => {
     reply.code(404).send({
       code: 'UNSUPPORTED_ACTION',

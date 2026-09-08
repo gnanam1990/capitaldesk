@@ -6,3 +6,4 @@
  */
 export * from './capabilities.js';
 export * from './principal.js';
+export * from './strategy-intent.js';

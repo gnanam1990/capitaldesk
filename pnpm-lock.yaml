@@ -134,6 +134,9 @@ importers:
       '@capitaldesk/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@capitaldesk/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@capitaldesk/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -165,9 +168,6 @@ importers:
         specifier: 'catalog:'
         version: 10.3.1
     devDependencies:
-      '@capitaldesk/db':
-        specifier: workspace:*
-        version: link:../../packages/db
       '@types/pg':
         specifier: 'catalog:'
         version: 8.15.6

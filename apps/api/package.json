@@ -16,6 +16,7 @@
     "@capitaldesk/config": "workspace:*",
     "@capitaldesk/contracts": "workspace:*",
     "@capitaldesk/domain": "workspace:*",
+    "@capitaldesk/db": "workspace:*",
     "@capitaldesk/observability": "workspace:*",
     "@fastify/cookie": "catalog:",
     "@fastify/csrf-protection": "catalog:",
@@ -27,7 +28,6 @@
     "pino": "catalog:"
   },
   "devDependencies": {
-    "@capitaldesk/db": "workspace:*",
     "@types/pg": "catalog:",
     "typescript": "catalog:"
   }

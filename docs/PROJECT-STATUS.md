@@ -4,11 +4,9 @@ The single authoritative record of what is built, what is proven and what is blo
 Updated with every milestone. Where a claim is not backed by a command in this document, it
 is not a claim.
 
-- **Milestone:** M3 — the account baseline and strategy claim ledger (module 06).
-- **Branch:** `feat/m3-baseline-ledger`, branched from `main` at
-  `21935cc17b9d26bd69ab407667a841bddcc64ed1`.
-- **Pull request:** opened for maintainer review; the head SHA is recorded in the pull request
-  description rather than here.
+- **Milestone:** M4 — strategy lifecycle and versioned absolute targets (module 07).
+- **Branch:** `feat/m4-strategy-intents`, branched from `main` at `1b26bb2`.
+- **Pull request:** pending after the verification recorded below.
 - **Previous milestones:** M0 merged as
   [#1](https://github.com/gnanam1990/capitaldesk/pull/1); M1 merged as
   [#2](https://github.com/gnanam1990/capitaldesk/pull/2) at `f2f4d59`; M2 merged as
@@ -21,6 +19,9 @@ is not a claim.
 - **Module 06:** PARTIAL — the baseline, the claim model and owner allocations are complete and
   proven; T-014 and the full T-012 sweep need module 14. See
   [docs/handoffs/06.md](handoffs/06.md).
+- **Module 07:** PARTIAL — all owned target acceptance and lifecycle paths are complete;
+  planner-owned T-004/T-005 and the generated-child portion of T-010 need module 09. See
+  [docs/handoffs/07.md](handoffs/07.md).
 
 ## What this milestone is, and is not
 
@@ -63,6 +64,7 @@ BLOCKED and is named as such rather than claimed.
 | Read cursors, snapshots and cuts         | Implemented                      | `packages/db` migration 0004, 42 integration cases on real PostgreSQL          |
 | Worker ingest catch-up                   | Implemented                      | `apps/worker`, 31 integration cases on real PostgreSQL                         |
 | Baseline and claim ledger (module 06)    | Implemented                      | `packages/ledger` 61 unit + 6 property; migration 0005, 65 integration cases   |
+| Strategy targets (module 07)             | Implemented                      | 10 unit, 12 real-PostgreSQL route/repository cases; migration 0006             |
 | Truthful health                          | Implemented                      | `apps/api`, 5 unit + 4 integration cases                                       |
 | Worker and executor processes            | Start, assert boundary, idle     | `apps/worker`, `apps/executor`                                                 |
 | Console shell and design tokens          | Implemented, browser-verified    | `apps/web`, 17 cases, screenshots in `artifacts/proofs/m0-foundation/ui/`      |
@@ -90,11 +92,11 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run format:check`                       | pass                                                        |
 | `pnpm run typecheck`                          | pass                                                        |
 | `pnpm run lint`                               | pass                                                        |
-| `pnpm run check:layering`                     | pass — 10 packages, 62 crossings checked                    |
-| `pnpm run check:secrets`                      | pass — 262 files scanned                                    |
-| `pnpm run test:unit`                          | **778 passed**, 0 skipped, 43 files                         |
+| `pnpm run check:layering`                     | pass — 11 packages, 89 crossings checked                    |
+| `pnpm run check:secrets`                      | pass — 290 files scanned                                    |
+| `pnpm run test:unit`                          | **788 passed**, 0 skipped, 44 files                         |
 | `pnpm run test:property`                      | **19 passed**, seed 20260908                                |
-| `pnpm run test:integration`                   | **405 passed**, 25 files, against PostgreSQL 17.10          |
+| `pnpm run test:integration`                   | **417 passed**, 26 files, against PostgreSQL 17.10          |
 | `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
 | `pnpm run build`                              | pass — all packages and apps                                |
 
@@ -102,9 +104,9 @@ The three test numbers are **workspace totals**, not per-area figures. The split
 
 | Suite       | Count | Where                                                                                                   |
 | ----------- | ----- | ------------------------------------------------------------------------------------------------------- |
-| unit        | 778   | contracts 284, binance 204, web 65, ledger 61, tools 39, api 38, config 35, domain 29, observability 23 |
+| unit        | 788   | contracts 284, binance 204, web 65, ledger 61, tools 39, api 38, config 35, domain 39, observability 23 |
 | property    | 19    | contracts 13 (`money.property.test.ts`), ledger 6 (`conservation.property.test.ts`)                     |
-| integration | 405   | journal 226, auth 60, worker 37, migrations 36, CLI 20, identity scope 11, API 9, executor 6            |
+| integration | 417   | journal 236, auth 62, worker 37, migrations 36, CLI 20, identity scope 11, API 9, executor 6            |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 91
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), module 04's the 119
@@ -130,11 +132,7 @@ proof**, which is why the code reports execution as unavailable rather than assu
 
 ## Next action
 
-The M3 pull request is open for independent maintainer review at the head recorded in its
-description. Not merged by the implementer.
-
-Module 06's own work is complete; T-014 and the full T-012 sweep need module 14's fill
-allocator and are recorded as not implemented rather than counted. Modules 07, 09 and 10 are
-unblocked by the claim model this milestone provides. A live bootstrap still cannot run,
-because obtaining a COMPLETE observation cut needs the `VENUE_READ` credential that does not
-exist — the refusal is correct behaviour, and the block is upstream in module 05.
+Open and merge the module 07 pull request after the branch-head checks pass, then implement
+module 08 immutable mandates. Modules 09 and 10 are unblocked by the accepted target and claim
+models. A live bootstrap still cannot run because obtaining a COMPLETE observation cut needs
+the `VENUE_READ` credential that does not exist.

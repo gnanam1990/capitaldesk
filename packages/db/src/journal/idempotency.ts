@@ -37,7 +37,15 @@ export class IdempotencyRepository {
 
   /** Decide, before acting, what this key permits. */
   async begin(input: IdempotencyScope & { readonly requestDigest: string }): Promise<BeginOutcome> {
-    const result = await this.pool.query<{
+    return IdempotencyRepository.beginOn(this.pool, input);
+  }
+
+  /** The same decision on a caller-owned transaction and lock scope. */
+  static async beginOn(
+    client: Queryable | Pool,
+    input: IdempotencyScope & { readonly requestDigest: string },
+  ): Promise<BeginOutcome> {
+    const result = await client.query<{
       request_digest: string;
       action: string;
       economic_ref: string | null;
@@ -49,7 +57,8 @@ export class IdempotencyRepository {
       `SELECT request_digest, action, economic_ref, response_status, response_body,
               response_body IS NULL AS body_discarded,
               response_expires_at <= now() AS retention_lapsed
-         FROM idempotency_results WHERE scope_kind = $1 AND scope_id = $2 AND idempotency_key = $3`,
+         FROM idempotency_results WHERE scope_kind = $1 AND scope_id = $2 AND idempotency_key = $3
+         FOR UPDATE`,
       [input.scopeKind, input.scopeId, input.key],
     );
     const row = result.rows[0];
