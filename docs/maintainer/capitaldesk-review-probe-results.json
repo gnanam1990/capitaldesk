@@ -1,0 +1,68 @@
+{
+  "evidence_class": "independent specification models, not production tests",
+  "golden_partial": {
+    "each_strategy_quote": "300.80100",
+    "each_strategy_base": "0.01",
+    "verified": true
+  },
+  "T055_independent_enumeration": {
+    "feasible_matrices": 8,
+    "one_feasible_matrix": [
+      [
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    ],
+    "per_fill_largest_remainder_C_debit": 2,
+    "C_approved_cap": 1,
+    "note": "Supports this fixture, not a proof of the general solver."
+  },
+  "sequential_reversal": {
+    "simultaneous_sell_buy_conflict": true,
+    "sell_cycle_conflict": false,
+    "later_buy_cycle_conflict": false,
+    "note": "Separate owner approvals remain required; no automatic policy prevents this reversal."
+  },
+  "post_marker_expiry_gap": {
+    "expiry": 100,
+    "marker_time": 99,
+    "resumed_send_time": 130,
+    "marker_check_passes": true,
+    "note": "Possible under underspecified signing timing; not a reproduced executor bug."
+  },
+  "unknown_absence_fixed_point": {
+    "state_after_1000_inconclusive_reads": [
+      "UNKNOWN",
+      "RESERVED",
+      "POOL_BLOCKED"
+    ],
+    "note": "Documents intentionally preserve safety, but specify no successful absence exit."
+  },
+  "lost_fifo_restore_information": {
+    "venue_fact": {
+      "gross_base_fill": 1,
+      "gross_quote_cost": 10
+    },
+    "possible_local_ownership": [
+      {
+        "A": 1,
+        "B": 0
+      },
+      {
+        "A": 0,
+        "B": 1
+      }
+    ],
+    "note": "Venue reconciliation cannot recover a lost local allocation schedule uniquely."
+  }
+}
