@@ -1,12 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DispatchRepository } from './dispatch.js';
 import { JobLeaseRepository } from './leases.js';
-import { LedgerRepository } from './ledger.js';
+import { LedgerRepository, type AssetRef } from './ledger.js';
 import { ObservationRepository } from './observations.js';
 import { OutboxRepository } from './outbox.js';
 import { enterRestorePosture, enterRestorePostureOn } from './restore.js';
 import { serializable } from './transaction.js';
-import { DATABASE_URL, JournalHarness, POOL, USDT, WORKSPACE, sqlState } from './test-harness.js';
+import {
+  BTC,
+  DATABASE_URL,
+  JournalHarness,
+  POOL,
+  USDT,
+  WORKSPACE,
+  sqlState,
+} from './test-harness.js';
 
 /**
  * Regressions from the maintainer's exact-head review of bcd48de.
@@ -1234,3 +1242,204 @@ describeIfDatabase('8. a reservation cannot be released beyond what it still hol
     expect(unattributed).toBe('23514');
   });
 });
+
+describeIfDatabase(
+  '9. contradictory fill and correlation evidence is a conflict, never a duplicate',
+  () => {
+    const harness = new JournalHarness();
+    let observations: ObservationRepository;
+
+    beforeAll(async () => {
+      await harness.open();
+    });
+    afterAll(async () => {
+      await harness.close();
+    });
+    beforeEach(async () => {
+      await harness.reset();
+      await harness.seedPool();
+      await harness.seedGovernanceLease();
+      observations = new ObservationRepository(harness.pool);
+      await harness.admin.query(
+        `INSERT INTO raw_observations (workspace_id, pool_id, epoch, observation_id, source, kind, source_ref, payload, payload_digest)
+       VALUES ($1,$2,1,'obs-1','rest','trade','t1','{}','x'), ($1,$2,1,'obs-2','stream','trade','t2','{}','y')`,
+        [WORKSPACE, POOL],
+      );
+      await harness.admin.query(
+        `INSERT INTO plans (workspace_id, pool_id, epoch, plan_id, state, payload, payload_digest)
+       VALUES ($1,$2,1,'pl1','DISPATCH_PENDING','{}','d')`,
+        [WORKSPACE, POOL],
+      );
+      await harness.admin.query(
+        `INSERT INTO dispatch_attempts (workspace_id, pool_id, epoch, attempt_id, plan_id, client_order_id, dispatch_token)
+       VALUES ($1,$2,1,'a1','pl1','cd-1','tok-1'), ($1,$2,1,'a2','pl1','cd-2','tok-2')`,
+        [WORKSPACE, POOL],
+      );
+      await observations.recordOrder({
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        epoch: 1,
+        symbol: 'BTCUSDT',
+        venueOrderId: '5001',
+        status: 'PARTIALLY_FILLED',
+      });
+    });
+    afterEach(async () => {
+      await harness.cleanup();
+    });
+
+    const fill = {
+      workspaceId: WORKSPACE,
+      poolId: POOL,
+      epoch: 1,
+      symbol: 'BTCUSDT',
+      venueOrderId: '5001',
+      venueTradeId: '77',
+      observationId: 'obs-1',
+      baseAtoms: 10n,
+      quoteAtoms: 100n,
+      commission: { asset: USDT as AssetRef, atoms: 1n },
+      tradedAt: new Date('2026-09-08T00:00:00.000Z'),
+    };
+
+    it('dedupes an exact repeat of a fill', async () => {
+      expect(await observations.recordFill(fill)).toEqual({ kind: 'recorded' });
+      expect(await observations.recordFill({ ...fill })).toEqual({ kind: 'already-recorded' });
+      expect((await harness.admin.query('SELECT 1 FROM venue_fills')).rowCount).toBe(1);
+      expect((await harness.admin.query('SELECT 1 FROM evidence_conflicts')).rowCount).toBe(0);
+    });
+
+    it('records a conflict for every changed economic field, without rewriting the stored fill', async () => {
+      await observations.recordFill(fill);
+      const changes: Array<[string, Partial<typeof fill>]> = [
+        ['baseAtoms', { baseAtoms: 11n }],
+        ['quoteAtoms', { quoteAtoms: 101n }],
+        ['commissionAtoms', { commission: { asset: USDT, atoms: 2n } }],
+        ['commissionAsset', { commission: { asset: BTC, atoms: 1n } }],
+        ['tradedAt', { tradedAt: new Date('2026-09-08T00:00:01.000Z') }],
+        ['observationId', { observationId: 'obs-2' }],
+      ];
+      for (const [field, change] of changes) {
+        const outcome = await observations.recordFill({ ...fill, ...change });
+        expect(outcome, field).toMatchObject({ kind: 'conflict' });
+        expect((outcome as unknown as { changed: string[] }).changed, field).toContain(field);
+      }
+
+      // The stored evidence is exactly what was first recorded.
+      const stored = await harness.admin.query<{
+        observation_id: string;
+        base_atoms: string;
+        quote_atoms: string;
+        commission_asset: string;
+        commission_atoms: string;
+      }>(
+        `SELECT observation_id, base_atoms::text, quote_atoms::text, commission_asset, commission_atoms::text FROM venue_fills`,
+      );
+      expect(stored.rowCount).toBe(1);
+      expect(stored.rows[0]).toEqual({
+        observation_id: 'obs-1',
+        base_atoms: '10',
+        quote_atoms: '100',
+        commission_asset: 'USDT:v1',
+        commission_atoms: '1',
+      });
+      const conflicts = await harness.admin.query<{ subject_kind: string; subject_ref: string }>(
+        `SELECT subject_kind, subject_ref FROM evidence_conflicts`,
+      );
+      expect(conflicts.rowCount).toBe(changes.length);
+      expect(
+        conflicts.rows.every(
+          (row) => row.subject_kind === 'fill' && row.subject_ref === 'BTCUSDT/5001/77',
+        ),
+      ).toBe(true);
+    });
+
+    it('refuses to rewrite a stored fill even by direct SQL', async () => {
+      await observations.recordFill(fill);
+      for (const statement of [
+        `UPDATE venue_fills SET base_atoms = 11`,
+        `DELETE FROM venue_fills`,
+      ]) {
+        let refusal = 'accepted';
+        try {
+          await harness.admin.query(statement);
+        } catch (error) {
+          refusal = sqlState(error);
+        }
+        expect(refusal, statement).toBe('23001');
+      }
+    });
+
+    it('learns a correlation it did not have, and refuses a different one', async () => {
+      const order = {
+        workspaceId: WORKSPACE,
+        poolId: POOL,
+        epoch: 1,
+        symbol: 'BTCUSDT',
+        venueOrderId: '5001',
+      };
+      // Nothing correlated yet, so the first client id is new information on the duplicate path.
+      expect(
+        await observations.recordOrder({
+          ...order,
+          status: 'PARTIALLY_FILLED',
+          clientOrderId: 'cd-1',
+        }),
+      ).toEqual({ kind: 'duplicate' });
+      expect(
+        (
+          await harness.admin.query<{ client_order_id: string }>(
+            'SELECT client_order_id FROM venue_orders',
+          )
+        ).rows[0]?.client_order_id,
+      ).toBe('cd-1');
+
+      // A second, different attempt claiming the same venue order is a conflict on both paths -
+      // the duplicate-status path and the progressed-status path. `coalesce` had silently kept
+      // the first on both.
+      expect(
+        await observations.recordOrder({
+          ...order,
+          status: 'PARTIALLY_FILLED',
+          clientOrderId: 'cd-2',
+        }),
+      ).toMatchObject({
+        kind: 'correlation-conflict',
+        current: 'cd-1',
+        incoming: 'cd-2',
+      });
+      expect(
+        await observations.recordOrder({ ...order, status: 'FILLED', clientOrderId: 'cd-2' }),
+      ).toMatchObject({
+        kind: 'correlation-conflict',
+        current: 'cd-1',
+        incoming: 'cd-2',
+      });
+
+      // Neither the correlation nor the status moved.
+      const row = await harness.admin.query<{
+        client_order_id: string;
+        status: string;
+        version: number;
+      }>('SELECT client_order_id, status, version FROM venue_orders');
+      expect(row.rows[0]).toMatchObject({
+        client_order_id: 'cd-1',
+        status: 'PARTIALLY_FILLED',
+        version: 1,
+      });
+      const conflicts = await harness.admin.query<{ subject_kind: string }>(
+        'SELECT subject_kind FROM evidence_conflicts',
+      );
+      expect(conflicts.rows.map((r) => r.subject_kind)).toEqual([
+        'order-correlation',
+        'order-correlation',
+      ]);
+
+      // An observation carrying no correlation still advances the status.
+      expect(await observations.recordOrder({ ...order, status: 'FILLED' })).toMatchObject({
+        kind: 'progressed',
+        to: 'FILLED',
+      });
+    });
+  },
+);
