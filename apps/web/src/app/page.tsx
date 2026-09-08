@@ -1,32 +1,31 @@
-import type { ReactNode } from 'react';
 import { loadWebPublicConfig } from '@capitaldesk/config';
-import { StatusPill, type StatusTone } from '../components/StatusPill';
+import {
+  EvidenceLink,
+  PageIntro,
+  Panel,
+  PreviewGate,
+  Quantity,
+  StateChip,
+  Stat,
+  TableRegion,
+  Timeline,
+} from '../components/Console';
+import { Icon } from '../components/Icons';
+import { INTENTS } from '../lib/preview-data';
 import { healthUrl, parseReadiness, resolveDeploymentFacts, type Readiness } from './readiness';
 
 export const dynamic = 'force-dynamic';
 
-/**
- * The console shows what the API actually reported.
- *
- * When the API is unreachable this renders a degraded state naming the failure — not zeroed
- * balances, not a cached optimistic view and not a placeholder account (UI-UX section 4).
- */
 async function fetchReadiness(apiBaseUrl: string): Promise<Readiness> {
   try {
     const response = await fetch(healthUrl(apiBaseUrl), {
       cache: 'no-store',
       signal: AbortSignal.timeout(3000),
     });
-    // A 503 with a valid not_ready report is a reachable API reporting a real state, not a
-    // transport failure, and must not be presented as one.
     const report = parseReadiness(await response.json());
-    if (report === null) {
-      return {
-        kind: 'unreachable',
-        detail: 'the API returned a response this console cannot read',
-      };
-    }
-    return { kind: 'reachable', report };
+    return report === null
+      ? { kind: 'unreachable', detail: 'the API returned an unreadable readiness response' }
+      : { kind: 'reachable', report };
   } catch (error) {
     return {
       kind: 'unreachable',
@@ -35,117 +34,187 @@ async function fetchReadiness(apiBaseUrl: string): Promise<Readiness> {
   }
 }
 
-function Panel({ children, title }: { children: ReactNode; title: string }) {
-  return (
-    <section className="cd-panel">
-      <h2 className="cd-panel-title">{title}</h2>
-      <div style={{ marginTop: 'var(--cd-s4)' }}>{children}</div>
-    </section>
-  );
-}
-
-function Fact({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="cd-fact">
-      <dt>{label}</dt>
-      <dd className={mono === true ? 'cd-mono' : undefined}>{value}</dd>
-    </div>
-  );
-}
-
 export default async function OverviewPage() {
   const config = loadWebPublicConfig();
   const readiness = await fetchReadiness(config.apiBaseUrl);
   const facts = resolveDeploymentFacts(config, readiness);
-
-  const apiTone: StatusTone =
-    readiness.kind === 'unreachable'
-      ? 'danger'
-      : readiness.report.status === 'ready'
-        ? 'ok'
-        : 'warn';
+  const liveReady = readiness.kind === 'reachable' && readiness.report.status === 'ready';
 
   return (
     <div className="cd-stack">
-      <header style={{ display: 'grid', gap: 'var(--cd-s3)' }}>
-        <h1 className="cd-page-title">Overview</h1>
-        <p className="cd-lede">
-          This console governs one Binance Spot account. Nothing here is connected to a venue yet:
-          no account has been reconciled, no strategy claims exist, and no execution path is
-          implemented.
-        </p>
-        <div className="cd-pills">
-          <StatusPill tone="neutral">{facts.deploymentEnvironment.toUpperCase()}</StatusPill>
-          <StatusPill tone={apiTone}>
+      <PageIntro
+        eyebrow="Account control room"
+        title="Capital, intent and evidence — in one view."
+        summary="The desk separates owner authority, venue facts and accounting evidence so the next safe action is always explicit."
+        action={
+          <>
+            <button className="cd-button cd-button--quiet" type="button" disabled>
+              New events · 3
+            </button>
+            <a className="cd-button" href="/plans">
+              Review active plan <Icon name="arrow" width="17" height="17" />
+            </a>
+          </>
+        }
+      />
+
+      <section className={`cd-callout ${liveReady ? '' : 'cd-callout--danger'}`} aria-live="polite">
+        <Icon name={liveReady ? 'check' : 'alert'} width="20" height="20" />
+        <div>
+          <strong>{liveReady ? 'API readiness confirmed' : 'Execution is unavailable'}</strong>
+          <p>
             {readiness.kind === 'unreachable'
-              ? 'API unreachable'
-              : `API ${readiness.report.status}`}
-          </StatusPill>
-          <StatusPill tone="warn">Execution unavailable</StatusPill>
-          <StatusPill tone="unknown">No baseline</StatusPill>
-        </div>
-      </header>
-
-      <div className="cd-grid">
-        <Panel
-          title={
-            facts.source === 'api'
-              ? 'Deployment (reported by API)'
-              : 'Deployment (console configuration)'
-          }
-        >
-          <dl style={{ margin: 0, display: 'grid' }}>
-            <Fact label="Account alias" value={facts.accountAlias} mono />
-            <Fact label="Environment" value={facts.deploymentEnvironment} mono />
-            <Fact label="Baseline epoch" value={facts.baselineEpoch} mono />
-            <Fact label="Build" value={facts.buildId} mono />
-          </dl>
-          {facts.mismatches.length > 0 ? (
-            <p className="cd-note" role="status">
-              This console&apos;s configuration disagrees with the API on{' '}
-              {facts.mismatches.join(', ')}. The API&apos;s values are shown above. A console
-              pointed at an API it was not configured for is a deployment fault, not a display
-              detail.
-            </p>
-          ) : null}
-          <p style={{ fontSize: 13, color: 'var(--cd-ink-subtle)', margin: 'var(--cd-s3) 0 0' }}>
-            {facts.source === 'api'
-              ? 'Reported by the API. An alias is an operator label, not an account identity: identity is the venue\u2019s own stable account id, established only after an authenticated read.'
-              : 'This console\u2019s own configuration, shown because the API did not answer. It has not been observed and does not describe the API.'}
+              ? `The API did not answer: ${readiness.detail}. This says nothing about venue account state.`
+              : readiness.report.execution.reason}
           </p>
-        </Panel>
+          <small className="cd-mono">
+            {facts.source === 'api' ? 'API OBSERVATION' : 'CONSOLE CONFIG ONLY'} ·{' '}
+            {facts.accountAlias}
+          </small>
+        </div>
+      </section>
 
-        <Panel title="Execution readiness">
-          {readiness.kind === 'unreachable' ? (
-            <p style={{ margin: 0, color: 'var(--cd-danger)' }}>
-              The API did not respond ({readiness.detail}). No account state can be shown. This is a
-              transport failure, not evidence about the account.
-            </p>
-          ) : (
-            <>
-              <dl style={{ margin: 0, display: 'grid' }}>
-                {readiness.report.dependencies.map((dependency) => (
-                  <Fact
-                    key={dependency.name}
-                    label={dependency.name}
-                    value={`${dependency.state} — ${dependency.detail}`}
-                  />
-                ))}
-                <Fact label="Contracts version" value={readiness.report.contractsVersion} mono />
-              </dl>
-              <p className="cd-note">{readiness.report.execution.reason}</p>
-            </>
-          )}
-        </Panel>
-      </div>
+      <PreviewGate>
+        <div className="cd-stack">
+          <div className="cd-stats">
+            <Stat
+              label="Available claim"
+              value="12,750.00000000"
+              unit="USDT"
+              meta="Strategy-authorized and unreserved"
+              tone="ok"
+            />
+            <Stat
+              label="Reserved"
+              value="4,500.00000000"
+              unit="USDT"
+              meta="Held by sealed plan CD-P1042"
+              tone="warn"
+            />
+            <Stat
+              label="Owner attention"
+              value="03"
+              meta="1 approval · 1 conflict · 1 drift"
+              tone="danger"
+            />
+            <Stat
+              label="Source age"
+              value="01.8"
+              unit="s"
+              meta="Account snapshot · complete coverage"
+              tone="ok"
+            />
+          </div>
 
-      <Panel title="Next owner action">
-        <p style={{ margin: 0, maxWidth: '62ch' }}>
-          There is no action to take yet. Connecting an account requires the read adapter and the
-          baseline ledger, which are not implemented. The milestone status, its evidence and what is
-          blocked are tracked in <span className="cd-mono">docs/PROJECT-STATUS.md</span>.
-        </p>
-      </Panel>
+          <div className="cd-grid">
+            <Panel
+              title="Intent queue"
+              eyebrow="Coordination"
+              action={<EvidenceLink href="/intents">Open queue</EvidenceLink>}
+            >
+              <TableRegion label="Development preview intent queue">
+                <table className="cd-table">
+                  <thead>
+                    <tr>
+                      <th>Strategy</th>
+                      <th>Revision</th>
+                      <th data-align="right">Target</th>
+                      <th data-align="right">Delta</th>
+                      <th>Disposition</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {INTENTS.map((intent) => (
+                      <tr key={intent.id}>
+                        <td>
+                          <strong>{intent.strategy}</strong>
+                          <small>{intent.id}</small>
+                        </td>
+                        <td className="cd-mono">{intent.revision}</td>
+                        <td data-align="right">
+                          <Quantity amount={intent.target} asset="BTC" />
+                        </td>
+                        <td data-align="right">
+                          <Quantity amount={intent.delta} asset="BTC" />
+                        </td>
+                        <td>
+                          <StateChip tone={intent.state === 'CONFLICT' ? 'danger' : 'ok'}>
+                            {intent.state}
+                          </StateChip>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableRegion>
+            </Panel>
+
+            <Panel title="Source health" eyebrow="Evidence clock">
+              <ul className="cd-list">
+                <li>
+                  <div>
+                    <strong>Account snapshot</strong>
+                    <small>Complete asset coverage</small>
+                  </div>
+                  <StateChip tone="ok">1.8s</StateChip>
+                </li>
+                <li>
+                  <div>
+                    <strong>Symbol metadata</strong>
+                    <small>BTCUSDT filters · revision 104</small>
+                  </div>
+                  <StateChip tone="ok">8m</StateChip>
+                </li>
+                <li>
+                  <div>
+                    <strong>Venue clock</strong>
+                    <small>Observed offset +21ms</small>
+                  </div>
+                  <StateChip tone="ok">0.4s</StateChip>
+                </li>
+                <li>
+                  <div>
+                    <strong>Order recovery</strong>
+                    <small>One correlation awaits a read</small>
+                  </div>
+                  <StateChip tone="unknown">UNKNOWN</StateChip>
+                </li>
+              </ul>
+            </Panel>
+          </div>
+
+          <Panel
+            title="Recent execution evidence"
+            eyebrow="Fixture timeline"
+            action={<EvidenceLink href="/orders">Open recovery</EvidenceLink>}
+          >
+            <Timeline
+              items={[
+                {
+                  title: 'Plan CD-P1041 reconciled',
+                  detail: 'Gross fill, fee allocation and ledger postings agree.',
+                  time: '12:42:19 IST',
+                  tone: 'ok',
+                  icon: 'check',
+                },
+                {
+                  title: 'Dispatch acknowledgement missing',
+                  detail: 'The venue may have accepted CD-P1042. Reserved capital remains held.',
+                  time: '12:39:04 IST',
+                  tone: 'unknown',
+                  icon: 'alert',
+                },
+                {
+                  title: 'Opposing target detected',
+                  detail: 'Protective unwind stays queued; it does not cancel an in-flight order.',
+                  time: '12:37:51 IST',
+                  tone: 'warn',
+                },
+              ]}
+            />
+          </Panel>
+        </div>
+      </PreviewGate>
     </div>
   );
 }

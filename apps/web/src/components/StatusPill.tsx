@@ -1,13 +1,14 @@
 import type { ReactNode } from 'react';
+import { Icon, type IconName } from './Icons';
 
 export type StatusTone = 'ok' | 'warn' | 'danger' | 'unknown' | 'neutral';
 
-const GLYPH: Record<StatusTone, string> = {
-  ok: '✓',
-  warn: '!',
-  danger: '×',
-  unknown: '?',
-  neutral: '–',
+const GLYPH: Record<StatusTone, IconName> = {
+  ok: 'check',
+  warn: 'alert',
+  danger: 'alert',
+  unknown: 'clock',
+  neutral: 'shield',
 };
 
 const SURFACE: Record<StatusTone, { bg: string; fg: string }> = {
@@ -34,16 +35,14 @@ export function StatusPill({ tone, children }: { tone: StatusTone; children: Rea
         borderRadius: 999,
         background: surface.bg,
         color: surface.fg,
-        border: `1px solid ${surface.fg}33`,
+        border: `1px solid color-mix(in srgb, ${surface.fg} 30%, transparent)`,
         fontSize: 13,
         fontWeight: 600,
         letterSpacing: '0.01em',
         whiteSpace: 'nowrap',
       }}
     >
-      <span aria-hidden="true" style={{ fontFamily: 'var(--cd-font-mono)' }}>
-        {GLYPH[tone]}
-      </span>
+      <Icon name={GLYPH[tone]} width="13" height="13" />
       {children}
     </span>
   );
