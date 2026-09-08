@@ -79,6 +79,7 @@ export type MarkOutcome =
   | { readonly ok: false; readonly reason: 'ATTEMPT_VOIDED'; readonly voidedReason: string }
   | { readonly ok: false; readonly reason: 'PLAN_NOT_DISPATCHABLE'; readonly state: PlanState }
   | { readonly ok: false; readonly reason: 'SIGNED_REQUEST_MISSING' }
+  | { readonly ok: false; readonly reason: 'AUTHORIZATION_REFUSED'; readonly detail: string }
   | {
       readonly ok: false;
       readonly reason: 'EPOCH_NOT_CURRENT';
@@ -103,6 +104,23 @@ export interface MarkInput {
     readonly processStartedAt: Date;
   };
 }
+
+export type AuthorizedMarkInput = Omit<MarkInput, 'signedRequest'>;
+
+export interface MarkAuthorizationContext {
+  readonly client: Queryable;
+  readonly planId: string;
+  readonly clientOrderId: string;
+  readonly planPayload: unknown;
+  readonly planDigest: string;
+}
+
+export type AuthorizeAndSign = (
+  context: MarkAuthorizationContext,
+) => Promise<
+  | { readonly ok: true; readonly signedRequest: unknown }
+  | { readonly ok: false; readonly detail: string }
+>;
 
 /**
  * The only pool states in which new economic or dispatch authority may be created.
@@ -345,12 +363,29 @@ export class DispatchRepository {
    * Nothing here touches the network; the executor consumes the message.
    */
   mark(input: MarkInput, hooks: MarkHooks = {}): Promise<MarkOutcome> {
-    return serializable(this.pool, (client) => markBody(client, input, hooks));
+    return serializable(this.pool, (client) =>
+      markBody(client, input, () => Promise.resolve({ ok: true, signedRequest: input.signedRequest }), hooks),
+    );
+  }
+
+  /**
+   * Production marker path. Approval revalidation and signing execute inside the marker
+   * transaction after every authority row is locked. Only the returned frozen bytes are
+   * persisted; the outbox consumer has no signing function and cannot refresh them.
+   */
+  markAuthorized(
+    input: AuthorizedMarkInput,
+    authorizeAndSign: AuthorizeAndSign,
+    hooks: MarkHooks = {},
+  ): Promise<MarkOutcome> {
+    return serializable(this.pool, (client) => markBody(client, input, authorizeAndSign, hooks));
   }
 
   /** The same marking pinned to one connection, for a race proven on independent backends. */
   static markOn(client: Queryable, input: MarkInput, hooks: MarkHooks = {}): Promise<MarkOutcome> {
-    return serializableOn(client, (c) => markBody(c, input, hooks));
+    return serializableOn(client, (c) =>
+      markBody(c, input, () => Promise.resolve({ ok: true, signedRequest: input.signedRequest }), hooks),
+    );
   }
 
   /** The second durable write, immediately before the first network byte (ADR-0001). */
@@ -416,14 +451,16 @@ export class DispatchRepository {
     clientOrderId: string;
     markedAt: Date | null;
     sendAttemptedAt: Date | null;
+    signedRequest: unknown | null;
   } | null> {
     const result = await this.pool.query<{
       state: DispatchAttemptState;
       client_order_id: string;
       marked_at: Date | null;
       send_attempted_at: Date | null;
+      signed_request: unknown | null;
     }>(
-      'SELECT state, client_order_id, marked_at, send_attempted_at FROM dispatch_attempts WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3',
+      'SELECT state, client_order_id, marked_at, send_attempted_at, signed_request FROM dispatch_attempts WHERE workspace_id = $1 AND pool_id = $2 AND attempt_id = $3',
       [scope.workspaceId, scope.poolId, scope.attemptId],
     );
     const row = result.rows[0];
@@ -433,27 +470,17 @@ export class DispatchRepository {
       clientOrderId: row.client_order_id,
       markedAt: row.marked_at,
       sendAttemptedAt: row.send_attempted_at,
+      signedRequest: row.signed_request,
     };
   }
 }
 
 async function markBody(
   client: Queryable,
-  input: MarkInput,
+  input: AuthorizedMarkInput,
+  authorizeAndSign: AuthorizeAndSign,
   hooks: MarkHooks,
 ): Promise<MarkOutcome> {
-  // The marker's whole purpose is to commit what will be sent before sending it. A null or
-  // non-object signed request is nothing to commit, and the marked-state CHECK refuses it at
-  // the table too.
-  if (
-    input.signedRequest === null ||
-    input.signedRequest === undefined ||
-    typeof input.signedRequest !== 'object' ||
-    Array.isArray(input.signedRequest)
-  ) {
-    return { ok: false, reason: 'SIGNED_REQUEST_MISSING' };
-  }
-
   // The same gate sealing, reserving and preparing use, in the same lock order.
   const authority = await requireAuthorityPool(client, input);
   if (!authority.ok) return authority;
@@ -462,6 +489,7 @@ async function markBody(
     state: DispatchAttemptState;
     plan_id: string;
     epoch: number;
+    client_order_id: string;
     voided_reason: string | null;
   }>(
     `SELECT state, plan_id, epoch, voided_reason FROM dispatch_attempts
@@ -475,14 +503,35 @@ async function markBody(
     return { ok: false, reason: 'ATTEMPT_VOIDED', voidedReason: attemptRow.voided_reason };
   }
 
-  const plan = await client.query<{ state: PlanState }>(
-    `SELECT state FROM plans WHERE workspace_id = $1 AND pool_id = $2 AND plan_id = $3 FOR UPDATE`,
+  const plan = await client.query<{ state: PlanState; payload: unknown; payload_digest: string }>(
+    `SELECT state, payload, payload_digest FROM plans
+      WHERE workspace_id = $1 AND pool_id = $2 AND plan_id = $3 FOR UPDATE`,
     [input.workspaceId, input.poolId, attemptRow.plan_id],
   );
   const planRow = plan.rows[0];
   if (planRow === undefined) return { ok: false, reason: 'NOT_PREPARED' };
   if (planRow.state !== 'DISPATCH_PENDING') {
     return { ok: false, reason: 'PLAN_NOT_DISPATCHABLE', state: planRow.state };
+  }
+
+  const authorization = await authorizeAndSign({
+    client,
+    planId: attemptRow.plan_id,
+    clientOrderId: attemptRow.client_order_id,
+    planPayload: planRow.payload,
+    planDigest: planRow.payload_digest,
+  });
+  if (!authorization.ok) {
+    return { ok: false, reason: 'AUTHORIZATION_REFUSED', detail: authorization.detail };
+  }
+  const signedRequest = authorization.signedRequest;
+  if (
+    signedRequest === null ||
+    signedRequest === undefined ||
+    typeof signedRequest !== 'object' ||
+    Array.isArray(signedRequest)
+  ) {
+    return { ok: false, reason: 'SIGNED_REQUEST_MISSING' };
   }
 
   const marked = await client.query<{ client_order_id: string; dispatch_token: string }>(
@@ -495,7 +544,7 @@ async function markBody(
       input.workspaceId,
       input.poolId,
       input.attemptId,
-      JSON.stringify(input.signedRequest),
+      JSON.stringify(signedRequest),
       input.host.bootId,
       input.host.pid,
       input.host.processStartedAt,
