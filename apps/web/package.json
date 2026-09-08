@@ -5,10 +5,10 @@
   "type": "module",
   "description": "Owner console. Reaches data through the API only; never imports the database or the executor.",
   "scripts": {
-    "build": "next build",
+    "build": "node ./scripts/with-env.mjs build",
     "dev": "next dev --port 3100",
     "start": "next start --port 3100",
-    "typecheck": "next typegen && tsc --noEmit"
+    "typecheck": "node ./scripts/with-env.mjs typegen && tsc --noEmit"
   },
   "dependencies": {
     "@capitaldesk/config": "workspace:*",
