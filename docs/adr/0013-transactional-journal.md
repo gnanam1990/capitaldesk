@@ -234,6 +234,34 @@ Raw observation payloads are venue JSON, full of numbers the canonical money enc
 by design. The stored digest is over the bytes as received when the adapter supplies them,
 otherwise over the persisted serialisation. Deduplication is by source reference, not digest.
 
+### 12. Epoch currency is checked wherever authority is created
+
+Rotation counted only unresolved attempts, so an APPROVED plan that had never prepared one let
+rotation close its epoch while the plan stayed dispatchable against a baseline that no longer
+existed. Rotation refuses while any sealed plan is nonterminal, and sealing, reserving and
+preparing each take the pool lock rotation takes and require the pool's current open epoch.
+
+Releasing a governance lease halts the pool in the same transaction. Retiring the lease alone
+left the pool READY, and an approved plan could still mark; marking independently requires an
+active lease, so neither guard depends on the other.
+
+### 13. NOT_SENT_PROVEN requires evidence, and never follows a send
+
+`SEND_ATTEMPTED` is committed immediately before the first network byte, so nothing observed
+afterwards can prove the bytes never left. That transition is refused outright. For an attempt
+that never sent, the release requires all of ADR-0001's conditions — sender fenced, open-order
+scan and trade backfill clear, coverage complete — and names which are missing.
+
+The marker also persists the marking process's start time. Boot id and pid do not identify a
+process, because pids are reused without a reboot, so the host record on its own was not
+fencing evidence.
+
+### 14. Restore covers every nonterminal plan without a marker
+
+The scan was limited to the three pre-marker states, so an EXECUTING, RECONCILING or
+MANUAL_REVIEW plan that had never actually reached a marker kept its reservations through a
+restore. The marker, not the state name, is what says a plan has live venue authority.
+
 ## What this module does not do
 
 - Tables for intents, approvals, policy versions, incidents, reconciliation runs and webhook
