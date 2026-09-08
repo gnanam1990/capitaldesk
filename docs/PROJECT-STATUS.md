@@ -4,9 +4,11 @@ The single authoritative record of what is built, what is proven and what is blo
 Updated with every milestone. Where a claim is not backed by a command in this document, it
 is not a claim.
 
-- **Milestone:** M7 — governed execution, reconciliation and owner console (modules 11–24).
-- **Branch:** `feat/m7-approval-dispatch`, based on merged module 10.
-- **Pull request:** [#8](https://github.com/gnanam1990/capitaldesk/pull/8).
+- **Milestone:** M7 — governed execution, operations, console and release gates (modules 11–29).
+- **Branch:** `main`.
+- **Pull request:** [#8](https://github.com/gnanam1990/capitaldesk/pull/8), merged at
+  `c491942e8244d7bbe625670726fd3c72fa3b0a91` from exact tested head
+  `bc1d51a854fa480e9c02400454748fea556074a9`.
 - **Previous milestones:** M0 merged as
   [#1](https://github.com/gnanam1990/capitaldesk/pull/1); M1 merged as
   [#2](https://github.com/gnanam1990/capitaldesk/pull/2) at `f2f4d59`; M2 merged as
@@ -119,8 +121,8 @@ BLOCKED and is named as such rather than claimed.
 
 ## Commands and results at this branch
 
-Module 08 is using the user's accelerated gate. The last full-workspace results below belong
-to merged module 07. Module 08 adds the targeted results listed after them.
+Pull request #8's required GitHub CI ran on exact head `bc1d51a` before merge. Both the fresh
+checkout job and the real PostgreSQL job passed.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -133,11 +135,11 @@ CAPITALDESK_TEST_DATABASE_URL=postgres://localhost:5432/capitaldesk_test pnpm ru
 | `pnpm run format:check`                       | pass                                                        |
 | `pnpm run typecheck`                          | pass                                                        |
 | `pnpm run lint`                               | pass                                                        |
-| `pnpm run check:layering`                     | pass — 11 packages, 89 crossings checked                    |
-| `pnpm run check:secrets`                      | pass — 290 files scanned                                    |
-| `pnpm run test:unit`                          | **788 passed**, 0 skipped, 44 files                         |
+| `pnpm run check:layering`                     | pass — 16 packages, 136 crossings checked                   |
+| `pnpm run check:secrets`                      | pass — 436 files scanned                                    |
+| `pnpm run test:unit`                          | **905 passed**, 0 skipped, 72 files                         |
 | `pnpm run test:property`                      | **19 passed**, seed 20260908                                |
-| `pnpm run test:integration`                   | **417 passed**, 26 files, against PostgreSQL 17.10          |
+| `pnpm run test:integration`                   | **447 passed**, 0 skipped, against real PostgreSQL          |
 | `pnpm run test:integration` (no database URL) | **refused**, exit 1 — the gate no longer passes by skipping |
 | `pnpm run build`                              | pass — all packages and apps                                |
 
@@ -174,13 +176,13 @@ Integrated modules 17–29 accelerated results:
 | new platform/fault/release tests | 51 focused tests passed on the integrated branch    |
 | dispatch + non-send PostgreSQL   | 18 focused integration tests passed after CI repair |
 
-The three test numbers are **workspace totals**, not per-area figures. The split by file:
+The three test numbers are **workspace totals**, not per-area figures. Final exact-head totals:
 
-| Suite       | Count | Where                                                                                                   |
-| ----------- | ----- | ------------------------------------------------------------------------------------------------------- |
-| unit        | 788   | contracts 284, binance 204, web 65, ledger 61, tools 39, api 38, config 35, domain 39, observability 23 |
-| property    | 19    | contracts 13 (`money.property.test.ts`), ledger 6 (`conservation.property.test.ts`)                     |
-| integration | 417   | journal 236, auth 62, worker 37, migrations 36, CLI 20, identity scope 11, API 9, executor 6            |
+| Suite       | Count | Where                                                                 |
+| ----------- | ----- | --------------------------------------------------------------------- |
+| unit        | 905   | 72 files in the fresh-checkout CI report                              |
+| property    | 19    | contracts and ledger generated cases                                  |
+| integration | 447   | real PostgreSQL CI report; 131 test-file entries, 0 failed or skipped |
 
 No area's evidence is the workspace total. Module 03's own evidence is the 60 unit and 91
 integration cases listed in [docs/handoffs/03.md](handoffs/03.md), module 04's the 119
@@ -201,11 +203,12 @@ React 19.2.8, Vitest 4.1.11, zod 4.5.4, PostgreSQL 17.10 (Homebrew, local).
 | No authenticated read has ever been performed                        | Account balances, order lookup, the open-order scan and trade history are proven only against fixtures. Reader/trader identity equality is unproven. | The user configures a `VENUE_READ` credential for the authorized account.                    |
 | No live non-send evidence                                            | The fenced `NOT_SENT_PROVEN` path exists, but no production observation has satisfied it.                                                            | A real fenced sender plus complete open-order/trade coverage supplies the evidence.          |
 
-None of these blocks the independent implementation work in M1-M3. They block **claims of
-proof**, which is why the code reports execution as unavailable rather than assuming it.
+None of these blocks the local product implementation. They block **claims of funded/live
+venue proof**, which is why the release gate reports execution evidence as unavailable.
 
 ## Next action
 
-Run pull request #8's required CI and merge the exact green head. A funded/live bootstrap
-still cannot run because the required `VENUE_READ` and
-`VENUE_TRADE` credentials and COMPLETE authenticated venue evidence do not exist.
+Supply separately scoped `VENUE_READ` and `VENUE_TRADE` testnet credential references, then
+run the bounded pilot and create an exact-head release manifest. Until authenticated account,
+IOC/fill/fee, response-loss and browser artifacts exist, the final release decision remains
+blocked even though the implemented project and CI are green.
