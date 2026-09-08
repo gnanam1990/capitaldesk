@@ -226,7 +226,7 @@ describeIfDatabase('nothing in module 04 can reach NOT_SENT_PROVEN', () => {
     }
     expect(refusal).toEqual({
       state: '23514',
-      constraint: 'dispatch_attempts_not_sent_unreachable',
+      constraint: 'dispatch_attempt_not_sent_is_evidenced',
     });
     // No new row, and the existing attempt untouched.
     expect((await harness.admin.query('SELECT 1 FROM dispatch_attempts')).rowCount).toBe(
@@ -283,7 +283,7 @@ describeIfDatabase('nothing in module 04 can reach NOT_SENT_PROVEN', () => {
     }
     expect(refusal).toEqual({
       state: '23514',
-      constraint: 'dispatch_attempts_not_sent_unreachable',
+      constraint: 'dispatch_attempt_not_sent_is_evidenced',
     });
     expect(await liability()).toEqual(HELD);
   });

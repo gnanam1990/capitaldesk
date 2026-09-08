@@ -2,6 +2,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import { loadMigrations, migrate, migrationStatus } from './migrator.js';
+import { enterRestorePostureOn } from './journal/restore.js';
+import { authorizeRestoreCommand } from './restore-command.js';
 
 /**
  * Migration CLI. `migrate` applies pending forward migrations; `status` reports without
@@ -22,6 +24,15 @@ async function main(): Promise<void> {
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
   try {
+    if (command === 'restore-posture') {
+      const authorization = authorizeRestoreCommand(process.env);
+      const posture = await enterRestorePostureOn(client, {
+        reason: authorization.reason,
+        now: new Date(),
+      });
+      process.stdout.write(`${JSON.stringify({ state: 'HALTED_RECONCILING', ...posture })}\n`);
+      return;
+    }
     if (command === 'status') {
       // Read-only: this runs inside an explicit READ ONLY transaction so a reporting command
       // can never write, including creating its own bookkeeping table.
@@ -62,7 +73,9 @@ async function main(): Promise<void> {
       for (const version of result.applied) process.stdout.write(`${version}\tapplied\n`);
       return;
     }
-    process.stderr.write(`unknown command: ${command} (expected "migrate" or "status")\n`);
+    process.stderr.write(
+      `unknown command: ${command} (expected "migrate", "status" or "restore-posture")\n`,
+    );
     process.exitCode = 2;
   } finally {
     await client.end();

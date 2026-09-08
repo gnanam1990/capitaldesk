@@ -1,0 +1,24 @@
+{
+  "name": "@capitaldesk/fault-lab",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent deterministic failure scenarios and a testnet-only response-loss transport.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty",
+    "scenario": "tsx src/cli.ts"
+  },
+  "devDependencies": {
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

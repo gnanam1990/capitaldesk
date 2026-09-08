@@ -12,3 +12,7 @@ export * from './venue-read.js';
 export * from './intents.js';
 export * from './policy.js';
 export * from './sealing.js';
+export * from './approvals.js';
+export * from './reconciliation.js';
+export * from './recovery.js';
+export * from './events.js';

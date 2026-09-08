@@ -1,0 +1,20 @@
+{
+  "buildId": "replace-with-build-id",
+  "mode": "local",
+  "accountAlias": null,
+  "stableAccountIdDigest": null,
+  "epoch": null,
+  "adapterMode": "local-deterministic",
+  "feePolicyVersion": "QUOTE_FEE_FIXTURE_V1",
+  "artifacts": [
+    {
+      "path": "docs/evidence/binance-read-capability.md",
+      "proofClass": "document",
+      "scenarios": ["T-043"],
+      "description": "Public-source capability record; no authenticated account proof",
+      "result": "PASS",
+      "actualBoundary": false
+    }
+  ],
+  "limitations": ["Example descriptor only", "No authenticated account read", "No venue order"]
+}

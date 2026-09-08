@@ -22,11 +22,16 @@
     "test": "vitest run",
     "db:migrate": "tsx --env-file-if-exists=.env packages/db/src/cli.ts migrate",
     "db:status": "tsx --env-file-if-exists=.env packages/db/src/cli.ts status",
+    "db:restore-posture": "tsx --env-file-if-exists=.env packages/db/src/cli.ts restore-posture",
     "verify": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run check:layering && pnpm run check:secrets && pnpm run test:unit && pnpm run test:property && pnpm run build",
     "test:integration": "pnpm run preflight:integration && tsc -b && pnpm run typecheck:tests && vitest run --project integration",
     "typecheck:tests": "tsc -p tsconfig.tools.json --noEmit",
     "preflight:integration": "tsx tools/require-database-url.ts",
-    "test:process-only": "vitest run --project integration"
+    "test:process-only": "vitest run --project integration",
+    "proof:create": "tsx tools/proof-cli.ts create",
+    "proof:verify": "tsx tools/proof-cli.ts verify",
+    "release:gate": "tsx tools/proof-cli.ts gate",
+    "fault:deterministic": "pnpm --filter @capitaldesk/fault-lab scenario"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

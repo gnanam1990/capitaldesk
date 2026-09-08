@@ -1,0 +1,25 @@
+{
+  "name": "@capitaldesk/agent-tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Strict proposal-only CapitalDesk tools and reproducible reference agents.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty"
+  },
+  "dependencies": {
+    "@capitaldesk/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

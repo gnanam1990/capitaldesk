@@ -20,17 +20,25 @@ const ROOT = process.cwd();
 
 /** Layer 0 depends on nothing internal; each layer may depend only on strictly lower ones. */
 const LAYERS: ReadonlyArray<readonly string[]> = [
-  ['@capitaldesk/contracts'],
+  ['@capitaldesk/contracts', '@capitaldesk/sdk'],
   [
+    '@capitaldesk/agent-tools',
     '@capitaldesk/config',
     '@capitaldesk/observability',
     '@capitaldesk/domain',
     '@capitaldesk/binance',
     '@capitaldesk/ledger',
     '@capitaldesk/planner',
+    '@capitaldesk/reconciler',
   ],
   ['@capitaldesk/db'],
-  ['@capitaldesk/api', '@capitaldesk/worker', '@capitaldesk/executor', '@capitaldesk/web'],
+  [
+    '@capitaldesk/api',
+    '@capitaldesk/worker',
+    '@capitaldesk/executor',
+    '@capitaldesk/web',
+    '@capitaldesk/fault-lab',
+  ],
 ];
 
 const LAYER_OF = new Map<string, number>();

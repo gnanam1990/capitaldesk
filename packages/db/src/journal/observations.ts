@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { LedgerRepository, type LedgerEntryInput } from './ledger.js';
-import { serializable } from './transaction.js';
+import { serializable, type Queryable } from './transaction.js';
 
 /**
  * Raw observations, venue orders and fills.
@@ -89,6 +89,8 @@ export interface RecordFillInput {
   readonly symbol: string;
   readonly venueOrderId: string;
   readonly venueTradeId: string;
+  /** Venue-verified ordering key. Required before final allocation; provisional ingest may omit it. */
+  readonly exchangeSequence?: bigint;
   readonly observationId: string;
   readonly baseAtoms: bigint;
   readonly quoteAtoms: bigint;
@@ -182,6 +184,40 @@ function digestOf(payload: unknown, rawText: string | undefined): string {
   return createHash('sha256')
     .update(rawText ?? JSON.stringify(payload))
     .digest('hex');
+}
+
+async function quarantineEvidenceConflict(
+  client: Queryable,
+  input: {
+    workspaceId: string;
+    poolId: string;
+    epoch: number;
+    conflictId: string;
+    kind: 'FILL_CONFLICT' | 'UNKNOWN_ORDER';
+    subjectRef: string;
+  },
+): Promise<void> {
+  // A contradiction that arrives after financial completion cannot rewrite final cells.
+  // It is a new incident and immediately removes dispatch authority from the whole pool.
+  await client.query(
+    `INSERT INTO incidents
+      (workspace_id,pool_id,epoch,incident_id,kind,subject_ref,detail)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`,
+    [
+      input.workspaceId,
+      input.poolId,
+      input.epoch,
+      `evidence-conflict-${input.conflictId}`,
+      input.kind,
+      input.subjectRef,
+      JSON.stringify({ conflictId: input.conflictId }),
+    ],
+  );
+  await client.query(
+    `UPDATE pools SET state='QUARANTINED',version=version+1,updated_at=now()
+      WHERE workspace_id=$1 AND pool_id=$2 AND state<>'QUARANTINED'`,
+    [input.workspaceId, input.poolId],
+  );
 }
 
 export class ObservationRepository {
@@ -375,11 +411,18 @@ export class ObservationRepository {
             JSON.stringify({ clientOrderId: input.clientOrderId, status: input.status }),
           ],
         );
+        const conflictId = conflict.rows[0]?.conflict_id ?? '';
+        await quarantineEvidenceConflict(client, {
+          ...input,
+          conflictId,
+          kind: 'UNKNOWN_ORDER',
+          subjectRef: `${input.symbol}/${input.venueOrderId}`,
+        });
         return {
           kind: 'correlation-conflict',
           current: stored.client_order_id,
           incoming: input.clientOrderId,
-          conflictId: conflict.rows[0]?.conflict_id ?? '',
+          conflictId,
         };
       }
 
@@ -419,11 +462,18 @@ export class ObservationRepository {
             JSON.stringify({ status: input.status }),
           ],
         );
+        const conflictId = conflict.rows[0]?.conflict_id ?? '';
+        await quarantineEvidenceConflict(client, {
+          ...input,
+          conflictId,
+          kind: 'UNKNOWN_ORDER',
+          subjectRef: `${input.symbol}/${input.venueOrderId}`,
+        });
         return {
           kind: 'conflict',
           current: stored.status,
           incoming: input.status,
-          conflictId: conflict.rows[0]?.conflict_id ?? '',
+          conflictId,
         };
       }
       if (incoming < current) return { kind: 'stale', current: stored.status };
@@ -476,10 +526,11 @@ export class ObservationRepository {
         quote_atoms: string;
         commission_asset: string;
         commission_atoms: string;
+        exchange_sequence: string | null;
         traded_at: Date;
       }>(
         `SELECT observation_id, base_atoms::text, quote_atoms::text, commission_asset,
-                commission_atoms::text, traded_at
+                commission_atoms::text, exchange_sequence::text, traded_at
            FROM venue_fills
           WHERE workspace_id = $1 AND pool_id = $2 AND epoch = $3 AND symbol = $4
             AND venue_order_id = $5 AND venue_trade_id = $6
@@ -501,6 +552,11 @@ export class ObservationRepository {
           ['quoteAtoms', existing.quote_atoms, input.quoteAtoms.toString()],
           ['commissionAsset', existing.commission_asset, commissionAsset],
           ['commissionAtoms', existing.commission_atoms, input.commission.atoms.toString()],
+          [
+            'exchangeSequence',
+            existing.exchange_sequence ?? '',
+            input.exchangeSequence?.toString() ?? '',
+          ],
           ['tradedAt', existing.traded_at.toISOString(), input.tradedAt.toISOString()],
         ]
           .filter(([, was, now]) => was !== now)
@@ -523,6 +579,7 @@ export class ObservationRepository {
               quoteAtoms: existing.quote_atoms,
               commissionAsset: existing.commission_asset,
               commissionAtoms: existing.commission_atoms,
+              exchangeSequence: existing.exchange_sequence,
               tradedAt: existing.traded_at.toISOString(),
             }),
             JSON.stringify({
@@ -531,19 +588,28 @@ export class ObservationRepository {
               quoteAtoms: input.quoteAtoms.toString(),
               commissionAsset,
               commissionAtoms: input.commission.atoms.toString(),
+              exchangeSequence: input.exchangeSequence?.toString() ?? null,
               tradedAt: input.tradedAt.toISOString(),
               changed,
             }),
           ],
         );
-        return { kind: 'conflict', changed, conflictId: conflict.rows[0]?.conflict_id ?? '' };
+        const conflictId = conflict.rows[0]?.conflict_id ?? '';
+        await quarantineEvidenceConflict(client, {
+          ...input,
+          conflictId,
+          kind: 'FILL_CONFLICT',
+          subjectRef: `${input.symbol}/${input.venueOrderId}/${input.venueTradeId}`,
+        });
+        return { kind: 'conflict', changed, conflictId };
       }
 
       await client.query(
         `INSERT INTO venue_fills
            (workspace_id, pool_id, epoch, symbol, venue_order_id, venue_trade_id, observation_id,
-            base_atoms, quote_atoms, commission_asset, commission_atoms, traded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10, $11::numeric, $12)`,
+            base_atoms, quote_atoms, commission_asset, commission_atoms, exchange_sequence, traded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10, $11::numeric,
+                 $12::numeric, $13)`,
         [
           input.workspaceId,
           input.poolId,
@@ -556,6 +622,7 @@ export class ObservationRepository {
           input.quoteAtoms.toString(),
           commissionAsset,
           input.commission.atoms.toString(),
+          input.exchangeSequence?.toString() ?? null,
           input.tradedAt,
         ],
       );

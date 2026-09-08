@@ -184,6 +184,7 @@ export interface ApiConfig extends BaseConfig {
   readonly role: 'api';
   readonly databaseUrl: string;
   readonly httpPort: number;
+  readonly httpHost: '127.0.0.1' | '0.0.0.0';
   readonly ownerSessionSecretRef: string;
 }
 
@@ -195,6 +196,7 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   ];
   const schema = databaseSchema.extend({
     CAPITALDESK_API_PORT: z.coerce.number().int().min(1).max(65535),
+    CAPITALDESK_API_HOST: z.enum(['127.0.0.1', '0.0.0.0']).default('127.0.0.1'),
     CAPITALDESK_OWNER_SESSION_SECRET_REF: z.string().min(1),
   });
   const parsed = schema.safeParse(env);
@@ -208,6 +210,7 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     role: 'api',
     databaseUrl: parsed.data.DATABASE_URL,
     httpPort: parsed.data.CAPITALDESK_API_PORT,
+    httpHost: parsed.data.CAPITALDESK_API_HOST,
     ownerSessionSecretRef: parsed.data.CAPITALDESK_OWNER_SESSION_SECRET_REF,
   };
 }

@@ -23,7 +23,19 @@
       "path": "./packages/planner"
     },
     {
+      "path": "./packages/reconciler"
+    },
+    {
       "path": "./packages/db"
+    },
+    {
+      "path": "./packages/fault-lab"
+    },
+    {
+      "path": "./packages/sdk"
+    },
+    {
+      "path": "./packages/agent-tools"
     },
     {
       "path": "./apps/api"

@@ -103,7 +103,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 }
 
 try {
-  await app.listen({ port: config.httpPort, host: '127.0.0.1' });
+  await app.listen({ port: config.httpPort, host: config.httpHost });
 } catch (error) {
   // A failed listen must not leave the pool's connections open behind a process that is about
   // to report failure.

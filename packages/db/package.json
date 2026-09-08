@@ -19,6 +19,7 @@
   "dependencies": {
     "@capitaldesk/contracts": "workspace:*",
     "@capitaldesk/domain": "workspace:*",
+    "@capitaldesk/reconciler": "workspace:*",
     "pg": "catalog:",
     "@capitaldesk/ledger": "workspace:*"
   },
