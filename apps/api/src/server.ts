@@ -7,8 +7,9 @@ import authPlugin from './auth/plugin.js';
 import { registerAuthRoutes } from './auth/routes.js';
 import { IdentityRepository } from './auth/repository.js';
 import { resolveOwnerSessionSecret } from './auth/session-secret.js';
-import { IntentRepository } from '@capitaldesk/db';
+import { IntentRepository, PolicyRepository } from '@capitaldesk/db';
 import { registerIntentRoutes } from './intents/routes.js';
+import { registerPolicyRoutes } from './policies/routes.js';
 
 /**
  * Probe PostgreSQL with every step bounded.
@@ -147,6 +148,7 @@ export function buildServer(config: ApiConfig, dependencies: ServerDependencies 
           secureCookies,
         });
         registerIntentRoutes(app, { repository: new IntentRepository(identityPool) });
+        registerPolicyRoutes(app, { repository: new PolicyRepository(identityPool) });
       });
   }
 

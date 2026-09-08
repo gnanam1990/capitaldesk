@@ -42,13 +42,7 @@ describeIfDatabase('strategy intent journal', () => {
   beforeEach(async () => {
     await harness.reset();
     await harness.seedPool();
-    await harness.admin.query(
-      `UPDATE pools SET selected_symbol='BTCUSDT',base_asset_code='BTC',base_asset_scale='v1',
-                        quote_asset_code='USDT',quote_asset_scale='v1',
-                        max_target_base_atoms=1000000,active_policy_version=1
-        WHERE workspace_id=$1 AND pool_id=$2`,
-      [WORKSPACE, POOL],
-    );
+    await harness.seedPolicyVersion();
     repository = new IntentRepository(harness.pool);
   });
   afterEach(() => harness.cleanup());

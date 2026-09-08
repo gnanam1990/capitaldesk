@@ -125,13 +125,6 @@ describeIfDatabase('identity and access', () => {
        VALUES ($1, $2, 'binance-spot', 'local', 'acct-auth', 'READY')`,
       [WORKSPACE, POOL],
     );
-    await pool.query(
-      `UPDATE pools SET selected_symbol='BTCUSDT', base_asset_code='BTC', base_asset_scale='v1',
-                        quote_asset_code='USDT', quote_asset_scale='v1',
-                        max_target_base_atoms=1000000, active_policy_version=1
-        WHERE workspace_id=$1 AND pool_id=$2`,
-      [WORKSPACE, POOL],
-    );
     await pool.query(`INSERT INTO baseline_epochs (workspace_id,pool_id,epoch) VALUES ($1,$2,1)`, [
       WORKSPACE,
       POOL,
@@ -140,6 +133,35 @@ describeIfDatabase('identity and access', () => {
       `INSERT INTO strategies (workspace_id, strategy_id, pool_id, display_name) VALUES
         ($1,$2,$3,'A'), ($1,$4,$3,'B')`,
       [WORKSPACE, STRATEGY, POOL, OTHER_STRATEGY],
+    );
+    await pool.query(
+      `INSERT INTO policy_versions
+        (workspace_id,pool_id,policy_version,payload,payload_digest,selected_symbol,
+         base_asset_code,base_asset_scale,quote_asset_code,quote_asset_scale,
+         max_pool_plan_quote_debit_atoms,max_daily_gross_buy_quote_atoms,
+         concentration_numerator,concentration_denominator,price_snapshot_max_age_ms,
+         account_snapshot_max_age_ms,symbol_metadata_max_age_ms,venue_clock_max_age_ms,
+         plan_lifetime_ms,risk_increase_halted,fee_policy_version,published_by_subject_id,
+         idempotency_key)
+       VALUES ($1,$2,1,'{}','sha256:${'0'.repeat(64)}','BTCUSDT','BTC','v1','USDT','v1',
+               5000000,10000000,1,1,5000,5000,5000,5000,60000,false,'FIXTURE-V1',
+               'fixture-owner','fixture-policy')`,
+      [WORKSPACE, POOL],
+    );
+    await pool.query(
+      `INSERT INTO strategy_policy_limits
+        (workspace_id,pool_id,policy_version,strategy_id,max_target_base_atoms,
+         max_plan_quote_debit_atoms,max_daily_gross_buy_quote_atoms)
+       SELECT $1,$2,1,strategy_id,1000000,5000000,10000000 FROM strategies
+        WHERE workspace_id=$1 AND pool_id=$2`,
+      [WORKSPACE, POOL],
+    );
+    await pool.query(
+      `UPDATE pools SET selected_symbol='BTCUSDT', base_asset_code='BTC', base_asset_scale='v1',
+                        quote_asset_code='USDT', quote_asset_scale='v1',
+                        max_target_base_atoms=1000000, active_policy_version=1
+        WHERE workspace_id=$1 AND pool_id=$2`,
+      [WORKSPACE, POOL],
     );
     await pool.query(
       `INSERT INTO agent_credentials

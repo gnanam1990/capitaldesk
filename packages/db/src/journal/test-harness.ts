@@ -121,6 +121,39 @@ export class JournalHarness {
     await this.seedGovernanceLease(workspaceId, poolId);
   }
 
+  /** Install a deterministic owner-policy fixture for tests whose subject is downstream. */
+  async seedPolicyVersion(workspaceId = WORKSPACE, poolId = POOL): Promise<void> {
+    await this.admin.query(
+      `INSERT INTO policy_versions
+        (workspace_id,pool_id,policy_version,payload,payload_digest,selected_symbol,
+         base_asset_code,base_asset_scale,quote_asset_code,quote_asset_scale,
+         max_pool_plan_quote_debit_atoms,max_daily_gross_buy_quote_atoms,
+         concentration_numerator,concentration_denominator,price_snapshot_max_age_ms,
+         account_snapshot_max_age_ms,symbol_metadata_max_age_ms,venue_clock_max_age_ms,
+         plan_lifetime_ms,risk_increase_halted,fee_policy_version,published_by_subject_id,
+         idempotency_key)
+       VALUES ($1,$2,1,'{}','sha256:${'0'.repeat(64)}','BTCUSDT','BTC','v1','USDT','v1',
+               5000000,10000000,1,1,5000,5000,5000,5000,60000,false,'FIXTURE-V1',
+               'fixture-owner','fixture-policy')`,
+      [workspaceId, poolId],
+    );
+    await this.admin.query(
+      `INSERT INTO strategy_policy_limits
+        (workspace_id,pool_id,policy_version,strategy_id,max_target_base_atoms,
+         max_plan_quote_debit_atoms,max_daily_gross_buy_quote_atoms)
+       SELECT $1,$2,1,strategy_id,1000000,5000000,10000000 FROM strategies
+        WHERE workspace_id=$1 AND pool_id=$2`,
+      [workspaceId, poolId],
+    );
+    await this.admin.query(
+      `UPDATE pools SET selected_symbol='BTCUSDT',base_asset_code='BTC',base_asset_scale='v1',
+                        quote_asset_code='USDT',quote_asset_scale='v1',
+                        max_target_base_atoms=1000000,active_policy_version=1
+        WHERE workspace_id=$1 AND pool_id=$2`,
+      [workspaceId, poolId],
+    );
+  }
+
   /** The active governance lease a dispatch marker requires. */
   async seedGovernanceLease(workspaceId = WORKSPACE, poolId = POOL): Promise<void> {
     await this.admin.query(
