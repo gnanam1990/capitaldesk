@@ -323,6 +323,9 @@ importers:
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
+      fast-check:
+        specifier: 'catalog:'
+        version: 4.9.0
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

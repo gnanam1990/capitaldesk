@@ -20,6 +20,7 @@
     "@capitaldesk/contracts": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "fast-check": "catalog:"
   }
 }

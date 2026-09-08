@@ -317,6 +317,15 @@ describeIfDatabase('account baseline and owner allocation', () => {
         await assertNothingWritten();
       });
 
+      it('leaves no baseline when the opening postings are rolled back', async () => {
+        // A half baseline — postings with no record, or a record with no postings — is the one
+        // outcome that cannot be recovered from, so both commit together or neither does.
+        await expect(bootstrap({ baselineId: 'baseline-bad-id-!!' })).rejects.toBeTruthy();
+        expect((await harness.admin.query('SELECT 1 FROM account_baselines')).rowCount).toBe(0);
+        expect((await harness.admin.query('SELECT 1 FROM ledger_entries')).rowCount).toBe(0);
+        expect((await harness.admin.query('SELECT 1 FROM ledger_transactions')).rowCount).toBe(0);
+      });
+
       it('refuses a cut that does not exist', async () => {
         expect(await bootstrap({ cutId: 'cut-nonexistent' })).toEqual({
           ok: false,
@@ -527,6 +536,90 @@ describeIfDatabase('account baseline and owner allocation', () => {
       await harness.reset();
       await harness.seedPool();
       expect(await allocate()).toEqual({ ok: false, reason: 'NO_BASELINE' });
+    });
+
+    /**
+     * T-013, on independent backends.
+     *
+     * Two allocators read the same HOUSE availability and each try to take all of it. The
+     * account-wide lock serialises them, so exactly one commits and the other sees the
+     * reduced availability — never both, and never a negative claim.
+     */
+    it('lets only one of two concurrent allocators spend the same HOUSE balance', async () => {
+      const first = await harness.pinnedRepositoryPool();
+      const second = await harness.pinnedRepositoryPool();
+      const barrier = await harness.connect();
+
+      await barrier.client.query('BEGIN');
+      await barrier.client.query(
+        'SELECT 1 FROM pools WHERE workspace_id = $1 AND pool_id = $2 FOR UPDATE',
+        [WORKSPACE, POOL],
+      );
+
+      const request = (id: string, to: string) =>
+        ({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+          allocationId: id,
+          actor: OWNER,
+          authorizedBy: 'session-1',
+          from: 'HOUSE',
+          to,
+          asset: USDT,
+          atoms: 1_000n,
+        }) as const;
+
+      const a = new BaselineRepository(first.pool).allocate(request('alloc-a', 'strategy-a'));
+      const b = new BaselineRepository(second.pool).allocate(request('alloc-b', 'strategy-b'));
+      await harness.waitUntilBlockedBy(barrier.pid, [first.pid, second.pid]);
+      await barrier.client.query('COMMIT');
+
+      const [outcomeA, outcomeB] = await Promise.all([a, b]);
+      const succeeded = [outcomeA, outcomeB].filter((outcome) => outcome.ok);
+      const refused = [outcomeA, outcomeB].filter((outcome) => !outcome.ok);
+      expect(succeeded).toHaveLength(1);
+      expect(refused[0]).toEqual({
+        ok: false,
+        reason: 'UNAUTHORIZED',
+        detail: 'EXCEEDS_AVAILABLE',
+      });
+
+      // One allocation row, one strategy funded, and every unit still owned exactly once.
+      expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(1);
+      expect(verifyConservation(await positions()).conserved).toBe(true);
+      const balances = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      expect(balances.find((b2) => b2.owner === 'HOUSE')?.availableAtoms).toBe(0n);
+    });
+
+    it('leaves no allocation row when the postings are rolled back', async () => {
+      // A crash between the postings and the record would be an allocation nobody authorised,
+      // or an authorisation that moved nothing. The transaction makes both unreachable.
+      const before = await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL });
+      await expect(
+        baselines.allocate({
+          workspaceId: WORKSPACE,
+          poolId: POOL,
+          epoch: 1,
+          allocationId: 'alloc-bad-id-!!',
+          actor: OWNER,
+          authorizedBy: 'session-1',
+          from: 'HOUSE',
+          to: 'strategy-a',
+          asset: USDT,
+          atoms: 100n,
+        }),
+      ).rejects.toBeTruthy();
+
+      expect((await harness.admin.query('SELECT 1 FROM owner_allocations')).rowCount).toBe(0);
+      expect(
+        (
+          await harness.admin.query(
+            `SELECT 1 FROM ledger_entries WHERE ledger_txn_id = 'allocation-alloc-bad-id-!!'`,
+          )
+        ).rowCount,
+      ).toBe(0);
+      expect(await ledger.balances({ workspaceId: WORKSPACE, poolId: POOL })).toEqual(before);
     });
 
     it('records who authorised it and that it moved nothing at the venue', async () => {
