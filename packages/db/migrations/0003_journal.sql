@@ -208,42 +208,6 @@ CREATE TRIGGER plans_are_never_deleted
   FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
 
 -- --------------------------------------------------------------------------------------
--- Reservations
--- --------------------------------------------------------------------------------------
-
-CREATE TABLE reservations (
-  workspace_id       TEXT        NOT NULL,
-  pool_id            TEXT        NOT NULL,
-  epoch              INTEGER     NOT NULL,
-  reservation_id     TEXT        NOT NULL,
-  strategy_id        TEXT        NOT NULL,
-  plan_id            TEXT        NOT NULL,
-  asset_code         TEXT        NOT NULL,
-  asset_scale        TEXT        NOT NULL,
-  reserved_atoms     NUMERIC(78, 0) NOT NULL,
-  state              TEXT        NOT NULL DEFAULT 'HELD',
-  version            INTEGER     NOT NULL DEFAULT 1,
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (workspace_id, pool_id, reservation_id),
-  FOREIGN KEY (workspace_id, pool_id, epoch, plan_id)
-    REFERENCES plans (workspace_id, pool_id, epoch, plan_id),
-  -- Economic ownership references a real strategy in this pool, not an unchecked text owner.
-  FOREIGN KEY (workspace_id, pool_id, strategy_id)
-    REFERENCES strategies (workspace_id, pool_id, strategy_id),
-  CONSTRAINT reservations_id_shape CHECK (reservation_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-  CONSTRAINT reservations_atoms_integral CHECK (reserved_atoms = trunc(reserved_atoms)),
-  CONSTRAINT reservations_atoms_nonnegative CHECK (reserved_atoms >= 0),
-  CONSTRAINT reservations_state_known
-    CHECK (state IN ('HELD', 'CONSUMED', 'RELEASED', 'QUARANTINED')),
-  CONSTRAINT reservations_version_positive CHECK (version >= 1)
-);
-
-CREATE TRIGGER reservations_are_never_deleted
-  BEFORE DELETE ON reservations
-  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
-
--- --------------------------------------------------------------------------------------
 -- Dispatch attempts
 -- --------------------------------------------------------------------------------------
 --
@@ -393,6 +357,42 @@ CREATE TRIGGER governance_leases_are_never_deleted
   FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
 
 -- --------------------------------------------------------------------------------------
+-- Reservations
+-- --------------------------------------------------------------------------------------
+
+CREATE TABLE reservations (
+  workspace_id       TEXT        NOT NULL,
+  pool_id            TEXT        NOT NULL,
+  epoch              INTEGER     NOT NULL,
+  reservation_id     TEXT        NOT NULL,
+  strategy_id        TEXT        NOT NULL,
+  plan_id            TEXT        NOT NULL,
+  asset_code         TEXT        NOT NULL,
+  asset_scale        TEXT        NOT NULL,
+  reserved_atoms     NUMERIC(78, 0) NOT NULL,
+  state              TEXT        NOT NULL DEFAULT 'HELD',
+  version            INTEGER     NOT NULL DEFAULT 1,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, pool_id, reservation_id),
+  FOREIGN KEY (workspace_id, pool_id, epoch, plan_id)
+    REFERENCES plans (workspace_id, pool_id, epoch, plan_id),
+  -- Economic ownership references a real strategy in this pool, not an unchecked text owner.
+  FOREIGN KEY (workspace_id, pool_id, strategy_id)
+    REFERENCES strategies (workspace_id, pool_id, strategy_id),
+  CONSTRAINT reservations_id_shape CHECK (reservation_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+  CONSTRAINT reservations_atoms_integral CHECK (reserved_atoms = trunc(reserved_atoms)),
+  CONSTRAINT reservations_atoms_nonnegative CHECK (reserved_atoms >= 0),
+  CONSTRAINT reservations_state_known
+    CHECK (state IN ('HELD', 'CONSUMED', 'RELEASED', 'QUARANTINED')),
+  CONSTRAINT reservations_version_positive CHECK (version >= 1)
+);
+
+CREATE TRIGGER reservations_are_never_deleted
+  BEFORE DELETE ON reservations
+  FOR EACH ROW EXECUTE FUNCTION refuse_mutation();
+
+-- --------------------------------------------------------------------------------------
 -- Evidence conflicts
 -- --------------------------------------------------------------------------------------
 --
@@ -481,7 +481,15 @@ CREATE TABLE ledger_entries (
   asset_code         TEXT        NOT NULL,
   asset_scale        TEXT        NOT NULL,
   delta_atoms        NUMERIC(78, 0) NOT NULL,
+  -- Which reservation a RESERVED movement belongs to. This is what makes a reservation's
+  -- remainder a fact derived from postings rather than a number someone maintains: the
+  -- remainder is the sum of these entries. Release compared against the reservation's
+  -- original amount instead, so after a fill had consumed part of it, releasing the whole
+  -- original drove the RESERVED claim negative.
+  reservation_id     TEXT,
   PRIMARY KEY (workspace_id, pool_id, ledger_txn_id, entry_seq),
+  FOREIGN KEY (workspace_id, pool_id, reservation_id)
+    REFERENCES reservations (workspace_id, pool_id, reservation_id),
   FOREIGN KEY (workspace_id, pool_id, ledger_txn_id)
     REFERENCES ledger_transactions (workspace_id, pool_id, ledger_txn_id),
   CONSTRAINT ledger_entries_kind_known
@@ -495,7 +503,10 @@ CREATE TABLE ledger_entries (
     (account_kind = 'ASSET_CONTROL' AND claim_state = 'CONTROL')
     OR (account_kind <> 'ASSET_CONTROL' AND claim_state IN ('AVAILABLE', 'RESERVED', 'QUARANTINED'))),
   CONSTRAINT ledger_entries_delta_integral CHECK (delta_atoms = trunc(delta_atoms)),
-  CONSTRAINT ledger_entries_delta_nonzero CHECK (delta_atoms <> 0)
+  CONSTRAINT ledger_entries_delta_nonzero CHECK (delta_atoms <> 0),
+  -- Every RESERVED movement is attributable, and only a RESERVED movement is.
+  CONSTRAINT ledger_entries_reserved_names_its_reservation
+    CHECK ((claim_state = 'RESERVED') = (reservation_id IS NOT NULL))
 );
 
 CREATE INDEX ledger_entries_by_account
@@ -607,6 +618,50 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER ledger_entries_belong_to_their_posting
   BEFORE INSERT ON ledger_entries
   FOR EACH ROW EXECUTE FUNCTION refuse_entry_after_commit();
+
+-- No claim aggregate may end a transaction negative (INV-03).
+--
+-- Balancing per asset is not the same guarantee. A posting that moves 14,000 out of a
+-- RESERVED claim holding nothing and into AVAILABLE balances perfectly and leaves the
+-- reservation at -14,000; only the projection rebuild noticed, and only later. Deferred, so
+-- it reads the state the transaction actually commits, and applied per affected owner, asset
+-- and claim state - and per reservation, so a release cannot exceed its own remainder even
+-- when the strategy holds other reservations in the same asset.
+CREATE OR REPLACE FUNCTION assert_claims_nonnegative() RETURNS trigger AS $$
+DECLARE
+  total NUMERIC;
+BEGIN
+  IF NEW.account_kind = 'ASSET_CONTROL' THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT coalesce(sum(delta_atoms), 0) INTO total FROM ledger_entries
+   WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
+     AND account_owner = NEW.account_owner AND asset_code = NEW.asset_code
+     AND asset_scale = NEW.asset_scale AND claim_state = NEW.claim_state;
+  IF total < 0 THEN
+    RAISE EXCEPTION '% claim for %:% held by % would be negative (%)',
+      NEW.claim_state, NEW.asset_code, NEW.asset_scale, NEW.account_owner, total
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF NEW.reservation_id IS NOT NULL THEN
+    SELECT coalesce(sum(delta_atoms), 0) INTO total FROM ledger_entries
+     WHERE workspace_id = NEW.workspace_id AND pool_id = NEW.pool_id
+       AND reservation_id = NEW.reservation_id;
+    IF total < 0 THEN
+      RAISE EXCEPTION 'reservation % would be over-consumed (%)', NEW.reservation_id, total
+        USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER ledger_entries_claims_stay_nonnegative
+  AFTER INSERT ON ledger_entries
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION assert_claims_nonnegative();
 
 CREATE TRIGGER ledger_entries_are_immutable
   BEFORE UPDATE OR DELETE ON ledger_entries

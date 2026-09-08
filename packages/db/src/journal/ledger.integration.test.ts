@@ -206,7 +206,7 @@ describeIfDatabase('ledger and claims', () => {
       description: 'fill',
       entries: [
         control(USDT, -14_010n),
-        claim('strategy-a', 'RESERVED', USDT, -14_010n),
+        { ...claim('strategy-a', 'RESERVED', USDT, -14_010n), reservationId: 'res-1' },
         control(BTC, 100n),
         claim('strategy-a', 'AVAILABLE', BTC, 100n),
       ],

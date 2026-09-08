@@ -27,6 +27,12 @@ export interface LedgerEntryInput {
   readonly claimState: 'CONTROL' | ClaimState;
   readonly asset: AssetRef;
   readonly deltaAtoms: bigint;
+  /**
+   * Required for a RESERVED movement, and only for one. A reservation's remainder is the sum
+   * of the entries carrying its id, so consuming and releasing are attributable to it rather
+   * than to the strategy's RESERVED claim as a whole.
+   */
+  readonly reservationId?: string;
 }
 
 export interface LedgerPostingInput {
@@ -79,7 +85,8 @@ export type ReleaseOutcome =
   | { readonly ok: true; readonly revision: number }
   | { readonly ok: false; readonly reason: 'UNKNOWN_RESERVATION' }
   | { readonly ok: false; readonly reason: 'NOT_HELD'; readonly state: string }
-  | { readonly ok: false; readonly reason: 'EXCEEDS_RESERVED'; readonly reservedAtoms: bigint }
+  /** More than this reservation still holds, after whatever its fills consumed. */
+  | { readonly ok: false; readonly reason: 'EXCEEDS_REMAINING'; readonly remainingAtoms: bigint }
   | { readonly ok: false; readonly reason: 'SOURCE_ALREADY_POSTED'; readonly ledgerTxnId: string };
 
 export interface ClaimBalance {
@@ -183,8 +190,8 @@ export class LedgerRepository {
       await client.query(
         `INSERT INTO ledger_entries
            (workspace_id, pool_id, ledger_txn_id, entry_seq, account_kind, account_owner, claim_state,
-            asset_code, asset_scale, delta_atoms)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::numeric)`,
+            asset_code, asset_scale, delta_atoms, reservation_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::numeric, $11)`,
         [
           input.workspaceId,
           input.poolId,
@@ -196,6 +203,7 @@ export class LedgerRepository {
           entry.asset.code,
           entry.asset.scale,
           entry.deltaAtoms.toString(),
+          entry.reservationId ?? null,
         ],
       );
     }
@@ -246,19 +254,28 @@ export class LedgerRepository {
       strategy_id: string;
       asset_code: string;
       asset_scale: string;
-      reserved_atoms: string;
       state: string;
     }>(
-      `SELECT epoch, strategy_id, asset_code, asset_scale, reserved_atoms, state FROM reservations
+      `SELECT epoch, strategy_id, asset_code, asset_scale, state FROM reservations
         WHERE workspace_id = $1 AND pool_id = $2 AND reservation_id = $3 FOR UPDATE`,
       [input.workspaceId, input.poolId, input.reservationId],
     );
     const row = reservation.rows[0];
     if (row === undefined) return { ok: false, reason: 'UNKNOWN_RESERVATION' };
     if (row.state !== 'HELD') return { ok: false, reason: 'NOT_HELD', state: row.state };
-    const reserved = BigInt(row.reserved_atoms);
-    if (input.atoms < 0n || input.atoms > reserved)
-      return { ok: false, reason: 'EXCEEDS_RESERVED', reservedAtoms: reserved };
+
+    // What this reservation still holds, from its own postings - not what it was created
+    // with. Comparing against the original let a release of the full amount follow a fill
+    // that had already consumed part of it, driving the RESERVED claim negative.
+    const remaining = await client.query<{ remaining: string }>(
+      `SELECT coalesce(sum(delta_atoms), 0)::text AS remaining FROM ledger_entries
+        WHERE workspace_id = $1 AND pool_id = $2 AND reservation_id = $3`,
+      [input.workspaceId, input.poolId, input.reservationId],
+    );
+    const remainingAtoms = BigInt(remaining.rows[0]?.remaining ?? '0');
+    if (input.atoms < 0n || input.atoms > remainingAtoms) {
+      return { ok: false, reason: 'EXCEEDS_REMAINING', remainingAtoms };
+    }
 
     const asset = { code: row.asset_code, scale: row.asset_scale };
     if (input.atoms > 0n) {
@@ -276,6 +293,7 @@ export class LedgerRepository {
             claimState: 'RESERVED',
             asset,
             deltaAtoms: -input.atoms,
+            reservationId: input.reservationId,
           },
           {
             accountKind: 'STRATEGY',
@@ -297,6 +315,7 @@ export class LedgerRepository {
       );
       return { ok: true, revision: posted.revision };
     }
+
     await client.query(
       `UPDATE reservations SET state = 'RELEASED', version = version + 1, updated_at = now()
         WHERE workspace_id = $1 AND pool_id = $2 AND reservation_id = $3`,
@@ -307,6 +326,20 @@ export class LedgerRepository {
       [input.workspaceId, input.poolId],
     );
     return { ok: true, revision: Number(pool.rows[0]?.ledger_revision ?? '0') };
+  }
+
+  /** What a reservation still holds, derived from its postings. */
+  async remainingOf(scope: {
+    readonly workspaceId: string;
+    readonly poolId: string;
+    readonly reservationId: string;
+  }): Promise<bigint> {
+    const result = await this.pool.query<{ remaining: string }>(
+      `SELECT coalesce(sum(delta_atoms), 0)::text AS remaining FROM ledger_entries
+        WHERE workspace_id = $1 AND pool_id = $2 AND reservation_id = $3`,
+      [scope.workspaceId, scope.poolId, scope.reservationId],
+    );
+    return BigInt(result.rows[0]?.remaining ?? '0');
   }
 
   async rebuildProjection(scope: {
@@ -445,6 +478,25 @@ async function reserveBody(client: Queryable, input: ReserveInput): Promise<Rese
   if (availableAtoms < input.atoms)
     return { ok: false, reason: 'INSUFFICIENT_AVAILABLE', availableAtoms };
 
+  // The row first: the entries below reference it, and a reservation with no row would be a
+  // RESERVED movement attributable to nothing.
+  await client.query(
+    `INSERT INTO reservations
+       (workspace_id, pool_id, epoch, reservation_id, strategy_id, plan_id, asset_code, asset_scale, reserved_atoms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::numeric)`,
+    [
+      input.workspaceId,
+      input.poolId,
+      input.epoch,
+      input.reservationId,
+      input.strategyId,
+      input.planId,
+      input.asset.code,
+      input.asset.scale,
+      input.atoms.toString(),
+    ],
+  );
+
   const posted = await LedgerRepository.postOn(client, {
     workspaceId: input.workspaceId,
     poolId: input.poolId,
@@ -466,6 +518,7 @@ async function reserveBody(client: Queryable, input: ReserveInput): Promise<Rese
         claimState: 'RESERVED',
         asset: input.asset,
         deltaAtoms: input.atoms,
+        reservationId: input.reservationId,
       },
     ],
   });
@@ -473,21 +526,5 @@ async function reserveBody(client: Queryable, input: ReserveInput): Promise<Rese
     if (posted.reason === 'SOURCE_ALREADY_POSTED') return posted;
     throw new Error(`reservation posting refused: ${posted.reason}`);
   }
-  await client.query(
-    `INSERT INTO reservations
-       (workspace_id, pool_id, epoch, reservation_id, strategy_id, plan_id, asset_code, asset_scale, reserved_atoms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::numeric)`,
-    [
-      input.workspaceId,
-      input.poolId,
-      input.epoch,
-      input.reservationId,
-      input.strategyId,
-      input.planId,
-      input.asset.code,
-      input.asset.scale,
-      input.atoms.toString(),
-    ],
-  );
   return { ok: true, revision: posted.revision };
 }
