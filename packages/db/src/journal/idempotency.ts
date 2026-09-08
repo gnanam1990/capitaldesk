@@ -36,25 +36,31 @@ export class IdempotencyRepository {
   constructor(private readonly pool: Pool) {}
 
   /** Decide, before acting, what this key permits. */
-  async begin(
-    input: IdempotencyScope & { readonly requestDigest: string; readonly now: Date },
-  ): Promise<BeginOutcome> {
+  async begin(input: IdempotencyScope & { readonly requestDigest: string }): Promise<BeginOutcome> {
     const result = await this.pool.query<{
       request_digest: string;
       action: string;
       economic_ref: string | null;
       response_status: number;
       response_body: unknown;
-      response_expires_at: Date;
+      body_discarded: boolean;
+      retention_lapsed: boolean;
     }>(
-      `SELECT request_digest, action, economic_ref, response_status, response_body, response_expires_at
+      `SELECT request_digest, action, economic_ref, response_status, response_body,
+              response_body IS NULL AS body_discarded,
+              response_expires_at <= now() AS retention_lapsed
          FROM idempotency_results WHERE scope_kind = $1 AND scope_id = $2 AND idempotency_key = $3`,
       [input.scopeKind, input.scopeId, input.key],
     );
     const row = result.rows[0];
     if (row === undefined) return { kind: 'fresh' };
     if (row.request_digest !== input.requestDigest) return { kind: 'conflict', action: row.action };
-    if (row.response_body === null || row.response_expires_at.getTime() <= input.now.getTime()) {
+    // `response_body IS NULL` in SQL, not a JavaScript null check: a stored response whose
+    // body is the JSON value `null` is a retained response, and treating it as discarded made
+    // a legitimate replay report that the action had already happened with nothing to return.
+    // Expiry is the database's decision, like every other deadline in the journal: a caller's
+    // clock cannot make a retained response look lapsed, or a lapsed one look live.
+    if (row.body_discarded || row.retention_lapsed) {
       return { kind: 'replay-expired', action: row.action, economicRef: row.economic_ref };
     }
     return { kind: 'replay', status: row.response_status, body: row.response_body };
@@ -73,14 +79,14 @@ export class IdempotencyRepository {
       readonly status: number;
       readonly body: unknown;
       readonly retentionMs: number;
-      readonly now: Date;
     },
   ): Promise<void> {
     await client.query(
       `INSERT INTO idempotency_results
          (scope_kind, scope_id, idempotency_key, request_digest, action, economic_ref,
           response_status, response_body, created_at, response_expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now(),
+               now() + ($9::bigint * interval '1 millisecond'))`,
       [
         input.scopeKind,
         input.scopeId,
@@ -90,18 +96,16 @@ export class IdempotencyRepository {
         input.economicRef,
         input.status,
         JSON.stringify(input.body),
-        input.now,
-        new Date(input.now.getTime() + input.retentionMs),
+        input.retentionMs,
       ],
     );
   }
 
   /** Discard stored responses past their retention. Rows stay; only the body goes. */
-  async discardExpiredResponses(input: { readonly now: Date }): Promise<number> {
+  async discardExpiredResponses(): Promise<number> {
     const result = await this.pool.query(
       `UPDATE idempotency_results SET response_body = NULL
-        WHERE response_expires_at <= $1 AND response_body IS NOT NULL`,
-      [input.now],
+        WHERE response_expires_at <= now() AND response_body IS NOT NULL`,
     );
     return result.rowCount ?? 0;
   }

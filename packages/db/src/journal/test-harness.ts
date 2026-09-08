@@ -124,7 +124,14 @@ export class JournalHarness {
     return backend;
   }
 
-  /** Call from afterEach. Cancels first, closes concurrently, bounded. */
+  /**
+   * Call from afterEach. Cancels first, closes concurrently, bounded - and then proves it.
+   *
+   * A bounded `client.end()` does not stop a checked-out backend that is still blocked, and
+   * the later schema drop was swallowed by `.catch()`, so a stuck backend and its schema could
+   * survive while the suite reported success. Anything still alive is terminated by pid, and
+   * residue is thrown rather than suppressed.
+   */
   async cleanup(): Promise<void> {
     const pending = this.extras;
     this.extras = [];
@@ -139,14 +146,54 @@ export class JournalHarness {
       pending.map((backend) => withDeadline(backend.client.end(), 5000, `closing ${backend.pid}`)),
     );
     await this.admin.query('ROLLBACK').catch(() => undefined);
+
+    if (pending.length > 0) {
+      // Terminate, not cancel: a backend that survived `end()` is holding something, and the
+      // schema drop would block on it.
+      const pids = pending.map((backend) => backend.pid);
+      await this.admin
+        .query('SELECT pg_terminate_backend(pid) FROM unnest($1::int[]) AS pid', [pids])
+        .catch(() => undefined);
+      const alive = await this.admin.query<{ pid: number }>(
+        'SELECT pid FROM pg_stat_activity WHERE pid = ANY($1::int[])',
+        [pids],
+      );
+      if (alive.rowCount !== null && alive.rowCount > 0) {
+        throw new Error(
+          `cleanup left ${String(alive.rowCount)} backend(s) alive: ${alive.rows.map((r) => r.pid).join(', ')}`,
+        );
+      }
+    }
   }
 
-  /** Call from afterAll. */
+  /**
+   * Call from afterAll. The schema drop is bounded and its failure is reported, not
+   * suppressed: a drop that times out means a live backend still holds the schema, which is
+   * exactly the residue these tests promise not to leave.
+   */
   async close(): Promise<void> {
     await this.cleanup();
     await withDeadline(this.pool.end(), 5000, 'closing the pool').catch(() => undefined);
-    await this.admin.query(`DROP SCHEMA IF EXISTS ${this.schema} CASCADE`).catch(() => undefined);
+    let dropFailure: Error | undefined;
+    try {
+      await this.admin.query(`SET lock_timeout = '5s'`);
+      await this.admin.query(`DROP SCHEMA IF EXISTS ${this.schema} CASCADE`);
+    } catch (error) {
+      dropFailure = error instanceof Error ? error : new Error(String(error));
+    }
+    const residue = await this.admin
+      .query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM pg_namespace WHERE nspname = $1`,
+        [this.schema],
+      )
+      .catch(() => null);
     await this.admin.end().catch(() => undefined);
+    if (dropFailure !== undefined) {
+      throw new Error(`could not drop ${this.schema}: ${dropFailure.message}`);
+    }
+    if (residue !== null && residue.rows[0]?.count !== '0') {
+      throw new Error(`schema ${this.schema} survived cleanup`);
+    }
   }
 
   /**

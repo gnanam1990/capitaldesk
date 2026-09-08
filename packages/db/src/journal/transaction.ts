@@ -80,6 +80,11 @@ export async function serializableOn<T>(
   options: SerializableOptions = {},
 ): Promise<T> {
   const maxAttempts = options.maxAttempts ?? 5;
+  // Infinity and NaN both defeated the bound: `attempt >= Infinity` is never true, and every
+  // comparison with NaN is false, so a retryable failure retried forever.
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new TypeError(`maxAttempts must be a positive integer, received ${String(maxAttempts)}`);
+  }
   for (let attempt = 1; ; attempt += 1) {
     const effects = createGuard();
     await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
