@@ -1,0 +1,33 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# One agreed version of every shared dependency across the workspace.
+# Module branches must not invent incompatible versions (IMPLEMENTATION-PLAN.md section 4).
+catalog:
+  typescript: 5.9.3
+  '@types/node': 22.19.2
+  vitest: 4.1.11
+  '@vitest/coverage-v8': 4.1.11
+  fast-check: 4.9.0
+  eslint: 10.10.0
+  'typescript-eslint': 8.69.0
+  '@eslint/js': 10.0.1
+  prettier: 3.9.6
+  zod: 4.5.4
+  fastify: 5.12.3
+  pino: 10.3.1
+  pg: 8.23.0
+  '@types/pg': 8.15.6
+  tsx: 4.23.13
+  next: 16.3.4
+  react: 19.2.8
+  'react-dom': 19.2.8
+  '@types/react': 19.2.14
+  '@types/react-dom': 19.2.4
+  '@fontsource-variable/manrope': 5.3.0
+  '@fontsource/ibm-plex-mono': 5.3.0
+
+# Only these dependencies may run install scripts. esbuild is required by tsx and vitest.
+allowBuilds:
+  esbuild: true

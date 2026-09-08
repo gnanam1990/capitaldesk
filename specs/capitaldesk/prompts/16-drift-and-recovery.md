@@ -4,6 +4,12 @@
 **Requirements:** FR-002, FR-018, FR-019, FR-022  
 **Owns:** pool reconciler, incidents and owner recovery actions
 
+> **Amended by ADR-0001 and ADR-0002.** Distinguish **detection** from **attribution**: an
+> external movement outside the observed symbol set is detected and quarantines, and is
+> reported as unexplained rather than guessed. A testnet epoch archival transition requires
+> positively evidenced reset detection and sender fencing, and retains unresolved historical
+> attempts under their original epoch.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

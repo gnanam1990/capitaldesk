@@ -1,0 +1,26 @@
+{
+  "name": "@capitaldesk/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Owner and agent HTTP API. Never holds a venue trading secret.",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts"
+  },
+  "dependencies": {
+    "@capitaldesk/config": "workspace:*",
+    "@capitaldesk/contracts": "workspace:*",
+    "@capitaldesk/observability": "workspace:*",
+    "fastify": "catalog:",
+    "pg": "catalog:",
+    "pino": "catalog:"
+  },
+  "devDependencies": {
+    "@types/pg": "catalog:",
+    "typescript": "catalog:"
+  }
+}

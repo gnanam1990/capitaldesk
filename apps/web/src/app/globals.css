@@ -1,0 +1,254 @@
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Numerals stay tabular everywhere, so a column of quantities aligns by digit. */
+  font-variant-numeric: tabular-nums;
+}
+
+body {
+  margin: 0;
+  background: var(--cd-canvas);
+  color: var(--cd-ink);
+  font-family: var(--cd-font-sans);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: -0.014em;
+  line-height: 1.2;
+}
+
+code,
+kbd,
+samp,
+.cd-mono {
+  font-family: var(--cd-font-mono);
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+}
+
+a {
+  color: var(--cd-focus);
+  text-underline-offset: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--cd-focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.cd-skip-link {
+  position: absolute;
+  left: var(--cd-s4);
+  top: -3rem;
+  z-index: 10;
+  padding: var(--cd-s2) var(--cd-s4);
+  background: var(--cd-panel);
+  border: var(--cd-hairline);
+  border-radius: var(--cd-radius);
+  transition: top var(--cd-motion) var(--cd-ease);
+}
+.cd-skip-link:focus {
+  top: var(--cd-s4);
+}
+
+/* --- application shell -------------------------------------------------------------
+ * Mobile-first. The navigation is a horizontal, scrollable rail below 900px and a fixed
+ * left column above it. The page itself never scrolls horizontally at any width; only an
+ * explicitly labelled region may (PRD non-functional responsive UX, UI-UX section 3).
+ */
+.cd-shell {
+  display: grid;
+  /* minmax(0, 1fr) is load-bearing: a default `auto` track sizes to its content, so the
+   * scrollable navigation rail below would widen the page instead of scrolling inside it.
+   * Only a labelled bounded region may scroll horizontally; the page never does. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  min-height: 100dvh;
+}
+
+.cd-nav {
+  background: var(--cd-nav);
+  border-bottom: var(--cd-hairline);
+  padding: var(--cd-s4);
+  min-width: 0;
+}
+
+.cd-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--cd-s3);
+  color: var(--cd-ink);
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+  margin-bottom: var(--cd-s4);
+}
+
+.cd-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: var(--cd-s2);
+  /* The rail scrolls; the page does not. */
+  overflow-x: auto;
+  min-width: 0;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+.cd-nav-list > li {
+  scroll-snap-align: start;
+  flex: 0 0 auto;
+}
+
+.cd-nav-item {
+  display: block;
+  padding: var(--cd-s2) var(--cd-s3);
+  border-radius: var(--cd-radius);
+  font-size: 15px;
+  white-space: nowrap;
+  min-height: 44px;
+}
+
+.cd-nav-item--current {
+  background: var(--cd-panel);
+  border: var(--cd-hairline);
+  color: var(--cd-ink);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.cd-nav-item--blocked {
+  /* No opacity here. Fading this to 0.68 measured 3.19:1 against the navigation surface,
+   * below the 4.5:1 the release requires: an unavailable destination still has to be
+   * readable. Unavailability is carried by the "not built yet" label, aria-disabled and
+   * the cursor, not by making the text hard to read. */
+  color: var(--cd-ink-subtle);
+  cursor: not-allowed;
+}
+
+.cd-nav-note {
+  display: block;
+  font-size: 11px;
+  line-height: 1.35;
+  margin-top: 2px;
+  font-family: var(--cd-font-mono);
+}
+
+.cd-main {
+  padding: var(--cd-s5) var(--cd-s4);
+  min-width: 0;
+  max-width: 1120px;
+}
+
+@media (min-width: 900px) {
+  .cd-shell {
+    grid-template-rows: none;
+    grid-template-columns: minmax(200px, 232px) minmax(0, 1fr);
+  }
+  .cd-nav {
+    border-bottom: none;
+    border-right: var(--cd-hairline);
+    padding: var(--cd-s5) var(--cd-s4);
+  }
+  .cd-brand {
+    margin-bottom: var(--cd-s6);
+  }
+  .cd-nav-list {
+    display: grid;
+    gap: 2px;
+    overflow-x: visible;
+  }
+  .cd-main {
+    padding: var(--cd-s7) var(--cd-s6);
+  }
+}
+
+/* --- content ------------------------------------------------------------------------ */
+.cd-stack {
+  display: grid;
+  gap: var(--cd-s6);
+}
+
+.cd-panel {
+  background: var(--cd-panel);
+  border: var(--cd-hairline);
+  border-radius: var(--cd-radius-lg);
+  padding: var(--cd-s5);
+  min-width: 0;
+}
+
+.cd-panel-title {
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cd-ink-subtle);
+  font-weight: 650;
+}
+
+.cd-grid {
+  display: grid;
+  gap: var(--cd-s5);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+
+.cd-page-title {
+  font-size: clamp(26px, 4vw, 34px);
+}
+
+.cd-lede {
+  margin: 0;
+  color: var(--cd-ink-muted);
+  max-width: 64ch;
+  font-size: clamp(15px, 1.4vw, 17px);
+}
+
+.cd-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cd-s2);
+}
+
+.cd-fact {
+  display: grid;
+  gap: 2px;
+  padding-block: var(--cd-s2);
+  min-width: 0;
+}
+
+.cd-fact dt {
+  font-size: 12px;
+  color: var(--cd-ink-subtle);
+  letter-spacing: 0.03em;
+}
+
+.cd-fact dd {
+  margin: 0;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.cd-note {
+  margin: var(--cd-s3) 0 0;
+  padding: var(--cd-s3);
+  background: var(--cd-warn-surface);
+  border: 1px solid color-mix(in srgb, var(--cd-warn) 25%, transparent);
+  border-radius: var(--cd-radius);
+  font-size: 14px;
+  color: var(--cd-ink);
+}

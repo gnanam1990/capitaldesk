@@ -1,8 +1,11 @@
 # CapitalDesk — UI and Interaction Specification
 
-Version: 1.0 planning baseline  
+Version: 1.1, amended 8 September 2026  
 Date: 8 September 2026  
-Related: [PRD](PRD.md), [technical design](TDD.md), [test plan](TEST-PLAN.md), [module prompts](prompts/README.md)
+Related: [PRD](PRD.md), [technical design](TDD.md), [test plan](TEST-PLAN.md), [module prompts](prompts/README.md), [amendments](AMENDMENTS.md)
+
+> **Amended.** Section 2 is superseded by ADR-0011; sections 5, 8 and 9 carry amendments
+> from ADR-0006 and ADR-0001. Every accessibility and truthfulness requirement is retained.
 
 ## 1. Product feel and purpose
 
@@ -13,6 +16,15 @@ Use a restrained Swiss/minimal enterprise style: strong alignment, clear typogra
 Real data drives production routes. A component library or fixture preview can contain labelled sample states; it must not fall through into production as a fake connected account, successful execution, invented balance, or manufactured performance chart.
 
 ## 2. Design tokens
+
+> **Superseded by [ADR-0011](../../docs/adr/0011-visual-direction.md).** The palette below is
+> replaced by the warm-mineral, deep-teal direction, and Fira Sans/Fira Code by Manrope and
+> IBM Plex Mono (both OFL-1.1, self-hosted). The implemented tokens live in
+> `apps/web/src/app/tokens.css` and all twelve declared pairs are asserted at 4.5:1 by a
+> committed test. The requirements in this section — semantic tokens rather than repeated hex
+> values, validated foreground/background pairs, tabular figures, 4px spacing, 44px touch
+> targets, functional short motion, honoured reduced motion — are retained unchanged and are
+> what ADR-0011 implements.
 
 | Token | Light default | Optional dark |
 |---|---|---|
@@ -59,7 +71,7 @@ Empty state explains how to establish the baseline or register the first agent. 
 
 Each intent row shows strategy, selected symbol, absolute target, current confirmed claim, existing commitment, remaining delta, limit constraint, revision, expiry, and state. Quantity labels include the asset unit. A buy target is never phrased as an instruction to “buy this amount again.”
 
-A conflict view shows the actual opposing directions and affected claims. Offer permitted actions: defer an intent or open a revision workflow. Explain how this changes the resulting plan. Do not offer a one-click “net them” action.
+A conflict view shows the actual opposing directions and affected claims. Offer permitted actions: defer an intent or open a revision workflow. *(ADR-0006: a deferral binds the strategy's target, not one revision, so the UI must say that a newer revision from that strategy stays deferred until the owner reinstates.)* Explain how this changes the resulting plan. Do not offer a one-click “net them” action.
 
 A strategy drawer shows owner-assigned claims, budget authority, pending reservations, actual fill history, and the proposal identity. Explain that these are virtual claims in one account. An agent cannot appear to have a separate exchange wallet or exchange-native position.
 
@@ -97,6 +109,15 @@ An order timeline separates prepared intent, approval, native confirmation when 
 
 Never label a timeout “failed” unless authoritative evidence establishes rejection. Never show a retry button that creates a fresh order to resolve an uncertain existing one. “Recheck status” requests reconciliation and shows its result without creating an order.
 
+> **Amended by ADR-0001.** An unresolved dispatch now has three visible outcomes rather than
+> an indefinite UNKNOWN: `NOT_SENT_PROVEN` (the sender was fenced before any byte left; the
+> reservation is released and a new approval is required to try again), continued `UNKNOWN`,
+> and `IRRECOVERABLE_UNCERTAINTY` (absence cannot be proven; the liability is retained and
+> there is no valid next action). The incident view must show the responsible role, the
+> evidence awaited, the last meaningful progress, the assets held and the supported next
+> action — or state plainly that none exists. Do not offer a recovery control where the
+> backend has no valid transition.
+
 A partial IOC result shows requested, filled, and terminal unfilled quantities, each strategy's FIFO allocation, execution prices, actual fees by asset, and remaining unmet targets. A terminal order status alone is not the same as final accounting reconciliation.
 
 Drift incidents show expected versus observed quantities or activity, source records, affected plans, and blocked capabilities. Resolution requires evidence and an allowed action. There is no cosmetic “mark resolved” control that bypasses the domain state machine.
@@ -107,7 +128,7 @@ The evidence inspector offers a human explanation first, followed by structured 
 
 Exports include provenance and unresolved items, with deterministic filenames and a visible completion state. A browser download completing must not imply the underlying incident is resolved.
 
-Settings contain agent registration, symbol scope, owner budgets, risk mandates, freshness policy, account capability, and read-only credential metadata. Never display full API secrets or offer credentials to a proposal agent. Live enablement is a distinct authorized deployment/configuration workflow, not a decorative theme toggle.
+Settings contain agent registration, symbol scope, owner budgets, risk mandates, freshness policy, account capability, and read-only credential metadata. *(ADR-0006: credential revoke and rotate, policy publication, strategy archive and pool halt/resume are enumerated lifecycle actions. Each shows its actor scope and its effect on a sealed plan — and after the dispatch marker the UI must present a halt as a refusal to dispatch again, never as a cancellation of an order the venue has accepted.)* Never display full API secrets or offer credentials to a proposal agent. Live enablement is a distinct authorized deployment/configuration workflow, not a decorative theme toggle.
 
 Testnet reset displays a persistent epoch-invalid banner. The owner must establish a new baseline and assignments. Historical orders remain inspectable under their original epoch and cannot become claims in the new one.
 

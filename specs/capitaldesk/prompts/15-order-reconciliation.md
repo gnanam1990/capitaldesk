@@ -4,6 +4,12 @@
 **Requirements:** FR-014–FR-019  
 **Owns:** worker order reconciler and financial completion service
 
+> **Amended by ADR-0001, ADR-0002 and ADR-0004.** Releasing an unused reservation requires a
+> terminal venue status **and** reconciled accounting **and** COMPLETE coverage; any one alone
+> is insufficient. Implement `NOT_SENT_PROVEN` and `IRRECOVERABLE_UNCERTAINTY` as the
+> resolutions of an unresolved dispatch. An unknown venue status quarantines rather than
+> being mapped.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

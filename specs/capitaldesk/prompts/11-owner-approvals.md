@@ -4,6 +4,11 @@
 **Requirements:** FR-009, FR-013, FR-014  
 **Owns:** approval API/service, immutable approval evidence
 
+> **Amended by ADR-0003, ADR-0006 and ADR-0008.** The approval binds an absolute
+> `submissionDeadlineAt` alongside its expiry. Implement the lifecycle actions with their
+> actor allowlists and their marked/unmarked plan effects. A late opposing intent invalidates
+> an unmarked plan and never a marked one.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

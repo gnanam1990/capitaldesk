@@ -1,0 +1,25 @@
+{
+  "name": "@capitaldesk/observability",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Structured, redacted logging and correlation. Layer 1.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty"
+  },
+  "dependencies": {
+    "pino": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

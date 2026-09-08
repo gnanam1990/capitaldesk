@@ -4,6 +4,13 @@
 **Requirements:** FR-007, FR-013–FR-015  
 **Owns:** executor dispatch lifecycle and transactional claim logic
 
+> **Amended by ADR-0001, ADR-0003 and ADR-0005.** Commit `SEND_ATTEMPTED` durably immediately
+> before the first network byte, on a send path where that write is strictly ordered before
+> the socket write. Verify the worst-case venue acceptance cutoff against
+> `submissionDeadlineAt` before freezing the envelope. Under `SYNCHRONOUS_REPLICA`, refuse to
+> mark until the authorization record set is durable outside the threatened failure domain,
+> and append the authorization evidence bundle first.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

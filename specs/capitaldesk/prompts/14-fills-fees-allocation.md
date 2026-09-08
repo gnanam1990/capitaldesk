@@ -4,6 +4,13 @@
 **Requirements:** FR-004, FR-012, FR-016, FR-017, FR-022  
 **Owns:** packages/ledger fill reducer and allocation projection
 
+> **Amended by [ADR-0010](../../../docs/adr/0010-fee-policy-capability.md).** Implement only
+> `STANDARD_NO_BNB_V1` initially; BNB routing stays disabled until its documented
+> insufficiency fallback is bounded. The T-055 exhaustive oracle covers a 5x2 matrix and
+> supports the rounding method — it does not prove the general solver, which still owes
+> pseudocode, a worked cost/commission graph, a lower-bounded circulation reduction and a
+> deterministic traversal order.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

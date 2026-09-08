@@ -2,7 +2,14 @@
 
 **Dependencies:** Prompt 00  
 **Requirements:** FR-021, FR-024  
-**Owns:** workspace manifests, apps skeletons, packages/contracts, build/config tooling
+**Owns:** workspace manifests, apps skeletons, packages/contracts, packages/config, build/config tooling
+
+> **Amended by [ADR-0007](../../../docs/adr/0007-credential-classes.md).** Task 3's "secrets
+> mounted only into executor" is refined into three classes: `VENUE_READ` (worker),
+> `VENUE_TRADE` (executor), `OWNER_SESSION` (API). Configuration carries references, never
+> values, and a credential variable in the wrong role refuses startup. The dependency check
+> must resolve relative paths and compiled-output paths to their owning package, not only
+> package specifiers.
 
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 

@@ -1,0 +1,27 @@
+{
+  "name": "@capitaldesk/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Frozen wire schemas, money types, identities, state machines, reason codes and canonical digests. Layer 0: depends on nothing inside CapitalDesk.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./fixtures/*": "./fixtures/*"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "fixtures"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

@@ -4,6 +4,15 @@
 **Requirements:** FR-020, FR-024  
 **Owns:** apps/web tokens, shell, auth boundary and shared components
 
+> **Amended by [ADR-0011](../../../docs/adr/0011-visual-direction.md).** Implement the
+> warm-mineral, deep-teal direction with Manrope and IBM Plex Mono, self-hosted. Verify
+> contrast **with inherited opacity applied**, not on the token values alone.
+>
+> **Dependency corrected.** This module's task text requires a typed SDK, which module 19
+> delivers, while its declared dependency list names only module 17. The shell is
+> fixture-and-health only until module 19 lands; SDK wiring is explicitly deferred rather
+> than assumed available.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt

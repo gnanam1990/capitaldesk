@@ -1,0 +1,40 @@
+{
+  "name": "capitaldesk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Owner-approved shared-account execution coordinator with attributable strategy claims and recoverable order evidence.",
+  "engines": {
+    "node": ">=22.20.0 <25",
+    "pnpm": ">=11.0.0"
+  },
+  "packageManager": "pnpm@11.10.0",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r --filter=./packages/* run build && pnpm -r --filter=./apps/* run build",
+    "typecheck": "tsc -b && pnpm --filter @capitaldesk/web run typecheck",
+    "lint": "tsc -b && eslint .",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "check:layering": "tsx tools/check-layering.ts",
+    "check:secrets": "tsx tools/check-secret-boundary.ts",
+    "test:unit": "vitest run --project unit",
+    "test:property": "vitest run --project property",
+    "test": "vitest run",
+    "db:migrate": "tsx --env-file-if-exists=.env packages/db/src/cli.ts migrate",
+    "db:status": "tsx --env-file-if-exists=.env packages/db/src/cli.ts status",
+    "verify": "pnpm run format:check && pnpm run typecheck && pnpm run lint && pnpm run check:layering && pnpm run check:secrets && pnpm run test:unit && pnpm run test:property && pnpm run build",
+    "test:integration": "vitest run --project integration"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "catalog:",
+    "fast-check": "catalog:",
+    "prettier": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
+  }
+}

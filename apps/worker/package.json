@@ -1,0 +1,21 @@
+{
+  "name": "@capitaldesk/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ingest, reconciliation and durable jobs. Holds the VENUE_READ credential reference only.",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@capitaldesk/config": "workspace:*",
+    "@capitaldesk/contracts": "workspace:*",
+    "@capitaldesk/observability": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

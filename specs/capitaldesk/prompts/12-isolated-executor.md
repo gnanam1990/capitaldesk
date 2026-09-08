@@ -4,6 +4,12 @@
 **Requirements:** FR-001, FR-003, FR-013, FR-021  
 **Owns:** apps/executor isolation, packages/binance write adapter
 
+> **Amended by ADR-0001, ADR-0003 and ADR-0007.** The executor signs **inside** the marker
+> transaction and the sending path holds no key material and no signing function, so an old
+> marker cannot be re-signed. It transmits through a local egress proxy that records
+> `TOKEN_CONSUMED` before forwarding, which is what makes sender fencing — and therefore
+> `NOT_SENT_PROVEN` — provable. It holds `VENUE_TRADE` and nothing else.
+
 Read [SESSION-HEADER.md](SESSION-HEADER.md) and the relevant [technical design](../TDD.md), [requirements](../PRD.md) and [test plan](../TEST-PLAN.md) before executing this prompt.
 
 ## Copy-paste prompt
